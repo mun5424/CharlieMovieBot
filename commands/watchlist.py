@@ -66,7 +66,7 @@ def setup(bot):
         
         entry["watchlist"].append(mov)
         save_data(data)
-        await interaction.followup.send(f"✅ Added **{mov['title']} ({mov['year']})** to your watchlist.")
+        await interaction.followup.send(f"✅{interaction.user.display_name} Added **{mov['title']} ({mov['year']})** to their watchlist.")
 
     @bot.tree.command(name="watchlist", description="View your watchlist")
     async def watchlist_cmd(interaction: discord.Interaction):
@@ -78,7 +78,6 @@ def setup(bot):
         
         embed = discord.Embed(
             title=f"🎬 {interaction.user.display_name}'s Watchlist",
-            description=f"Total movies: {len(movies)}",
             color=0x3498db
         )
         
@@ -153,7 +152,7 @@ def setup(bot):
             entry["watchlist"].remove(mov)
         
         save_data(data)
-        await interaction.followup.send(f"🎉 Marked **{mov['title']} ({mov['year']})** as watched!")
+        await interaction.followup.send(f"🎉{interaction.user.display_name} Marked **{mov['title']} ({mov['year']})** as watched!")
 
     @bot.tree.command(name="unwatch", description="Remove a movie from watched list")
     @app_commands.describe(title="Select a movie from your watched list")
