@@ -24,17 +24,22 @@ async def on_ready():
     print(f"✅ Logged in as {bot.user} (ID: {bot.user.id})")
     
     try:
-        guild = discord.Object(id=1217734088593510422)
-        
-        # Method 1: Clear guild commands first, then add new ones
-        bot.tree.clear_commands(guild=guild)
-        await bot.tree.sync(guild=guild)  # Sync the clear
-        print("Cleared guild commands")
-        
-        # Add commands to guild and sync
-        bot.tree.copy_global_to(guild=guild)
-        synced = await bot.tree.sync(guild=guild)
-        print(f"Guild synced {len(synced)} command(s): {[cmd.name for cmd in synced]}")
+         # List of guild IDs you want to sync to
+        guild_ids = [
+            1217734088593510422,  # Your first server
+            232670496137674763   # Your second server (replace with actual ID)
+        ]
+
+        for guild_id in guild_ids: 
+            guild = discord.Object(id=guild_id)
+            bot.tree.clear_commands(guild=guild)
+            await bot.tree.sync(guild=guild)  # Sync the clear
+            print("Cleared guild commands")
+            
+            # Add commands to guild and sync
+            bot.tree.copy_global_to(guild=guild)
+            synced = await bot.tree.sync(guild=guild)
+            print(f"Guild synced {len(synced)} command(s): {[cmd.name for cmd in synced]}")
         
     except Exception as e:
         print(f"Failed to sync: {e}")
