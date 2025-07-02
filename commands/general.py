@@ -1,96 +1,90 @@
-# commands/general.py - Updated with better error handling
 import discord
 from discord.ext import commands
 from discord import app_commands
-from tmdb_client import search_movie, get_movie_details
+from tmdb_client import search_movie, get_movie_details, search_movies_autocomplete
 
 def setup(bot):
+    print("🔍 Setting up general commands...")
+    
+    # Autocomplete function for movie search
+    async def movie_search_autocomplete(interaction: discord.Interaction, current: str):
+        """Autocomplete function for movie titles"""
+        if len(current) < 2:
+            return []
+        
+        try:
+            movies = await search_movies_autocomplete(current, limit=25)
+            return [
+                app_commands.Choice(name=movie["name"], value=movie["value"])
+                for movie in movies
+            ]
+        except Exception as e:
+            print(f"Autocomplete error: {e}")
+            return []
+
+    # ALL COMMANDS MUST BE INSIDE setup(bot) FUNCTION
     @bot.tree.command(name="search", description="Search for a movie")
-    @app_commands.describe(title="The movie title to search for")
+    @app_commands.describe(title="Start typing a movie title to see suggestions")
+    @app_commands.autocomplete(title=movie_search_autocomplete)
     async def search_cmd(interaction: discord.Interaction, title: str):
         await interaction.response.defer()
-        
+
         movie = search_movie(title)
         if movie:
+            # Get detailed info for genres, runtime, etc.
+            detailed_movie = movie
+            if movie.get('id'):
+                detailed_info = get_movie_details(movie['id'])
+                if detailed_info:
+                    detailed_movie = detailed_info
+            
+            # Format the release date nicely
+            release_date = "Unknown"
+            if detailed_movie.get('year') and detailed_movie['year'] != 'Unknown':
+                # You could expand this to get full date from API
+                release_date = f"{detailed_movie['year']}"
+            
+            # Format runtime
+            runtime_text = "Unknown"
+            if detailed_movie.get('runtime') and detailed_movie['runtime'] > 0:
+                hours = detailed_movie['runtime'] // 60
+                minutes = detailed_movie['runtime'] % 60
+                if hours > 0:
+                    runtime_text = f"{hours}h {minutes}m" if minutes > 0 else f"{hours}h"
+                else:
+                    runtime_text = f"{minutes}m"
+            
+            # Format rating with star
+            rating_text = "N/A"
+            if detailed_movie.get('vote_average') and detailed_movie['vote_average'] > 0:
+                rating = detailed_movie['vote_average']
+                rating_text = f"⭐ {rating:.1f}/10"
+            
+            # Create embed with green line
             embed = discord.Embed(
-                title=f"🔎 {movie.get('title', 'Unknown Title')}",
-                color=0x2ecc71
+                title=detailed_movie.get('title', 'Unknown Title'),
+                description=detailed_movie.get('overview', 'No description available.'),
+                color=0x2ecc71  # Green color for the left line
             )
             
-            # Add year if available
-            if movie.get('year') and movie['year'] != 'Unknown':
-                embed.title += f" ({movie['year']})"
+            # Use three inline fields to create left, center, right alignment
+            genre_text = detailed_movie.get('genre', 'Unknown')
             
-            # Add overview if available
-            overview = movie.get('overview', '')
-            if overview and overview != 'No description available':
-                if len(overview) > 300:
-                    overview = overview[:300] + "..."
-                embed.add_field(name="📖 Overview", value=overview, inline=False)
+            embed.add_field(name="**Genre**", value=genre_text, inline=True)
+            embed.add_field(name="**Runtime**", value=runtime_text, inline=True)
+            embed.add_field(name="**Release**", value=release_date, inline=True)
             
-            # Add rating if available
-            rating = movie.get('rating', 0)
-            if rating and rating > 0:
-                embed.add_field(name="⭐ Rating", value=f"{rating}/10", inline=True)
+            # Add rating on its own line
+            embed.add_field(name="**Rating**", value=rating_text, inline=False)
             
-            # Add poster if available
-            poster_path = movie.get('poster_path')
+            # Add the large poster
+            poster_path = detailed_movie.get('poster_path')
             if poster_path:
-                embed.set_thumbnail(url=f"https://image.tmdb.org/t/p/w300{poster_path}")
+                embed.set_image(url=f"https://image.tmdb.org/t/p/original{poster_path}")
+            
+            # Add TMDB disclaimer at the bottom, You dont need this if youre using a private discord
+            # embed.set_footer(text="This product uses the TMDB API but is not endorsed or certified by TMDB.")
             
             await interaction.followup.send(embed=embed)
         else:
             await interaction.followup.send("❌ Movie not found. Try a different search term.")
-
-    @bot.tree.command(name="info", description="Get detailed information about a movie")
-    @app_commands.describe(title="The movie title to get info for")
-    async def info_cmd(interaction: discord.Interaction, title: str):
-        await interaction.response.defer()
-        
-        # First search for the movie
-        movie = search_movie(title)
-        if not movie:
-            return await interaction.followup.send("❌ Movie not found.")
-        
-        # Get detailed info if we have an ID
-        if movie.get('id'):
-            detailed_movie = get_movie_details(movie['id'])
-            if detailed_movie:
-                movie = detailed_movie
-        
-        embed = discord.Embed(
-            title=f"🎬 {movie.get('title', 'Unknown Title')}",
-            color=0x9b59b6
-        )
-        
-        # Add year
-        if movie.get('year') and movie['year'] != 'Unknown':
-            embed.title += f" ({movie['year']})"
-        
-        # Add overview
-        overview = movie.get('overview', '')
-        if overview and overview != 'No description available':
-            if len(overview) > 500:
-                overview = overview[:500] + "..."
-            embed.add_field(name="📖 Overview", value=overview, inline=False)
-        
-        # Add details in a more compact format
-        details = []
-        if movie.get('rating') and movie['rating'] > 0:
-            details.append(f"⭐ **Rating:** {movie['rating']}/10")
-        if movie.get('director') and movie['director'] != 'Unknown':
-            details.append(f"🎬 **Director:** {movie['director']}")
-        if movie.get('genre') and movie['genre'] != 'Unknown':
-            details.append(f"🎭 **Genre:** {movie['genre']}")
-        if movie.get('runtime') and movie['runtime'] > 0:
-            details.append(f"⏱️ **Runtime:** {movie['runtime']} minutes")
-        
-        if details:
-            embed.add_field(name="Details", value="\n".join(details), inline=False)
-        
-        # Add poster
-        poster_path = movie.get('poster_path')
-        if poster_path:
-            embed.set_thumbnail(url=f"https://image.tmdb.org/t/p/w300{poster_path}")
-        
-        await interaction.followup.send(embed=embed)
