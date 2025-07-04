@@ -2,47 +2,77 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 import config
+import logging
 
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Bot setup
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", help_command=None, intents=intents)
 
 # Load commands BEFORE on_ready()
-try:
-    from commands import general, watchlist
-    general.setup(bot)
-    watchlist.setup(bot)
-    print("✅ Commands loaded successfully")
-    print(f"Registered commands: {[cmd.name for cmd in bot.tree.get_commands()]}")
-except Exception as e:
-    print(f"❌ Error loading commands: {e}")
-    import traceback
-    traceback.print_exc()
+def load_commands():
+    """Load all command modules"""
+    try:
+        from commands import general, watchlist
+        general.setup(bot)
+        watchlist.setup(bot)
+        logger.info("✅ Commands loaded successfully")
+        logger.info(f"Registered commands: {[cmd.name for cmd in bot.tree.get_commands()]}")
+        return True
+    except Exception as e:
+        logger.error(f"❌ Error loading commands: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
 
 @bot.event
 async def on_ready():
-    print(f"✅ Logged in as {bot.user} (ID: {bot.user.id})")
+    """Bot ready event"""
+    logger.info(f"✅ Logged in as {bot.user} (ID: {bot.user.id})")
+    
+    # Sync commands based on config
+    await sync_commands()
+
+async def sync_commands():
+    """Sync slash commands to Discord"""
+    try:
+        if hasattr(config, 'GUILD_IDS') and config.GUILD_IDS:
+            # Guild-specific sync (faster for testing)
+            for guild_id in config.GUILD_IDS:
+                guild = discord.Object(id=guild_id)
+                bot.tree.clear_commands(guild=guild)
+                await bot.tree.sync(guild=guild)
+                logger.info(f"Cleared commands for guild {guild_id}")
+                
+                bot.tree.copy_global_to(guild=guild)
+                synced = await bot.tree.sync(guild=guild)
+                logger.info(f"Guild {guild_id} synced {len(synced)} command(s): {[cmd.name for cmd in synced]}")
+        else:
+            # Global sync (takes up to 1 hour to update)
+            synced = await bot.tree.sync()
+            logger.info(f"Globally synced {len(synced)} command(s): {[cmd.name for cmd in synced]}")
+            
+    except Exception as e:
+        logger.error(f"Failed to sync commands: {e}")
+
+def main():
+    """Main entry point"""
+    if not load_commands():
+        logger.error("Failed to load commands. Exiting.")
+        return
+    
+    if not hasattr(config, 'DISCORD_TOKEN') or not config.DISCORD_TOKEN:
+        logger.error("DISCORD_TOKEN not found in config!")
+        return
     
     try:
-         # List of guild IDs you want to sync to
-        guild_ids = [
-            1217734088593510422,  # Your first server
-            232670496137674763   # Your second server (replace with actual ID)
-        ]
-
-        for guild_id in guild_ids: 
-            guild = discord.Object(id=guild_id)
-            bot.tree.clear_commands(guild=guild)
-            await bot.tree.sync(guild=guild)  # Sync the clear
-            print("Cleared guild commands")
-            
-            # Add commands to guild and sync
-            bot.tree.copy_global_to(guild=guild)
-            synced = await bot.tree.sync(guild=guild)
-            print(f"Guild synced {len(synced)} command(s): {[cmd.name for cmd in synced]}")
-        
+        bot.run(config.DISCORD_TOKEN)
     except Exception as e:
-        print(f"Failed to sync: {e}")
+        logger.error(f"Failed to start bot: {e}")
 
 if __name__ == "__main__":
-    bot.run(config.DISCORD_TOKEN)
+    main()
