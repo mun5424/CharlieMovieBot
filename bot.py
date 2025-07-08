@@ -57,20 +57,20 @@ async def sync_commands():
     except Exception as e:
         logger.error(f"Failed to sync commands: {e}")
 
-#####  Add a manual sync command for testing
-# @bot.tree.command(name="sync", description="Manually sync commands (dev only)")
-# async def sync_cmd(interaction: discord.Interaction):
-#     try:
-#         if hasattr(config, 'GUILD_IDS') and config.GUILD_IDS:
-#             # Guild sync
-#             synced = await bot.tree.sync(guild=interaction.guild)
-#             await interaction.response.send_message(f"✅ Synced {len(synced)} commands to this guild!", ephemeral=True)
-#         else:
-#             # Global sync
-#             synced = await bot.tree.sync()
-#             await interaction.response.send_message(f"✅ Synced {len(synced)} commands globally!", ephemeral=True)
-#     except Exception as e:
-#         await interaction.response.send_message(f"❌ Sync failed: {e}", ephemeral=True)
+# Add a manual sync command for testing
+@bot.tree.command(name="sync", description="Manually sync commands (dev only)")
+async def sync_cmd(interaction: discord.Interaction):
+    try:
+        if hasattr(config, 'GUILD_IDS') and config.GUILD_IDS:
+            # Guild sync
+            synced = await bot.tree.sync(guild=interaction.guild)
+            await interaction.response.send_message(f"✅ Synced {len(synced)} commands to this guild!", ephemeral=True)
+        else:
+            # Global sync
+            synced = await bot.tree.sync()
+            await interaction.response.send_message(f"✅ Synced {len(synced)} commands globally!", ephemeral=True)
+    except Exception as e:
+        await interaction.response.send_message(f"❌ Sync failed: {e}", ephemeral=True)
 
 def main():
     """Main entry point"""
