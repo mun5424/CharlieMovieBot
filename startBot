@@ -1,0 +1,85 @@
+#!/bin/bash
+
+# Simple Discord Bot Systemd Service Setup
+# Run this script from your bot directory
+
+BOT_NAME="charlie-movie-bot"
+BOT_USER="$USER"
+BOT_DIR="$(pwd)"
+BOT_SCRIPT="bot.py"
+PYTHON_PATH="/usr/bin/python3"
+
+# Check if we're in the right directory
+if [ ! -f "$BOT_SCRIPT" ]; then
+    echo "Error: $BOT_SCRIPT not found in current directory"
+    echo "Please run this script from your bot's directory"
+    exit 1
+fi
+
+if [ ! -f "config.py" ]; then
+    echo "Error: config.py not found in current directory"
+    echo "Please run this script from your bot's directory"
+    exit 1
+fi
+
+echo "Setting up Discord bot service..."
+echo "Bot directory: $BOT_DIR"
+echo "Bot script: $BOT_SCRIPT"
+echo "Running as user: $BOT_USER"
+
+# Create the systemd service file
+sudo tee /etc/systemd/system/$BOT_NAME.service > /dev/null <<EOF
+[Unit]
+Description=Discord Bot Service
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=$BOT_USER
+Group=$BOT_USER
+WorkingDirectory=$BOT_DIR
+ExecStart=$PYTHON_PATH $BOT_SCRIPT
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=$BOT_NAME
+
+# Ensure the bot can write to data files
+ReadWritePaths=$BOT_DIR
+
+# Resource limits (prevents bot from using too much memory/CPU)
+MemoryMax=512M
+CPUQuota=50%
+
+# Environment variables for better logging
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONPATH=$BOT_DIR
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+echo "Service file created at /etc/systemd/system/$BOT_NAME.service"
+
+# Reload systemd and enable the service
+sudo systemctl daemon-reload
+sudo systemctl enable $BOT_NAME.service
+
+echo "✅ Service setup complete!"
+echo ""
+echo "Commands to manage your bot:"
+echo "  Start:   sudo systemctl start $BOT_NAME"
+echo "  Stop:    sudo systemctl stop $BOT_NAME"
+echo "  Restart: sudo systemctl restart $BOT_NAME"
+echo "  Status:  sudo systemctl status $BOT_NAME"
+echo "  Logs:    sudo journalctl -u $BOT_NAME -f"
+echo ""
+echo "Your bot will now:"
+echo "  • Start automatically when the VM boots"
+echo "  • Restart automatically if it crashes"
+echo "  • Log all output to systemd journal"
+echo ""
+echo "To start your bot now, run:"
+echo "  sudo systemctl start $BOT_NAME"
