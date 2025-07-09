@@ -54,10 +54,15 @@ bot_instance = None  # to be assigned in setup_reminder()
 
 def get_day_and_today():
         # FOR TESTING - Manually set date (comment out for production)
-    test_date = datetime.datetime(2025, 7, 10, 14, 0, 0, tzinfo=PACIFIC_TZ)   # Thursday July 10, 2025
-    day = test_date.weekday()
-    today = test_date.date()
+    # test_date = datetime.datetime(2025, 7, 10, 14, 0, 0, tzinfo=PACIFIC_TZ)   # Thursday July 10, 2025
+    # day = test_date.weekday()
+    # today = test_date.date()
+
+    # for prod
+    day = datetime.datetime.now(PACIFIC_TZ).weekday()
+    today = datetime.datetime.now(PACIFIC_TZ).date()
     return day, today
+
 
 
 async def find_todays_tournament(tournament_name):
