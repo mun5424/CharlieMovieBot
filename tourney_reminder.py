@@ -7,8 +7,26 @@ from discord.ext import tasks
 import config
 
 PACIFIC_TZ = pytz.timezone("America/Los_Angeles")
+UTC_TZ = pytz.timezone("UTC")
 STARTGG_API_URL = "https://api.start.gg/gql/alpha"
 logger = logging.getLogger(__name__)
+
+# Calculate what time 2 PM Pacific is in UTC
+def get_utc_time_for_pacific_2pm():
+    """Get the UTC time that corresponds to 2 PM Pacific"""
+    # Create a Pacific time for 2 PM today
+    pacific_now = datetime.datetime.now(PACIFIC_TZ)
+
+    # update this to 2pm
+    pacific_2pm = pacific_now.replace(hour=15, minute=30, second=0, microsecond=0)
+    
+    # Convert to UTC
+    utc_2pm = pacific_2pm.astimezone(UTC_TZ)
+    
+    return utc_2pm.time()
+
+# This will calculate the correct UTC time automatically
+UTC_TIME_FOR_2PM_PACIFIC = get_utc_time_for_pacific_2pm()
 
 # Tournament schedule by day of week
 # Monday=0, Tuesday=1, Wednesday=2, Thursday=3, Friday=4, Saturday=5, Sunday=6
@@ -213,7 +231,7 @@ async def find_todays_tournament(tournament_name):
     return None, None
 
 
-@tasks.loop(time=datetime.time(hour=14, tzinfo=PACIFIC_TZ))
+@tasks.loop(time=UTC_TIME_FOR_2PM_PACIFIC)
 async def check_todays_tournament(use_current_date=True):
     if bot_instance is None:
         logger.warning("Bot instance is not set. Cannot send tournament reminder.")
