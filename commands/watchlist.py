@@ -1,4 +1,5 @@
 # commands/watchlist.py - Updated with movie suggestions
+from typing import Optional
 import discord
 from discord.ext import commands
 from discord import app_commands
@@ -121,8 +122,8 @@ def setup(bot):
         await interaction.response.defer()
         
         # disable for testing 
-        if user.id == interaction.user.id:
-            return await interaction.followup.send("❌ You can't suggest movies to yourself! Use `/add` instead.")
+        # if user.id == interaction.user.id:
+        #     return await interaction.followup.send("❌ You can't suggest movies to yourself! Use `/add` instead.")
         
         target_uid = str(user.id)
         target_entry, data = get_user_entry(target_uid)
@@ -242,7 +243,7 @@ def setup(bot):
         save_data(data)
         
         from_user = suggestion_to_remove["from_user"]
-        await interaction.followup.send(f"✅ Approved **{mov['title']} ({mov['year']})** from {from_user} and added to your watchlist!")
+        await interaction.followup.send(f"✅ {interaction.user.display_name} approved **{mov['title']} ({mov['year']})** from {from_user} and added it to their watchlist!")
 
     @bot.tree.command(name="decline", description="Decline a pending movie suggestion")
     @app_commands.describe(title="Select a movie from your pending suggestions")
@@ -272,7 +273,7 @@ def setup(bot):
         save_data(data)
         
         from_user = suggestion_to_remove["from_user"]
-        await interaction.followup.send(f"❌ Declined **{mov['title']} ({mov['year']})** from {from_user}.")
+        await interaction.followup.send(f"❌ {interaction.user.display_name} Declined **{mov['title']} ({mov['year']})** from {from_user}!")
 
     # View class for handling suggestion buttons
     class SuggestionView(discord.ui.View):
@@ -349,6 +350,7 @@ def setup(bot):
             # Get user data and add to watchlist
             entry, data = get_user_entry(self.user_id)
             movie = current['movie']
+            from_user = current['from_user']
             
             # Remove from pending and add to watchlist
             entry['pending'].remove(current)
@@ -372,6 +374,7 @@ def setup(bot):
                     item.disabled = True
                     
             await interaction.response.edit_message(embed=embed, view=self)
+            await interaction.followup.send(f"✅ {interaction.user.display_name} accepted **{movie['title']} ({movie['year']})** suggested by {from_user} and added it to their watchlist!")
             
         @discord.ui.button(label='❌ Decline', style=discord.ButtonStyle.red)
         async def decline_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -386,6 +389,8 @@ def setup(bot):
             entry, data = get_user_entry(self.user_id)
             entry['pending'].remove(current)
             save_data(data)
+            movie = current['movie']
+            from_user = current['from_user']
             
             # Remove from local suggestions list
             self.suggestions.remove(current)
@@ -404,6 +409,7 @@ def setup(bot):
                     item.disabled = True
                     
             await interaction.response.edit_message(embed=embed, view=self)
+            await interaction.followup.send(f"❌ {interaction.user.display_name} declined **{movie['title']} ({movie['year']})** suggested by {from_user}!")
             
         @discord.ui.button(label='⬅️ Previous', style=discord.ButtonStyle.grey)
         async def previous_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -429,36 +435,34 @@ def setup(bot):
             embed = self.create_embed()
             await interaction.response.edit_message(embed=embed, view=self)
 
-    @bot.tree.command(name="watchlist", description="View your watchlist")
-    async def watchlist_cmd(interaction: discord.Interaction):
-        entry, _ = get_user_entry(str(interaction.user.id))
+    @bot.tree.command(name="watchlist", description="View a user's watchlist")
+    @app_commands.describe(user="Whose watchlist do you want to view?")
+    async def watchlist_cmd(interaction: discord.Interaction, user: Optional[discord.User] = None):
+        # Use the provided user, or fallback to the command invoker
+        target_user = user or interaction.user
+        is_self = target_user.id == interaction.user.id
+
+        entry, _ = get_user_entry(str(target_user.id))
         movies = entry["watchlist"]
         pending_suggestions = entry["pending"]
-        
+
         if not movies:
-            # Send main response
-            await interaction.response.send_message("📭 Your watchlist is empty.")
-        else:
-            embed = discord.Embed(
-                title=f"🎬 {interaction.user.display_name}'s Watchlist",
-                color=0x3498db
-            )
-            
-            movie_list = []
-            for i, movie in enumerate(movies, 1):
-                movie_list.append(f"{i}. {movie['title']} ({movie['year']})")
-            
-            embed.add_field(
-                name="\u200b",
-                value="\n".join(movie_list),
-                inline=False
-            )
-            
-            # Send main response
-            await interaction.response.send_message(embed=embed)
-        
-        # Send interactive hidden message about pending suggestions if they exist
-        if pending_suggestions:
+            message = "📭 Your watchlist is empty." if is_self else f"📭 {target_user.display_name}'s watchlist is empty."
+            await interaction.response.send_message(message)
+            return
+
+        embed = discord.Embed(
+            title=f"🎬 {target_user.display_name}'s Watchlist",
+            color=0x3498db
+        )
+
+        movie_list = [f"{i}. {movie['title']} ({movie['year']})" for i, movie in enumerate(movies, 1)]
+        embed.add_field(name="\u200b", value="\n".join(movie_list), inline=False)
+
+        await interaction.response.send_message(embed=embed)
+
+        # Only show pending suggestions if user is viewing their own watchlist
+        if is_self and pending_suggestions:
             view = SuggestionView(str(interaction.user.id), pending_suggestions.copy())
             view.update_buttons()
             embed = view.create_embed()

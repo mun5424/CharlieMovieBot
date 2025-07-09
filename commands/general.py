@@ -1,7 +1,11 @@
 import discord
+import logging
 from discord.ext import commands
 from discord import app_commands
 from tmdb_client import search_movie, get_movie_details, search_movies_autocomplete
+
+
+logger = logging.getLogger(__name__)
 
 def setup(bot):
     print("🔍 Setting up general commands...")
@@ -88,3 +92,36 @@ def setup(bot):
             await interaction.followup.send(embed=embed)
         else:
             await interaction.followup.send("❌ Movie not found. Try a different search term.")
+
+            
+    @bot.tree.command(name="reminder_tournament", description="Run the daily tournament reminder check manually")
+    async def reminder_tournament(interaction: discord.Interaction):
+        try:
+            from tourney_reminder import check_todays_tournament
+
+            await check_todays_tournament(use_current_date=False)
+            
+        except ImportError as e:
+            error_msg = f"❌ Import error: {e}"
+            print(error_msg)
+            await interaction.followup.send(error_msg, ephemeral=True)
+            
+        except discord.errors.NotFound as e:
+            error_msg = f"❌ Discord error (channel not found?): {e}"
+            print(error_msg)
+            await interaction.followup.send(error_msg, ephemeral=True)
+            
+        except discord.errors.Forbidden as e:
+            error_msg = f"❌ Discord permission error: {e}"
+            print(error_msg)
+            await interaction.followup.send(error_msg, ephemeral=True)
+            
+        except Exception as e:
+            error_msg = f"❌ Unexpected error: {str(e)}"
+            print(f"Error in /reminder_tournament: {e}")
+            logger.error(f"Discord command error: {e}")
+            try:
+                await interaction.followup.send(error_msg, ephemeral=True)
+            except:
+                # If followup fails, the interaction might be dead
+                print("Failed to send error message to Discord")

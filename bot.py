@@ -29,20 +29,13 @@ def load_commands():
         traceback.print_exc()
         return False
 
-@bot.event
-async def on_ready():
-    """Bot ready event"""
-    logger.info(f"✅ Logged in as {bot.user} (ID: {bot.user.id})")
-    
-    # Sync commands based on config
-    await sync_commands()
 
 async def sync_commands():
     """Sync slash commands to Discord"""
     try:
-        if hasattr(config, 'GUILD_IDS') and config.GUILD_IDS:
+        if hasattr(config, 'GUILD_IDS_TEST') and config.GUILD_IDS_TEST:
             # Guild-specific sync (faster for testing)
-            for guild_id in config.GUILD_IDS:
+            for guild_id in config.GUILD_IDS_TEST:
                 guild = discord.Object(id=guild_id)
                 
                 # Copy global commands to guild and sync
@@ -57,20 +50,23 @@ async def sync_commands():
     except Exception as e:
         logger.error(f"Failed to sync commands: {e}")
 
-# Add a manual sync command for testing
-@bot.tree.command(name="sync", description="Manually sync commands (dev only)")
-async def sync_cmd(interaction: discord.Interaction):
+
+@bot.event
+async def on_ready():
+    """Bot ready event"""
+    logger.info(f"✅ Logged in as {bot.user} (ID: {bot.user.id})")
+    
+    # Sync commands based on config
+    await sync_commands()
+
+    # Load daily tournament reminder
     try:
-        if hasattr(config, 'GUILD_IDS') and config.GUILD_IDS:
-            # Guild sync
-            synced = await bot.tree.sync(guild=interaction.guild)
-            await interaction.response.send_message(f"✅ Synced {len(synced)} commands to this guild!", ephemeral=True)
-        else:
-            # Global sync
-            synced = await bot.tree.sync()
-            await interaction.response.send_message(f"✅ Synced {len(synced)} commands globally!", ephemeral=True)
+        import tourney_reminder
+        tourney_reminder.setup_reminder(bot)
+        logger.info("✅ Tournament reminder loaded")
     except Exception as e:
-        await interaction.response.send_message(f"❌ Sync failed: {e}", ephemeral=True)
+        logger.error(f"❌ Failed to load tournament reminder: {e}")
+
 
 def main():
     """Main entry point"""
