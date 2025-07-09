@@ -39,6 +39,14 @@ TOURNAMENT_DESCRIPTION = {
 - All matches will be best 3 out of 5 games (FT3)
 - Bracket is for PC/PS5/Switch 2
 - Open to all players in the North America region (Canada, US, Mexico, DR, PR)
+    """,
+    3: """
+- Starts on **THURSDAY at 5PM PACIFIC TIME**
+- Ladder: 5-7 PM PST
+- Main Bracket: 7:05 PM PST
+- All matches will be best 3 out of 5 games (FT3)
+- Separate ladder/bracket for West Coast and East Coast
+- Top 8 players from each ladder will advance to the same main bracket
     """
 }
 
@@ -46,10 +54,7 @@ bot_instance = None  # to be assigned in setup_reminder()
 
 def get_day_and_today():
         # FOR TESTING - Manually set date (comment out for production)
-    # test_date = datetime.datetime(2025, 7, 7, 14, 0, 0, tzinfo=PACIFIC_TZ)   # Monday July 7, 2025
-    test_date = datetime.datetime(2025, 7, 9, 14, 0, 0, tzinfo=PACIFIC_TZ)   # Tuesday July 8, 2025
-    # test_date = datetime.datetime(2025, 7, 9, 14, 0, 0, tzinfo=PACIFIC_TZ)   # Wednesday July 9, 2025
-    # test_date = datetime.datetime(2025, 7, 10, 14, 0, 0, tzinfo=PACIFIC_TZ)  # Thursday July 10, 2025
+    test_date = datetime.datetime(2025, 7, 10, 14, 0, 0, tzinfo=PACIFIC_TZ)   # Thursday July 10, 2025
     day = test_date.weekday()
     today = test_date.date()
     return day, today
@@ -310,7 +315,13 @@ async def check_todays_tournament(use_current_date=True):
 
                             embed.set_footer(text="Click the title or use the link to register!")
                             
-                            await channel.send(embed=embed)
+                            role_id = config.TOURNEY_CHANNEL_ROLES.get(channel_id)
+                            if role_id:
+                                role_mention = f"<@&{role_id}>"
+                            else:
+                                role_mention = ""  # No role to ping for this channel
+
+                            await channel.send(content=role_mention, embed=embed)
                             logger.info(f"Tournament reminder sent successfully to channel {channel_id}")
                             
                         except Exception as e:
