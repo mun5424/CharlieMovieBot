@@ -18,7 +18,7 @@ def get_utc_time_for_pacific_2pm():
     pacific_now = datetime.datetime.now(PACIFIC_TZ)
 
     # update this to 2pm
-    pacific_2pm = pacific_now.replace(hour=15, minute=30, second=0, microsecond=0)
+    pacific_2pm = pacific_now.replace(hour=14, minute=0, second=0, microsecond=0)
     
     # Convert to UTC
     utc_2pm = pacific_2pm.astimezone(UTC_TZ)
