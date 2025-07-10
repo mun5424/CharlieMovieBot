@@ -96,11 +96,16 @@ def setup(bot):
             
     @bot.tree.command(name="reminder_tournament", description="Run the daily tournament reminder check manually")
     async def reminder_tournament(interaction: discord.Interaction):
+
+        await interaction.response.defer(ephemeral=True)  # Acknowledge immediately
+
         try:
             from tourney_reminder import check_todays_tournament
 
-            await check_todays_tournament(use_current_date=False)
-            
+            await check_todays_tournament(manual=True)
+
+            await interaction.followup.send("✅ Manual tournament reminder check completed.", ephemeral=True)
+
         except ImportError as e:
             error_msg = f"❌ Import error: {e}"
             print(error_msg)

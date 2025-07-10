@@ -232,18 +232,12 @@ async def find_todays_tournament(tournament_name):
 
 
 @tasks.loop(time=UTC_TIME_FOR_2PM_PACIFIC)
-async def check_todays_tournament(use_current_date=True):
+async def check_todays_tournament(manual=False):
     if bot_instance is None:
         logger.warning("Bot instance is not set. Cannot send tournament reminder.")
         return
 
-    if use_current_date:
-        # Use current date when called from scheduler
-        day = datetime.datetime.now(PACIFIC_TZ).weekday()
-        today = datetime.datetime.now(PACIFIC_TZ).date()
-    else:
-        # Use test dates when called from discord command
-        day, today = get_day_and_today() 
+    day, today = get_day_and_today() 
 
     logger.info(f"Checking tournaments for day {day} ({today})")
     
@@ -339,7 +333,7 @@ async def check_todays_tournament(use_current_date=True):
                             embed.set_footer(text="Click the title or use the link to register!")
                             
                             role_id = config.TOURNEY_CHANNEL_ROLES.get(channel_id)
-                            if role_id:
+                            if role_id and not manual:
                                 role_mention = f"<@&{role_id}>"
                             else:
                                 role_mention = ""  # No role to ping for this channel
