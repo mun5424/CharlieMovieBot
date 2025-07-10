@@ -314,7 +314,7 @@ async def check_todays_tournament(manual=False):
                     if channel:
                         try:
                             embed = discord.Embed(
-                                title=f"🥊 Online Tournament of the Day - **{name}**",
+                                title=f"🥊 Tournament of the Day - **{name}**",
                                 description=f"Alright you gooners, **{name}** is happening TODAY! GO SIGN UP.",
                                 color=0xFF6B35,  # Orange color
                                 url=url
