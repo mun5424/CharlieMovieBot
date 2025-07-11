@@ -3,3 +3,4 @@ config.py
 __pycache__/
 user_watchlists.json
 clear_commands.py
+trivia_scores.json

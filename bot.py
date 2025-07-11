@@ -3,6 +3,7 @@ from discord.ext import commands
 from discord import app_commands
 import config
 import logging
+import asyncio
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -13,13 +14,16 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", help_command=None, intents=intents)
 
-# Load commands BEFORE on_ready()
-def load_commands():
+async def load_commands():
     """Load all command modules"""
     try:
         from commands import general, watchlist
+        from trivia.trivia import TriviaCog
+
         general.setup(bot)
         watchlist.setup(bot)
+        await bot.add_cog(TriviaCog(bot))
+
         logger.info("✅ Commands loaded successfully")
         logger.info(f"Registered commands: {[cmd.name for cmd in bot.tree.get_commands()]}")
         return True
@@ -68,20 +72,19 @@ async def on_ready():
         logger.error(f"❌ Failed to load tournament reminder: {e}")
 
 
-def main():
-    """Main entry point"""
-    if not load_commands():
+async def main():
+    if not await load_commands():
         logger.error("Failed to load commands. Exiting.")
         return
-    
+
     if not hasattr(config, 'DISCORD_TOKEN') or not config.DISCORD_TOKEN:
         logger.error("DISCORD_TOKEN not found in config!")
         return
-    
+
     try:
-        bot.run(config.DISCORD_TOKEN)
+        await bot.start(config.DISCORD_TOKEN)
     except Exception as e:
         logger.error(f"Failed to start bot: {e}")
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
