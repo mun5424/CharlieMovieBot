@@ -4,6 +4,7 @@ import aiohttp
 import logging
 import discord
 from discord.ext import tasks
+from custom_reminder import CUSTOM_REMINDERS
 import config
 
 PACIFIC_TZ = pytz.timezone("America/Los_Angeles")
@@ -12,13 +13,13 @@ STARTGG_API_URL = "https://api.start.gg/gql/alpha"
 logger = logging.getLogger(__name__)
 
 # Calculate what time 2 PM Pacific is in UTC
-def get_utc_time_for_pacific_2pm():
+def get_utc_time_for_pacific(hour=2,minute=0):
     """Get the UTC time that corresponds to 2 PM Pacific"""
     # Create a Pacific time for 2 PM today
     pacific_now = datetime.datetime.now(PACIFIC_TZ)
 
     # update this to 2pm
-    pacific_2pm = pacific_now.replace(hour=14, minute=0, second=0, microsecond=0)
+    pacific_2pm = pacific_now.replace(hour=hour, minute=minute, second=0, microsecond=0)
     
     # Convert to UTC
     utc_2pm = pacific_2pm.astimezone(UTC_TZ)
@@ -26,7 +27,9 @@ def get_utc_time_for_pacific_2pm():
     return utc_2pm.time()
 
 # This will calculate the correct UTC time automatically
-UTC_TIME_FOR_2PM_PACIFIC = get_utc_time_for_pacific_2pm()
+UTC_TIME_FOR_2PM_PACIFIC = get_utc_time_for_pacific()
+UTC_TIME_FOR_1PM_PACIFIC = get_utc_time_for_pacific(1)
+
 
 # Tournament schedule by day of week
 # Monday=0, Tuesday=1, Wednesday=2, Thursday=3, Friday=4, Saturday=5, Sunday=6
@@ -355,7 +358,57 @@ async def check_todays_tournament(manual=False):
         logger.error(f"Error processing tournament data: {e}")
 
 
+@tasks.loop(time=UTC_TIME_FOR_1PM_PACIFIC)
+async def check_custom_reminders():
+    if bot_instance is None:
+        logger.warning("Bot instance not set. Cannot run custom reminders.")
+        return
+
+    today = datetime.datetime.now(PACIFIC_TZ).date()
+    logger.info(f"[Custom Reminder] Running at 1 PM PT on {today}")
+
+    for reminder in CUSTOM_REMINDERS:
+        event_date = reminder["date"]
+        days_until = (event_date - today).days
+
+        # for testing
+        # days_until = 0
+
+        if days_until == 3 or days_until == 0:
+            logger.info(f"[Reminder] Sending for '{reminder['name']}' (in {days_until} days)")
+
+            embed = discord.Embed(
+                title=f"📣 Upcoming Tournament: {reminder['name']}",
+                description=reminder["description"],
+                color=0x800080,
+                url=reminder["link"]
+            )
+            
+            embed.add_field(name="📅 **Date:** " , value=event_date.strftime("%A, %B %d, %Y"), inline=True)
+            embed.add_field(name="🔗 **Sign Up Link:** ", value=reminder["link"], inline=False)
+
+            if days_until == 3: 
+                embed.set_footer(text="**TODAY WILL BE THE LAST DAY TO SIGN UP!** ")
+
+            if days_until == 0: 
+                embed.set_footer(text="**TOURNAMENT WILL START AT 7PM TODAY. LOCK IN 🔒** ")
+
+            for channel_id in config.TOURNEY_CHANNEL_IDS:
+                channel = bot_instance.get_channel(channel_id)
+                if channel:
+                    role_id = config.TOURNEY_CHANNEL_ROLES.get(channel_id)
+                    role_mention = f"<@&{role_id}>" if role_id else ""
+                    try:
+                        await channel.send(content=role_mention, embed=embed)
+                        logger.info(f"Sent custom reminder to channel {channel_id}")
+                    except Exception as e:
+                        logger.error(f"Failed to send reminder to {channel_id}: {e}")
+                else:
+                    logger.warning(f"Channel {channel_id} not found.")
+
+
 def setup_reminder(bot):
     global bot_instance
     bot_instance = bot
-    check_todays_tournament.start()
+    check_todays_tournament.start() # ⏰ now runs daily at 2 PM PST
+    check_custom_reminders.start() # checks daily at 1PM PST
