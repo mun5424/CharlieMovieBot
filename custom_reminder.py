@@ -3,7 +3,7 @@ import datetime
 CUSTOM_REMINDERS = [
     {
         "name": "WNF - World Warrior 2025 - US/CAN West 2",
-        "date": datetime.date(2025, 7, 13),  # Tournament date
+        "date": datetime.date(2025, 7, 23),  # Tournament date
         "link": "https://www.start.gg/tournament/wnf-world-warrior-2025-us-can-west-2",
         "description": (
         "Alright Folks, Time for **WNF World Warrior!**\n"

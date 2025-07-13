@@ -13,7 +13,7 @@ STARTGG_API_URL = "https://api.start.gg/gql/alpha"
 logger = logging.getLogger(__name__)
 
 # Calculate what time 2 PM Pacific is in UTC
-def get_utc_time_for_pacific(hour=2,minute=0):
+def get_utc_time_for_pacific(hour=14,minute=0):
     """Get the UTC time that corresponds to 2 PM Pacific"""
     # Create a Pacific time for 2 PM today
     pacific_now = datetime.datetime.now(PACIFIC_TZ)
@@ -28,7 +28,7 @@ def get_utc_time_for_pacific(hour=2,minute=0):
 
 # This will calculate the correct UTC time automatically
 UTC_TIME_FOR_2PM_PACIFIC = get_utc_time_for_pacific()
-UTC_TIME_FOR_1PM_PACIFIC = get_utc_time_for_pacific(1)
+UTC_TIME_FOR_1PM_PACIFIC = get_utc_time_for_pacific(13)
 
 
 # Tournament schedule by day of week

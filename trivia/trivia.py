@@ -149,8 +149,7 @@ class TriviaCog(commands.Cog):
                     timeout_embed = discord.Embed(
                         title="⏰ Time's Up!",
                         description=f"<@{user_id}> took too long to answer!\n\n"
-                                   f"The correct answer was **{correct_letter}. {correct_answer}**.\n\n"
-                                   f"🎯 Trivia is now available for the next person!",
+                                   f"The correct answer was **{correct_letter}. {correct_answer}**.\n",
                         color=discord.Color.red()
                     )
                     
@@ -205,16 +204,14 @@ class TriviaCog(commands.Cog):
             embed = discord.Embed(
                 title="✅ Correct!",
                 description=f"Well done {message.author.mention}! Your new score is **{self.scores[str(user_id)]['score']}**.\n\n"
-                           f"⏱️ Response time: **{response_time:.1f}s**\n\n"
-                           f"🎯 Trivia is now available for the next person!",
+                           f"⏱️ Response time: **{response_time:.1f}s**",
                 color=discord.Color.green()
             )
         else:
             embed = discord.Embed(
                 title="❌ Incorrect!",
                 description=f"Nice try {message.author.mention}, but the correct answer was **{correct_letter}. {correct_answer}**.\n\n"
-                           f"⏱️ Response time: **{response_time:.1f}s**\n\n"
-                           f"🎯 Trivia is now available for the next person!",
+                           f"⏱️ Response time: **{response_time:.1f}s**",
                 color=discord.Color.red()
             )
 
