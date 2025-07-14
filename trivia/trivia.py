@@ -526,9 +526,9 @@ class TriviaCog(commands.Cog):
         question = html.unescape(question_data["question"])
         correct = html.unescape(question_data["correct_answer"])
         incorrect = [html.unescape(i) for i in question_data["incorrect_answers"]]
-        category = question_data["category"]
+        category = html.unescape(question_data["category"])
         difficulty = Difficulty(question_data["difficulty"])
-        
+
         # Create options
         options = incorrect + [correct]
         random.shuffle(options)
@@ -619,7 +619,7 @@ class TriviaCog(commands.Cog):
                     timeout_embed = discord.Embed(
                         title="⏰ Time's Up!",
                         description=f"<@{user_id}> took too long to answer!\n\n"
-                                   f"The correct answer was **{correct_letter}. {correct_answer}**\n\n"
+                                   f"The correct answer was **{correct_letter}) {correct_answer}**\n\n"
                                    f"**Penalty:** {penalty} points\n"
                                    f"**New Score:** {user_stats.total_score} points",
                         color=discord.Color.red()
@@ -715,12 +715,10 @@ class TriviaCog(commands.Cog):
             )
         else:
             score_text += (
-                f"\n**❌ Penalty Applied**\n"
-                f"🔻 `{score_change}` points lost"
+                f"\n**🔻Penalty Applied** `{score_change}` points lost"
             )
 
-        embed.add_field(name="📈 Results", value=score_text, inline=False)
-        embed.add_field(name="⏱️ Response Time", value=f"`{response_time:.1f}s`", inline=True)
+        embed.add_field(name=f"⏱️ Response Time: `{response_time:.1f}s`", inline=True)
 
         await message.channel.send(embed=embed)
     
