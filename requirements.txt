@@ -1,2 +1,21 @@
-discord.py>=2.0
-requests
+# Core Discord bot requirements
+discord.py>=2.3.0
+aiohttp>=3.8.0
+
+# Performance optimizations
+uvloop>=0.17.0; sys_platform != "win32"  # Better event loop for Unix systems
+psutil>=5.9.0  # System monitoring
+
+# Optional: Memory profiling (for development/debugging)
+# memory-profiler>=0.61.0
+# pympler>=0.9
+
+# Optional: Better JSON handling
+# orjson>=3.8.0  # Faster JSON parsing
+
+# Pi-specific optimizations (install only if needed)
+# RPi.GPIO>=0.7.1; platform_machine == "armv6l" or platform_machine == "armv7l"
+
+# Development dependencies (optional)
+# pytest>=7.0.0
+# pytest-asyncio>=0.21.0
