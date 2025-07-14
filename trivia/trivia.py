@@ -700,10 +700,12 @@ class TriviaCog(commands.Cog):
             )
         
         # Add score breakdown
+        # Combine everything into one clean field
         score_text = (
             f"**🏆 Score Change:** `{score_change:+d}` points\n"
             f"**📊 Total Score:** `{user_stats.total_score}` points\n"
             f"**🔥 Streak:** `{user_stats.current_streak}`\n"
+            f"**⏱️ Response Time:** `{response_time:.1f}s`\n"
         )
 
         if is_correct:
@@ -715,11 +717,10 @@ class TriviaCog(commands.Cog):
             )
         else:
             score_text += (
-                f"\n**🔻Penalty Applied** `{score_change}` points lost"
+                f"\n**🔻 Penalty Applied:** `{score_change}` points lost"
             )
 
-        embed.add_field(name="", value=score_text, inline=True)
-        embed.add_field(name=f"⏱️ Response Time: {response_time:.1f}s", value="", inline=True)
+        embed.add_field(name="\u200b", value=score_text, inline=False)
 
         await message.channel.send(embed=embed)
     
