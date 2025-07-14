@@ -700,19 +700,28 @@ class TriviaCog(commands.Cog):
             )
         
         # Add score breakdown
-        score_text = f"**Score Change:** {score_change:+d} points\n"
-        score_text += f"**New Total:** {user_stats.total_score} points\n"
-        score_text += f"🔥**Current Streak:** {user_stats.current_streak}\n"
-        
+        score_text = (
+            f"**🏆 Score Change:** `{score_change:+d}` points\n"
+            f"**📊 Total Score:** `{user_stats.total_score}` points\n"
+            f"**🔥 Streak:** `{user_stats.current_streak}`\n"
+        )
+
         if is_correct:
-            score_text += f"\n**Breakdown:**\n"
-            score_text += f"• Base: {breakdown['base_points']} points\n"
-            score_text += f"• Speed bonus: {breakdown['speed_bonus']} points\n"
-            score_text += f"• Streak multiplier: {breakdown['streak_multiplier']}x\n"
-        
-        embed.add_field(name="Score", value=score_text, inline=False)
-        embed.add_field(name="Response Time", value=f"{response_time:.1f}s", inline=True)
-        
+            score_text += (
+                f"\n**🧮 Breakdown:**\n"
+                f"• 🟢 Base Points: `{breakdown['base_points']}`\n"
+                f"• ⚡ Speed Bonus: `{breakdown['speed_bonus']}`\n"
+                f"• 🔁 Streak Multiplier: `x{breakdown['streak_multiplier']}`\n"
+            )
+        else:
+            score_text += (
+                f"\n**❌ Penalty Applied**\n"
+                f"🔻 `{score_change}` points lost"
+            )
+
+        embed.add_field(name="📈 Results", value=score_text, inline=False)
+        embed.add_field(name="⏱️ Response Time", value=f"`{response_time:.1f}s`", inline=True)
+
         await message.channel.send(embed=embed)
     
     @app_commands.command(name="trivia_stats", description="View trivia statistics for this server")
@@ -735,16 +744,17 @@ class TriviaCog(commands.Cog):
         # Basic stats
         accuracy = (user_stats.correct_answers / user_stats.questions_answered * 100) if user_stats.questions_answered > 0 else 0
         embed.add_field(
-            name="Overall Performance",
-            value=f"**Total Score:** {user_stats.total_score}\n"
-                  f"**Questions Answered:** {user_stats.questions_answered}\n"
-                  f"**Accuracy:** {accuracy:.1f}%\n"
-                  f"**Current Streak:** {user_stats.current_streak}\n"
-                  f"**Best Streak:** {user_stats.best_streak}\n"
-                  f"**Avg Response Time:** {user_stats.avg_response_time:.1f}s",
+            name="📊 Overall Performance",
+            value=(
+                f"**💯 Total Score:** `{user_stats.total_score}`\n"
+                f"**❓ Questions Answered:** `{user_stats.questions_answered}`\n"
+                f"**🎯 Accuracy:** `{accuracy:.1f}%`\n"
+                f"**🔥 Current Streak:** `{user_stats.current_streak}`\n"
+                f"**🏅 Best Streak:** `{user_stats.best_streak}`\n"
+                f"**⏱️ Avg. Response Time:** `{user_stats.avg_response_time:.1f}s`"
+            ),
             inline=False
         )
-        
         # Difficulty breakdown
         diff_text = ""
         for diff, stats in user_stats.difficulty_stats.items():
