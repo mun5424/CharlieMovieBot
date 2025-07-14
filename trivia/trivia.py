@@ -755,12 +755,12 @@ class TriviaCog(commands.Cog):
             ),
             inline=False
         )
-        # Difficulty breakdown
-        diff_text = ""
+
+        diff_emoji = {"easy": "🟢", "medium": "🟡", "hard": "🔴"}
         for diff, stats in user_stats.difficulty_stats.items():
             if stats["total"] > 0:
                 acc = (stats["correct"] / stats["total"] * 100)
-                diff_text += f"**{diff.title()}:** {stats['correct']}/{stats['total']} ({acc:.1f}%)\n"
+                diff_text += f"**{diff_emoji[diff]}{diff.title()}:** {stats['correct']}/{stats['total']} ({acc:.1f}%)\n"
         
         if diff_text:
             embed.add_field(name="Difficulty Breakdown", value=diff_text, inline=False)
@@ -789,11 +789,20 @@ class TriviaCog(commands.Cog):
         
         for i, (user_id, stats) in enumerate(leaderboard, 1):
             accuracy = (stats.correct_answers / stats.questions_answered * 100) if stats.questions_answered > 0 else 0
+            medal_text = ""
+            if i == 1: 
+                medal_text = "🥇"
+            elif i == 2: 
+                medal_text = "🥈"
+            elif i == 3: 
+                medal_text = "🥉"
+            else:
+                medal_text = str(i) + "."
             embed.add_field(
-                name=f"{i}. {stats.username}",
-                value=f"**Score:** {stats.total_score}\n"
-                      f"**Accuracy:** {accuracy:.1f}%\n"
-                      f"**Best Streak:** {stats.best_streak}",
+                name=f"{medal_text} {stats.username}",
+                value=f"**💯 Score:** {stats.total_score}\n"
+                      f"**🎯 Accuracy:** {accuracy:.1f}%\n"
+                      f"**🔥 Best Streak:** {stats.best_streak}",
                 inline=False
             )
         
