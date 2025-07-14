@@ -718,7 +718,7 @@ class TriviaCog(commands.Cog):
                 f"\n**🔻Penalty Applied** `{score_change}` points lost"
             )
 
-        embed.add_field(name=f"⏱️ Response Time: `{response_time:.1f}s`", inline=True)
+        embed.add_field(name="Response Time", value=f"{response_time:.1f}s", inline=True)
 
         await message.channel.send(embed=embed)
     
