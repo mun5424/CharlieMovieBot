@@ -378,16 +378,6 @@ class OptimizedBot(commands.Bot):
             self.logger.info(f"👥 Serving {total_users} users")
         except:
             self.logger.info("👥 User count unavailable")
-        
-        # Set optimized presence
-        presence_name = "🧠 /trivia"
-        if self.performance_optimizer.is_raspberry_pi:
-            presence_name += " | Pi Optimized"
-        
-        await self.change_presence(
-            activity=discord.Game(name=presence_name),
-            status=discord.Status.online
-        )
     
     async def on_command_error(self, ctx, error):
         """Enhanced error handling with performance considerations"""
