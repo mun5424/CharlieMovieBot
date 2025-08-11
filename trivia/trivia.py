@@ -517,17 +517,16 @@ class TriviaCog(commands.Cog):
         if not hall_of_fame:
             embed = discord.Embed(
                 title="",
-                description=f"🏛️✨ **HALL OF FAME** ✨🏛️\n"
-                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                        f"### 🏰👑 **{server_name}** 👑🏰\n\n"
+                description=f"🏛️ **HALL OF FAME** 🏛️\n"
+                        f"### 👑 **{server_name}** 👑\n\n"
                         f"```diff\n"
-                        f"- 🌟 The halls echo with silence... 🌟\n"
-                        f"- 🏺 No legendary seasons yet! 🏺\n"
-                        f"- ⚔️ History awaits your conquest! ⚔️\n"
-                        f"```\n\n"
-                        f"📜🔥 **History awaits your greatness!** 🔥📜\n"
-                        f"🎭 Seasons will be immortalized here after using `/reset_scores`\n\n"
-                        f"🎯✨ Start building your legendary legacy with `/trivia`! 🚀👑",
+                        f"🌟 The halls echo with silence... 🌟\n"
+                        f"🏺 No legendary seasons yet! 🏺\n"
+                        f"⚔️ History awaits your conquest! ⚔️\n"
+                        f"```\n"
+                        f"📜 **History awaits your greatness!** 📜\n"
+                        f"🎭 Seasons will be immortalized here after using `/reset_scores`\n"
+                        f"✨ Start building your legendary legacy with `/trivia`!✨ ",
                 color=discord.Color.gold()
             )
             embed.set_thumbnail(url=interaction.guild.icon.url if interaction.guild and interaction.guild.icon else None)
@@ -986,7 +985,7 @@ class TriviaCog(commands.Cog):
         if not leaderboard:
             embed = discord.Embed(
                 title="🏆 Trivia Leaderboard 🏆",
-                description=f"## 🎯🌟 **{server_name}** 🌟🎯\n\n"
+                description=f"## 🌟 **{server_name}** 🌟\n\n"
                         f"```diff\n"
                         f"+ 🚀 No champions yet! 🚀\n"
                         f"+ 🌟 Be the first to play! 🌟\n"
@@ -995,7 +994,7 @@ class TriviaCog(commands.Cog):
                         f"🚀💫 **Ready to compete?** Use `/trivia` to start your legendary journey! 🎯✨",
                 color=discord.Color.gold()
             )
-            embed.set_thumbnail(url="https://cdn.discordapp.com/emojis/1234567890.png")  # You can add a trophy emoji URL here
+            embed.set_thumbnail(url="https://cdn.discordapp.com/emojis/1234567890.png")
             await interaction.followup.send(embed=embed)
             return
         
