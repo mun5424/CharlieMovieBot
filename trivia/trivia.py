@@ -1021,7 +1021,7 @@ class TriviaCog(commands.Cog):
 
             podium_text += f"\n{podium_medals[i]} **{podium_names[i]}** {podium_medals[i]}\n"
             podium_text += f"```ansi\n"
-            podium_text += f"\u001b[1;36m👤 [1;33m{stats.username}\u001b[0m\n"
+            podium_text += f"\u001b[1;36m👤 {stats.username}\u001b[0m\n"
             podium_text += f"\u001b[1;35m💰 Score:\u001b[0m \u001b[1;32m{stats.total_score:,} points\u001b[0m\n"
             podium_text += f"\u001b[1;34m🎯 Accuracy:\u001b[0m \u001b[1;31m{accuracy:.1f}%\u001b[0m\n"
             podium_text += f"\u001b[1;33m🔥 Best Streak:\u001b[0m \u001b[1;36m{stats.best_streak}\u001b[0m\n"
