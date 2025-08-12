@@ -84,7 +84,7 @@ class QuestionCache:
     async def fetch_bulk_questions(self, session: aiohttp.ClientSession,
                                  category_id: Optional[int] = None, 
                                  difficulty: Optional[Difficulty] = None,
-                                 amount: int = 20) -> List[Dict]:
+                                 amount: int = 10) -> List[Dict]:
         """Fetch multiple questions from API in one request"""
         base_url = f"https://opentdb.com/api.php?amount={amount}&type=multiple"
         
@@ -124,7 +124,7 @@ class QuestionCache:
         """Try to fetch more questions for this category/difficulty combo"""
         logger.info(f"Attempting to fetch more questions for category={category_id}, difficulty={difficulty.value if difficulty else 'any'}")
         
-        new_questions = await self.fetch_bulk_questions(session, category_id, difficulty, 20)
+        new_questions = await self.fetch_bulk_questions(session, category_id, difficulty, 10)
         
         if new_questions:
             diff_key = difficulty.value if difficulty else None
@@ -158,7 +158,7 @@ class QuestionCache:
                 logger.info(f"Cache needs refill for category={category_id}, difficulty={diff_key}")
                 
                 # Fetch new questions
-                new_questions = await self.fetch_bulk_questions(session, category_id, difficulty, 20)
+                new_questions = await self.fetch_bulk_questions(session, category_id, difficulty, 10)
                 
                 if new_questions:
                     # Replace cache with new questions
