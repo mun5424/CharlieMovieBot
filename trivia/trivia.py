@@ -13,38 +13,13 @@ from typing import Dict, Optional, Tuple, Any, List
 from dataclasses import dataclass, asdict
 from enum import Enum
 from trivia.multi_server_data_manager import MultiServerDataManager
+from trivia.question_cache import QuestionCache
+from trivia.models import Difficulty, UserStats, SeasonSnapshot
 
 logger = logging.getLogger(__name__)
 
 # Configuration
 QUESTION_TIMEOUT = 30
-
-class Difficulty(Enum):
-    EASY = "easy"
-    MEDIUM = "medium"
-    HARD = "hard"
-
-@dataclass
-class UserStats:
-    username: str
-    total_score: int = 0
-    questions_answered: int = 0
-    correct_answers: int = 0
-    current_streak: int = 0
-    best_streak: int = 0
-    avg_response_time: float = 0.0
-    difficulty_stats: Dict[str, Dict[str, int]] = None
-    seen_question_hashes: set = None  # Set of question_hash+user_id combinations
-    
-    def __post_init__(self):
-        if self.difficulty_stats is None:
-            self.difficulty_stats = {
-                "easy": {"correct": 0, "total": 0},
-                "medium": {"correct": 0, "total": 0},
-                "hard": {"correct": 0, "total": 0}
-            }
-        if self.seen_question_hashes is None:
-            self.seen_question_hashes = set()
 
 # Import config for scoring configuration
 try:
@@ -166,18 +141,6 @@ class ScoreCalculator:
         return final_score, breakdown
 
 
-@dataclass
-class SeasonSnapshot:
-    season_name: str
-    end_date: str
-    server_name: str
-    leaderboard: List[Dict]
-    total_players: int
-    total_questions_asked: int
-    
-    def to_dict(self):
-        return asdict(self)
-
 
 class TriviaCog(commands.Cog):
     def __init__(self, bot):
@@ -189,6 +152,8 @@ class TriviaCog(commands.Cog):
         self.timeout_tasks: Dict[str, asyncio.Task] = {}  # guild_id -> timeout_task
         
         self.session = None
+        
+        self.question_cache = QuestionCache()  # Use the new smart cache
         logger.info("Multi-server TriviaCog initialized")
     
     async def cog_load(self):
@@ -227,6 +192,16 @@ class TriviaCog(commands.Cog):
         """Clean up memory (called by performance monitor)"""
         self.data_manager.cleanup_memory()
         logger.info("Trivia memory cleanup completed")
+
+    def _cleanup_question(self, guild_id: str):
+        """Safely cleanup question data"""
+        if guild_id in self.active_questions:
+            del self.active_questions[guild_id]
+        if guild_id in self.timeout_tasks:
+            if not self.timeout_tasks[guild_id].done():
+                self.timeout_tasks[guild_id].cancel()
+            del self.timeout_tasks[guild_id]
+            
     
     def get_guild_id(self, interaction: discord.Interaction) -> str:
         """Get guild ID as string"""
@@ -235,72 +210,33 @@ class TriviaCog(commands.Cog):
     async def fetch_trivia_question(self, category_id: Optional[int] = None, 
                                   difficulty: Optional[Difficulty] = None,
                                   guild_id: Optional[str] = None,
-                                  user_id: Optional[str] = None,
-                                  max_attempts: int = 10) -> Optional[Dict]:
+                                  user_id: Optional[str] = None) -> Optional[Dict]:
         """
-        Fetch a trivia question from Open Trivia DB, avoiding duplicates for the user
+        Fetch a trivia question using smart caching
         
         Args:
             category_id: Category ID for the question
             difficulty: Difficulty level
             guild_id: Server ID for question tracking
             user_id: User ID for duplicate checking
-            max_attempts: Maximum attempts to find an unseen question
         """
-        base_url = "https://opentdb.com/api.php?amount=1&type=multiple"
         
-        if category_id:
-            base_url += f"&category={category_id}"
-        if difficulty:
-            base_url += f"&difficulty={difficulty.value}"
+        # This should be nearly instant thanks to caching!
+        question_data = await self.question_cache.get_question(
+            self.session, 
+            category_id, 
+            difficulty, 
+            guild_id, 
+            user_id, 
+            self.data_manager
+        )
         
-        # If we have tracking info, try to find an unseen question
-        if guild_id and user_id:
-            for attempt in range(max_attempts):
-                try:
-                    async with self.session.get(base_url) as resp:
-                        if resp.status == 200:
-                            data = await resp.json()
-                            if data.get("response_code") == 0 and data.get("results"):
-                                question_data = data["results"][0]
-                                
-                                # Check if user has seen this question
-                                if not self.data_manager.has_user_seen_question(guild_id, user_id, question_data):
-                                    return question_data
-                                
-                                logger.debug(f"User {user_id} has seen this question, trying again ({attempt + 1}/{max_attempts})")
-                            else:
-                                logger.warning(f"API returned error code: {data.get('response_code')}")
-                                break
-                        else:
-                            logger.error(f"HTTP error: {resp.status}")
-                            break
-                except Exception as e:
-                    logger.error(f"Error fetching trivia question (attempt {attempt + 1}): {e}")
-                    if attempt == max_attempts - 1:
-                        break
-                
-                # Small delay between attempts
-                await asyncio.sleep(0.1)
-            
-            # If we couldn't find an unseen question, just return any question
-            logger.info(f"Could not find unseen question for user {user_id} after {max_attempts} attempts, returning any question")
-        
-        # Fallback: fetch any question without duplicate checking
-        try:
-            async with self.session.get(base_url) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    if data.get("response_code") == 0 and data.get("results"):
-                        return data["results"][0]
-                    else:
-                        logger.warning(f"API returned error code: {data.get('response_code')}")
-                else:
-                    logger.error(f"HTTP error: {resp.status}")
-        except Exception as e:
-            logger.error(f"Error fetching fallback trivia question: {e}")
-        
-        return None
+        if question_data:
+            logger.debug("Successfully served question from cache")
+            return question_data
+        else:
+            logger.error("Failed to get question from cache")
+            return None
     
     async def autocomplete_category(self, interaction: discord.Interaction, current: str):
         """Autocomplete for trivia categories"""
@@ -322,14 +258,14 @@ class TriviaCog(commands.Cog):
     @app_commands.command(name="trivia", description="Start a trivia question")
     @app_commands.describe(
         category="Choose a trivia category (optional)",
-        difficulty="Choose your difficulty (optional) - WARNING: Higher penalties for wrong answers!"
+        difficulty="Choose your difficulty (optional) "
     )
     @app_commands.autocomplete(category=autocomplete_category)
     @app_commands.autocomplete(difficulty=autocomplete_difficulty)
     async def trivia(self, interaction: discord.Interaction, 
                     category: Optional[str] = None, 
                     difficulty: Optional[str] = None):
-        """Main trivia command"""
+        """Main trivia command - now with instant question delivery!"""
         await interaction.response.defer()
         
         guild_id = self.get_guild_id(interaction)
@@ -358,10 +294,25 @@ class TriviaCog(commands.Cog):
                 await interaction.followup.send("❌ Invalid category.")
                 return
         
-        # Fetch question
+        # Fetch question - this should be nearly instant thanks to caching!
         question_data = await self.fetch_trivia_question(category_id, diff_enum, guild_id, str(interaction.user.id))
+        
         if not question_data:
-            await interaction.followup.send("❌ Could not fetch a trivia question. Please try again.")
+            # Only show this error if cache is empty AND API failed
+            cache_stats = self.question_cache.get_cache_stats()
+            if cache_stats['total_questions'] == 0:
+                error_embed = discord.Embed(
+                    title="❌ API Unavailable",
+                    description="The trivia API is currently unavailable and the question cache is empty. Please try again in a few minutes.",
+                    color=discord.Color.red()
+                )
+            else:
+                error_embed = discord.Embed(
+                    title="❌ No Questions Available",
+                    description="Could not find a suitable question. This is unusual - please try again or contact an admin.",
+                    color=discord.Color.red()
+                )
+            await interaction.followup.send(embed=error_embed)
             return
         
         await self._create_trivia_question(interaction, question_data, guild_id, was_intentional)
@@ -808,60 +759,67 @@ class TriviaCog(commands.Cog):
         content = f"{question_text}|{correct_answer}".encode('utf-8')
         return hashlib.md5(content).hexdigest()[:12]  # First 12 chars of MD5
 
+    # Wrap the main logic in on_message with try-catch
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        """Handle trivia answers"""
         if message.author.bot or not message.guild:
             return
-    
+        
         guild_id = str(message.guild.id)
-    
-        if guild_id not in self.active_questions:
-            return
-    
-        user_id, correct_letter, correct_answer, msg_id, start_time, channel_id, difficulty, was_intentional, question_data = self.active_questions[guild_id]
-    
-        # Only the person who started the question can answer
-        if message.author.id != user_id or message.channel.id != channel_id:
-            return
-    
-        content = message.content.strip().upper()
-        if content not in ["A", "B", "C", "D"]:
-            return
-    
-        # Cancel timeout task
-        if guild_id in self.timeout_tasks and not self.timeout_tasks[guild_id].done():
-            self.timeout_tasks[guild_id].cancel()
-    
-        # Calculate response time and score
-        response_time = time.time() - start_time
-        is_correct = content == correct_letter
-    
-        # Get user stats for this server
-        user_stats = self.data_manager.get_user_stats(guild_id, str(user_id), message.author.name)
-    
-        # Calculate score with improved system
-        score_change, breakdown = ScoreCalculator.calculate_final_score(
-            difficulty, response_time, is_correct, user_stats.current_streak, was_intentional
-        )
-    
-        # Track this question as seen - use question_data which we already have
-        self.data_manager.mark_question_seen(guild_id, str(user_id), question_data)
-    
-        # Clear active question for this server AFTER using all the data
-        del self.active_questions[guild_id]
-        if guild_id in self.timeout_tasks:
-            del self.timeout_tasks[guild_id]
-    
-        # Update user stats for this server
-        self.data_manager.update_user_stats(guild_id, str(user_id), difficulty, is_correct, response_time, score_change)
-    
-        # GET UPDATED USER STATS AFTER THE UPDATE
-        updated_user_stats = self.data_manager.get_user_stats(guild_id, str(user_id), message.author.name)
-    
-        # Create response embed
-        await self._send_answer_response(message, is_correct, correct_letter, correct_answer,
-                                    response_time, score_change, breakdown, updated_user_stats, was_intentional)
+        
+        try:
+            if guild_id not in self.active_questions:
+                return
+        
+            user_id, correct_letter, correct_answer, msg_id, start_time, channel_id, difficulty, was_intentional, question_data = self.active_questions[guild_id]
+        
+            # Only the person who started the question can answer
+            if message.author.id != user_id or message.channel.id != channel_id:
+                return
+        
+            content = message.content.strip().upper()
+            if content not in ["A", "B", "C", "D"]:
+                return
+        
+            # Cancel timeout task
+            if guild_id in self.timeout_tasks and not self.timeout_tasks[guild_id].done():
+                self.timeout_tasks[guild_id].cancel()
+        
+            # Calculate response time and score
+            response_time = time.time() - start_time
+            is_correct = content == correct_letter
+        
+            # Get user stats for this server
+            user_stats = self.data_manager.get_user_stats(guild_id, str(user_id), message.author.name)
+        
+            # Calculate score with improved system
+            score_change, breakdown = ScoreCalculator.calculate_final_score(
+                difficulty, response_time, is_correct, user_stats.current_streak, was_intentional
+            )
+        
+            # Track this question as seen - use question_data which we already have
+            self.data_manager.mark_question_seen(guild_id, str(user_id), question_data)
+        
+            # Clear active question for this server AFTER using all the data
+            del self.active_questions[guild_id]
+            if guild_id in self.timeout_tasks:
+                del self.timeout_tasks[guild_id]
+        
+            # Update user stats for this server
+            self.data_manager.update_user_stats(guild_id, str(user_id), difficulty, is_correct, response_time, score_change)
+        
+            # GET UPDATED USER STATS AFTER THE UPDATE
+            updated_user_stats = self.data_manager.get_user_stats(guild_id, str(user_id), message.author.name)
+        
+            # Create response embed
+            await self._send_answer_response(message, is_correct, correct_letter, correct_answer,
+                                        response_time, score_change, breakdown, updated_user_stats, was_intentional)
+        except Exception as e:
+            logger.error(f"Error in trivia message handler: {e}")
+            # Ensure cleanup happens
+            self._cleanup_question(guild_id)
+
+
     
 
     async def _send_answer_response(self, message: discord.Message, is_correct: bool, 

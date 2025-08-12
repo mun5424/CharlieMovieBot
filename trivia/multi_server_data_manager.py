@@ -11,6 +11,7 @@ import random
 from typing import Any, Dict, List
 import logging
 from trivia.question_tracker import QuestionTracker
+from trivia.models import Difficulty, UserStats, SeasonSnapshot
 
 logger = logging.getLogger(__name__)
 
@@ -40,18 +41,6 @@ class UserStats:
             }
         if self.seen_question_hashes is None:
             self.seen_question_hashes = set()
-
-@dataclass
-class SeasonSnapshot:
-    season_name: str
-    end_date: str
-    server_name: str
-    leaderboard: List[Dict]
-    total_players: int
-    total_questions_asked: int
-    
-    def to_dict(self):
-        return asdict(self)
 
 class MultiServerDataManager:
     """Manages data for multiple Discord servers efficiently"""
