@@ -37,7 +37,8 @@ TOURNAMENT_SCHEDULE = {
     0: "Motivation Academy",     # Monday
     1: "Can Opener Series",      # Tuesday  
     2: "TNS Street Fighter 6",   # Wednesday
-    3: "FlyQuest Fight Series",  # Thursday
+    3: "ONi Arena: Street Fighter" # Thursday
+    # 3: "FlyQuest Fight Series",  # Thursday - disabling flyquest as ONi is a guarenteed weekly.
 }
 
 TOURNAMENT_DESCRIPTION = { 
@@ -63,11 +64,8 @@ TOURNAMENT_DESCRIPTION = {
     """,
     3: """
 - Starts on **THURSDAY at 5PM PACIFIC TIME**
-- Ladder: 5-7 PM PST
-- Main Bracket: 7:05 PM PST
 - All matches will be best 3 out of 5 games (FT3)
-- Separate ladder/bracket for West Coast and East Coast
-- Top 8 players from each ladder will advance to the same main bracket
+- In the event of a tied Match declared by a “Double K.O.” on the Game screen, the Match will not be scored and both Players will replay the tied Match with the same character selections and stage.
     """
 }
 
@@ -145,7 +143,7 @@ async def find_todays_tournament(tournament_name):
             elif "motivation academy" in tournament_name_lower and "motivation academy" in node_name_lower:
                 is_match = True
             elif "flyquest" in tournament_name_lower and "flyquest" in node_name_lower:
-                is_match = True
+                is_match = True       
             
             if is_match:
                 matching_tournaments.append(node)
@@ -186,6 +184,8 @@ async def find_todays_tournament(tournament_name):
             search_terms = ["Motivation Academy", tournament_name]
         elif "FlyQuest" in tournament_name:
             search_terms = ["FlyQuest", "FlyQuest Fight Series", tournament_name]
+        elif "ONi" in tournament_name:
+            search_terms = ["ONi", "ONi Arena", tournament_name]
         
         for search_term in search_terms:
             logger.info(f"Trying name-based search term: '{search_term}'")
