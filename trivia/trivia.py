@@ -1,4 +1,4 @@
-# trivia/trivia.py - Multi-server trivia system with improved scoring
+# trivia/trivia.py - Multi-server trivia system with improved scoring and SF6 integration
 
 import aiohttp
 import discord
@@ -15,6 +15,7 @@ from enum import Enum
 from trivia.multi_server_data_manager import MultiServerDataManager
 from trivia.question_cache import QuestionCache
 from trivia.models import Difficulty, UserStats, SeasonSnapshot
+from trivia.sf6_trivia import SF6TriviaManager  # Import your SF6 system
 
 logger = logging.getLogger(__name__)
 
@@ -30,10 +31,8 @@ try:
 except (ImportError, KeyError) as e:
     logger.warning(f"Could not load config, using fallback scoring: {e}")
     # IMPROVED Fallback scoring configuration
-    
-    # Fallback authorized user ID - CHANGE THIS TO YOUR ACTUAL DISCORD USER ID
-    AUTHORIZED_RESET_USER_ID = "YOUR_USER_ID_HERE"
 
+# EXPANDED TRIVIA CATEGORIES - Now includes SF6!
 TRIVIA_CATEGORIES = {
     "General Knowledge": 9,
     "Books": 10,
@@ -56,7 +55,8 @@ TRIVIA_CATEGORIES = {
     "Comics": 29,
     "Gadgets": 30,
     "Anime & Manga": 31,
-    "Cartoons": 32
+    "Cartoons": 32,
+    "Street Fighter 6": "sf6"  # Special category for SF6
 }
 
 class ScoreCalculator:
@@ -94,7 +94,8 @@ class ScoreCalculator:
     
     @staticmethod
     def calculate_final_score(difficulty: Difficulty, response_time: float, 
-                            is_correct: bool, streak: int, was_intentional: bool = False) -> Tuple[int, Dict[str, Any]]:
+                            is_correct: bool, streak: int, was_intentional: bool = False, 
+                            is_sf6: bool = False) -> Tuple[int, Dict[str, Any]]:
         """
         Calculate final score with breakdown
         
@@ -104,8 +105,12 @@ class ScoreCalculator:
             is_correct: Whether the answer was correct
             streak: Current streak count
             was_intentional: Whether the user specifically chose this difficulty
+            is_sf6: Whether this is an SF6 question (always uses easy scoring)
         """
-        base_points = SCORING_CONFIG["base_points"][difficulty.value]
+        # SF6 questions always use easy difficulty for scoring
+        scoring_difficulty = Difficulty.EASY if is_sf6 else difficulty
+        
+        base_points = SCORING_CONFIG["base_points"][scoring_difficulty.value]
         speed_bonus, speed_tier = ScoreCalculator.calculate_speed_bonus(response_time)
         streak_multiplier = ScoreCalculator.calculate_streak_multiplier(streak)
         
@@ -115,19 +120,25 @@ class ScoreCalculator:
             "speed_tier": speed_tier,
             "streak_multiplier": streak_multiplier,
             "penalty": 0,
-            "penalty_reason": ""
+            "penalty_reason": "",
+            "is_sf6": is_sf6  # Track if this was SF6 for display purposes
         }
         
         if is_correct:
             final_score = int((base_points + speed_bonus) * streak_multiplier)
         else:
             # Apply improved penalties based on whether difficulty was intentionally chosen
+            # SF6 questions always use easy penalty regardless of displayed difficulty
             if was_intentional:
-                penalty = SCORING_CONFIG["penalties"]["wrong_answer_intentional"][difficulty.value]
+                penalty = SCORING_CONFIG["penalties"]["wrong_answer_intentional"][scoring_difficulty.value]
                 penalty_reason = f"Wrong on {difficulty.value.title()} (Intentional)"
+                if is_sf6:
+                    penalty_reason += " • SF6 Easy Penalty"
             else:
-                penalty = SCORING_CONFIG["penalties"]["wrong_answer_random"][difficulty.value]
+                penalty = SCORING_CONFIG["penalties"]["wrong_answer_random"][scoring_difficulty.value]
                 penalty_reason = f"Wrong on {difficulty.value.title()} (Random)"
+                if is_sf6:
+                    penalty_reason += " • SF6 Easy Penalty"
             
             # Additional penalty for being wrong AND fast (shows carelessness)
             if response_time < 5:
@@ -154,7 +165,11 @@ class TriviaCog(commands.Cog):
         self.session = None
         
         self.question_cache = QuestionCache()  # Use the new smart cache
-        logger.info("Multi-server TriviaCog initialized")
+        
+        # Initialize SF6 Trivia Manager
+        self.sf6_trivia = SF6TriviaManager()
+        
+        logger.info("Multi-server TriviaCog with SF6 support initialized")
     
     async def cog_load(self):
         """Called when the cog is loaded"""
@@ -210,18 +225,24 @@ class TriviaCog(commands.Cog):
     async def fetch_trivia_question(self, category_id: Optional[int] = None, 
                                   difficulty: Optional[Difficulty] = None,
                                   guild_id: Optional[str] = None,
-                                  user_id: Optional[str] = None) -> Optional[Dict]:
+                                  user_id: Optional[str] = None,
+                                  category_name: Optional[str] = None) -> Optional[Dict]:
         """
-        Fetch a trivia question using smart caching
+        Fetch a trivia question using smart caching OR SF6 system
         
         Args:
-            category_id: Category ID for the question
+            category_id: Category ID for the question (OpenTDB)
             difficulty: Difficulty level
             guild_id: Server ID for question tracking
             user_id: User ID for duplicate checking
+            category_name: Category name (used to detect SF6)
         """
         
-        # This should be nearly instant thanks to caching!
+        # Check if this is an SF6 question request
+        if category_name == "Street Fighter 6" or category_id == "sf6":
+            return await self.fetch_sf6_question(difficulty, guild_id, user_id)
+        
+        # Regular OpenTDB question
         question_data = await self.question_cache.get_question(
             self.session, 
             category_id, 
@@ -238,13 +259,44 @@ class TriviaCog(commands.Cog):
             logger.error("Failed to get question from cache")
             return None
     
+    async def fetch_sf6_question(self, difficulty: Optional[Difficulty] = None,
+                            guild_id: Optional[str] = None, 
+                            user_id: Optional[str] = None) -> Optional[Dict]:
+        """Fetch an SF6 trivia question"""
+        if not self.sf6_trivia.available:
+            logger.warning("SF6 trivia database not available")
+            return None
+        
+        try:
+            # Handle random difficulty selection for SF6 questions
+            if difficulty is None:
+                # Randomly choose a difficulty if none specified
+                difficulty = random.choice(list(Difficulty))
+                logger.debug(f"SF6: Randomly selected {difficulty.value} difficulty")
+            
+            # Convert difficulty enum to string for SF6 system
+            diff_str = difficulty.value
+            
+            # Generate SF6 question
+            sf6_question = self.sf6_trivia.generate_question(diff_str)
+            
+            if not sf6_question:
+                return None
+            
+            # Convert SF6Question to standard format
+            return self.sf6_trivia.to_standard_format(sf6_question)
+            
+        except Exception as e:
+            logger.error(f"Error fetching SF6 question: {e}")
+            return None
+    
     async def autocomplete_category(self, interaction: discord.Interaction, current: str):
-        """Autocomplete for trivia categories"""
+        """Autocomplete for trivia categories - now includes SF6"""
         return [
             app_commands.Choice(name=cat, value=cat)
             for cat in TRIVIA_CATEGORIES
             if current.lower() in cat.lower()
-        ][:20]
+        ][:25]  # Increased limit to accommodate SF6
     
     async def autocomplete_difficulty(self, interaction: discord.Interaction, current: str):
         """Autocomplete for difficulty levels"""
@@ -255,17 +307,17 @@ class TriviaCog(commands.Cog):
             if current.lower() in diff.lower()
         ]
     
-    @app_commands.command(name="trivia", description="Start a trivia question")
+    @app_commands.command(name="trivia", description="Start a trivia question (now with SF6 support!)")
     @app_commands.describe(
-        category="Choose a trivia category (optional)",
-        difficulty="Choose your difficulty (optional) "
+        category="Choose a trivia category (including Street Fighter 6!)",
+        difficulty="Choose your difficulty (optional)"
     )
     @app_commands.autocomplete(category=autocomplete_category)
     @app_commands.autocomplete(difficulty=autocomplete_difficulty)
     async def trivia(self, interaction: discord.Interaction, 
                     category: Optional[str] = None, 
                     difficulty: Optional[str] = None):
-        """Main trivia command - now with instant question delivery!"""
+        """Main trivia command - now with SF6 support!"""
         await interaction.response.defer()
         
         guild_id = self.get_guild_id(interaction)
@@ -286,32 +338,53 @@ class TriviaCog(commands.Cog):
                 await interaction.followup.send("❌ Invalid difficulty. Use: easy, medium, or hard")
                 return
         
-        # Get category ID
+        # Get category ID - handle SF6 specially
         category_id = None
         if category:
-            category_id = TRIVIA_CATEGORIES.get(category.title())
-            if not category_id:
-                await interaction.followup.send("❌ Invalid category.")
-                return
+            if category == "Street Fighter 6":
+                category_id = "sf6"  # Special identifier for SF6
+            else:
+                category_id = TRIVIA_CATEGORIES.get(category.title())
+                if not category_id:
+                    await interaction.followup.send("❌ Invalid category.")
+                    return
         
-        # Fetch question - this should be nearly instant thanks to caching!
-        question_data = await self.fetch_trivia_question(category_id, diff_enum, guild_id, str(interaction.user.id))
+        # Fetch question - handles both OpenTDB and SF6
+        question_data = await self.fetch_trivia_question(
+            category_id, diff_enum, guild_id, str(interaction.user.id), category
+        )
         
         if not question_data:
-            # Only show this error if cache is empty AND API failed
-            cache_stats = self.question_cache.get_cache_stats()
-            if cache_stats['total_questions'] == 0:
-                error_embed = discord.Embed(
-                    title="❌ API Unavailable",
-                    description="The trivia API is currently unavailable and the question cache is empty. Please try again in a few minutes.",
-                    color=discord.Color.red()
-                )
+            # Enhanced error handling for SF6
+            if category == "Street Fighter 6":
+                if not self.sf6_trivia.available:
+                    error_embed = discord.Embed(
+                        title="🎮 SF6 Database Unavailable",
+                        description="The Street Fighter 6 trivia database is not available. Please contact an admin or try regular trivia categories.",
+                        color=discord.Color.red()
+                    )
+                else:
+                    error_embed = discord.Embed(
+                        title="🎮 No SF6 Questions Available", 
+                        description="Could not generate an SF6 question with your criteria. Try a different difficulty or try again.",
+                        color=discord.Color.red()
+                    )
             else:
-                error_embed = discord.Embed(
-                    title="❌ No Questions Available",
-                    description="Could not find a suitable question. This is unusual - please try again or contact an admin.",
-                    color=discord.Color.red()
-                )
+                # Regular trivia error handling
+                cache_stats = self.question_cache.get_cache_stats()
+                if cache_stats['total_questions'] == 0:
+                    error_embed = discord.Embed(
+                        title="❌ API Unavailable",
+                        description="The trivia API is currently unavailable and the question cache is empty. Please try again in a few minutes.",
+                        color=discord.Color.red()
+                    )
+                else:
+                    error_embed = discord.Embed(
+                        title="❌ No Questions Available",
+                        description="Could not find a suitable question. This is unusual - please try again or contact an admin.",
+                        color=discord.Color.red()
+                    )
+            
             await interaction.followup.send(embed=error_embed)
             return
         
@@ -477,7 +550,8 @@ class TriviaCog(commands.Cog):
                         f"```\n"
                         f"📜 **History awaits your greatness!** 📜\n"
                         f"🎭 Seasons will be immortalized here after using `/reset_scores`\n"
-                        f"✨ Start building your legendary legacy with `/trivia`!✨ ",
+                        f"✨ Start building your legendary legacy with `/trivia`!\n\n"
+                        f"🎮 **NEW:** Try Street Fighter 6 trivia for hardcore frame data challenges!✨ ",
                 color=discord.Color.gold()
             )
             embed.set_thumbnail(url=interaction.guild.icon.url if interaction.guild and interaction.guild.icon else None)
@@ -613,7 +687,7 @@ class TriviaCog(commands.Cog):
     
     async def _create_trivia_question(self, interaction: discord.Interaction, 
                                     question_data: Dict, guild_id: str, was_intentional: bool):
-        """Create and display a trivia question"""
+        """Create and display a trivia question - enhanced for SF6"""
         # Parse question data
         question = html.unescape(question_data["question"])
         correct = html.unescape(question_data["correct_answer"])
@@ -626,10 +700,18 @@ class TriviaCog(commands.Cog):
         random.shuffle(options)
         correct_letter = chr(65 + options.index(correct))
         
-        # Create embed
+        # Create embed with special handling for SF6
+        if category == "Street Fighter 6":
+            title = f"🎮⚔️ {category} Frame Data Trivia"
+            # Use SF6 themed colors
+            embed_color = discord.Color.from_rgb(255, 215, 0)  # Gold for SF6
+        else:
+            title = f"🧠 {category} Trivia"
+            embed_color = self._get_difficulty_color(difficulty)
+        
         embed = discord.Embed(
-            title=f"🧠 {category} Trivia",
-            color=self._get_difficulty_color(difficulty)
+            title=title,
+            color=embed_color
         )
         
         option_text = "\n".join([f"**{chr(65+i)}. {opt}**" for i, opt in enumerate(options)])
@@ -650,23 +732,47 @@ class TriviaCog(commands.Cog):
             inline=True
         )
         
-        # Show improved scoring info
-        base_points = SCORING_CONFIG["base_points"][difficulty.value]
+        # Show improved scoring info with SF6 adjustment
+        if category == "Street Fighter 6":
+            # SF6 always uses easy scoring
+            base_points = SCORING_CONFIG["base_points"]["easy"]
+            scoring_note = f"\n*(SF6 uses Easy scoring)*"
+        else:
+            base_points = SCORING_CONFIG["base_points"][difficulty.value]
+            scoring_note = ""
+            
         max_speed_bonus = SCORING_CONFIG["speed_bonuses"][0]["bonus"]  # Best possible speed bonus
         
         embed.add_field(
             name="Scoring",
-            value=f"**Base:** {base_points} pts\n**Max Speed Bonus:** +{max_speed_bonus} pts",
+            value=f"**Base:** {base_points} pts\n**Max Speed Bonus:** +{max_speed_bonus} pts{scoring_note}",
             inline=True
         )
         
-        # Add penalty warning for intentional difficulty
+        # Add penalty warning for intentional difficulty with SF6 adjustment
         if was_intentional:
-            wrong_penalty = SCORING_CONFIG["penalties"]["wrong_answer_intentional"][difficulty.value]
+            if category == "Street Fighter 6":
+                wrong_penalty = SCORING_CONFIG["penalties"]["wrong_answer_intentional"]["easy"]
+                penalty_note = "\n*(SF6 uses Easy penalties)*"
+            else:
+                wrong_penalty = SCORING_CONFIG["penalties"]["wrong_answer_intentional"][difficulty.value]
+                penalty_note = "\n(You chose this difficulty)"
+                
             embed.add_field(
                 name="⚠️ Wrong Penalty",
-                value=f"**{wrong_penalty} points**\n(You chose this difficulty)",
+                value=f"**{wrong_penalty} points**{penalty_note}",
                 inline=True
+            )
+        
+        # Special SF6 indicator with explanation
+        if category == "Street Fighter 6":
+            sf6_explanation = question_data.get("explanation", "")
+            question_type = question_data.get("question_type", "standard").replace("_", " ").title()
+            
+            embed.add_field(
+                name="🎮 SF6 Info",
+                value=f"**Type:** {question_type}\n**Character:** {question_data.get('character', 'Multiple')}\n**Move:** {question_data.get('move_name', 'Various')}",
+                inline=False
             )
         
         # Get user's current streak in this server
@@ -680,7 +786,12 @@ class TriviaCog(commands.Cog):
             )
         
         guild_name = interaction.guild.name if interaction.guild else "DM"
-        embed.set_footer(text=f"Only {interaction.user.name} can answer! Type A, B, C, or D. ({QUESTION_TIMEOUT}s timeout)")
+        
+        # Special footer for SF6
+        if category == "Street Fighter 6":
+            embed.set_footer(text=f"Only {interaction.user.name} can answer! Type A, B, C, or D. ({QUESTION_TIMEOUT}s) • 🎮 Frame data mastery required!")
+        else:
+            embed.set_footer(text=f"Only {interaction.user.name} can answer! Type A, B, C, or D. ({QUESTION_TIMEOUT}s timeout)")
         
         msg = await interaction.followup.send(embed=embed)
         
@@ -694,8 +805,9 @@ class TriviaCog(commands.Cog):
         # Start timeout task for this server
         self.timeout_tasks[guild_id] = asyncio.create_task(self._timeout_question(guild_id))
         intent_str = "intentional" if was_intentional else "random"
-        logger.info(f"Started {intent_str} {difficulty.value} trivia question for {interaction.user.name} in server {guild_name}")
-    
+        category_str = "SF6" if category == "Street Fighter 6" else category
+        logger.info(f"Started {intent_str} {difficulty.value} {category_str} trivia question for {interaction.user.name} in server {guild_name}")
+ 
     def _get_difficulty_color(self, difficulty: Difficulty) -> discord.Color:
         """Get color based on difficulty"""
         colors = {
@@ -793,8 +905,12 @@ class TriviaCog(commands.Cog):
             user_stats = self.data_manager.get_user_stats(guild_id, str(user_id), message.author.name)
         
             # Calculate score with improved system
+            category = html.unescape(question_data["category"])
+            is_sf6 = category == "Street Fighter 6"
+
+            # Calculate score with improved system
             score_change, breakdown = ScoreCalculator.calculate_final_score(
-                difficulty, response_time, is_correct, user_stats.current_streak, was_intentional
+                difficulty, response_time, is_correct, user_stats.current_streak, was_intentional, is_sf6
             )
         
             # Track this question as seen - use question_data which we already have
@@ -813,7 +929,7 @@ class TriviaCog(commands.Cog):
         
             # Create response embed
             await self._send_answer_response(message, is_correct, correct_letter, correct_answer,
-                                        response_time, score_change, breakdown, updated_user_stats, was_intentional)
+                                        response_time, score_change, breakdown, updated_user_stats, was_intentional, question_data)
         except Exception as e:
             logger.error(f"Error in trivia message handler: {e}")
             # Ensure cleanup happens
@@ -823,9 +939,9 @@ class TriviaCog(commands.Cog):
     
 
     async def _send_answer_response(self, message: discord.Message, is_correct: bool, 
-                                  correct_letter: str, correct_answer: str, response_time: float,
-                                  score_change: int, breakdown: Dict, user_stats: UserStats, was_intentional: bool):
-        """Send the response after an answer is submitted"""
+                              correct_letter: str, correct_answer: str, response_time: float,
+                              score_change: int, breakdown: Dict, user_stats: UserStats, 
+                              was_intentional: bool, question_data: Dict):
         if is_correct:
             embed = discord.Embed(
                 title="✅ Correct!",
@@ -836,7 +952,7 @@ class TriviaCog(commands.Cog):
             embed = discord.Embed(
                 title="❌ Incorrect!",
                 description=f"Nice try {message.author.mention}!\n"
-                           f"The correct answer was **{correct_letter}) {correct_answer}**",
+                            f"The correct answer was **{correct_letter}) {correct_answer}**",
                 color=discord.Color.red()
             )
         
@@ -865,11 +981,26 @@ class TriviaCog(commands.Cog):
 
         embed.add_field(name="\u200b", value=score_text, inline=False)
 
+        category = html.unescape(question_data["category"])
+        
+        # Add SF6-specific explanation if available
+        if category == "Street Fighter 6" and question_data.get("explanation"):
+            embed.add_field(
+                name="🎮 Frame Data Explanation",
+                value=f"*{question_data['explanation']}*",
+                inline=False
+            )
+
         # Add strategic tips for wrong answers
         if not is_correct and was_intentional:
+            if category == "Street Fighter 6":
+                tip_text = "*SF6 frame data is complex! Try easier difficulties first to build your knowledge base.*"
+            else:
+                tip_text = "*Choosing specific difficulties increases both rewards AND penalties. Consider random difficulty for safer play!*"
+                
             embed.add_field(
                 name="💡 Strategy Tip", 
-                value="*Choosing specific difficulties increases both rewards AND penalties. Consider random difficulty for safer play!*",
+                value=tip_text,
                 inline=False
             )
 
@@ -921,12 +1052,13 @@ class TriviaCog(commands.Cog):
             diff_text += f"\n**🎯 Unique Questions Seen:** {total_unique_questions}"
             embed.add_field(name="🎯 Difficulty Breakdown", value=diff_text, inline=False)
         
-        # Add scoring reference
-        embed.add_field(
-            name="💡 Scoring Reference", 
-            value="*Choose specific difficulties for higher rewards but steeper penalties when wrong!*",
-            inline=False
-        )
+        # Add SF6 availability notice
+        if self.sf6_trivia.available:
+            embed.add_field(
+                name="🎮 SF6 Trivia Available", 
+                value="*Try Street Fighter 6 category for hardcore frame data challenges!*",
+                inline=False
+            )
         
         await interaction.followup.send(embed=embed)
     
@@ -949,7 +1081,8 @@ class TriviaCog(commands.Cog):
                         f"+ 🌟 Be the first to play! 🌟\n"
                         f"+ ⭐ Your legend starts here! ⭐\n"
                         f"```\n\n"
-                        f"🚀💫 **Ready to compete?** Use `/trivia` to start your legendary journey! 🎯✨",
+                        f"🚀💫 **Ready to compete?** Use `/trivia` to start your legendary journey! 🎯✨\n\n"
+                        f"🎮 **NEW:** Try `Street Fighter 6` category for frame data mastery!",
                 color=discord.Color.gold()
             )
             embed.set_thumbnail(url="https://cdn.discordapp.com/emojis/1234567890.png")
@@ -1016,8 +1149,8 @@ class TriviaCog(commands.Cog):
         
         embed.description = header + podium_text + remaining_text 
         
-        # Add thumbnail and footer
-        embed.set_footer(text="✨ Use /trivia to climb the rankings! • 👑 Compete for the crown! ", 
+        # Add thumbnail and footer with SF6 mention
+        embed.set_footer(text="✨ Use /trivia to climb the rankings! • 👑 Try SF6 for frame data mastery! ", 
                         icon_url=interaction.user.display_avatar.url)
         
         await interaction.followup.send(embed=embed)
@@ -1068,13 +1201,14 @@ class TriviaCog(commands.Cog):
             inline=False
         )
         
-        # Strategy tip
+        # Strategy tip with SF6 mention
         embed.add_field(
             name="💡 Strategy Tips",
             value="• **Random difficulty** = Lower risk, lower reward\n"
                   "• **Chosen difficulty** = Higher reward, higher penalty\n"
                   "• **Speed matters** but don't rush wrong answers!\n"
-                  "• **Streaks** multiply your points significantly",
+                  "• **Streaks** multiply your points significantly\n"
+                  "• **🎮 SF6 questions** always use easy scoring (they're inherently harder!)",
             inline=False
         )
         
@@ -1085,7 +1219,7 @@ class TriviaCog(commands.Cog):
     @app_commands.command(name="trivia_debug", description="Debug information (admin only)")
     @app_commands.default_permissions(administrator=True)
     async def trivia_debug(self, interaction: discord.Interaction):
-        """Debug information for administrators"""
+        """Debug information for administrators - now includes SF6 status"""
         await interaction.response.defer(ephemeral=True)
         
         guild_id = self.get_guild_id(interaction)
@@ -1120,6 +1254,23 @@ class TriviaCog(commands.Cog):
                   f"**Medium Base:** {SCORING_CONFIG['base_points']['medium']}\n"
                   f"**Hard Base:** {SCORING_CONFIG['base_points']['hard']}\n"
                   f"**Max Speed Bonus:** {SCORING_CONFIG['speed_bonuses'][0]['bonus']}",
+            inline=False
+        )
+        
+        # SF6 system status
+        sf6_stats = self.sf6_trivia.get_statistics() if self.sf6_trivia.available else {}
+        sf6_status_text = f"**Database Available:** {'✅ Yes' if self.sf6_trivia.available else '❌ No'}\n"
+        
+        if self.sf6_trivia.available:
+            sf6_status_text += f"**Total Moves:** {sf6_stats.get('total_moves', 'Unknown')}\n"
+            sf6_status_text += f"**Characters:** {sf6_stats.get('total_characters', 'Unknown')}\n"
+            sf6_status_text += f"**Available Questions:** {sf6_stats.get('startup_available', 0)} startup, {sf6_stats.get('damage_available', 0)} damage, etc."
+        else:
+            sf6_status_text += "**Error:** Database file not found or corrupted"
+        
+        embed.add_field(
+            name="🎮 SF6 System Status",
+            value=sf6_status_text,
             inline=False
         )
         
