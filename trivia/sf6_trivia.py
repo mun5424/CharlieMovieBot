@@ -204,8 +204,8 @@ class SF6TriviaManager:
                     
             logger.debug(f"Sorting by property '{property_name}' in {prop_info['order']} order")
             
-            move_data.sort(key=lambda x: _safe_int(x[property_name]), 
-                          reverse=(prop_info["order"] == "desc"))
+            move_data.sort(key=lambda x: self._safe_int(x[property_name]),
+              reverse=(prop_info["order"] == "desc"))
             
             # Log sorted results
             logger.debug(f"Top 3 after sorting:")
