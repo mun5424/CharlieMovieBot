@@ -98,7 +98,7 @@ class SF6TriviaManager:
             elif question_type == "special_property":
                 result = self._create_special_property_question(character)
             elif question_type == "find_property":
-                result = self._create_find_property_question(character)
+                result = self._create_find_property_question()
             else:
                 # Fall back to original question generation
                 result = self._create_standard_question(character, difficulty)
