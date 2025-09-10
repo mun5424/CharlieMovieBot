@@ -764,17 +764,6 @@ class TriviaCog(commands.Cog):
                 inline=True
             )
         
-        # Special SF6 indicator with explanation
-        if category == "Street Fighter 6":
-            sf6_explanation = question_data.get("explanation", "")
-            question_type = question_data.get("question_type", "standard").replace("_", " ").title()
-            
-            embed.add_field(
-                name="🎮 SF6 Info",
-                value=f"**Type:** {question_type}\n**Character:** {question_data.get('character', 'Multiple')}\n**Move:** {question_data.get('move_name', 'Various')}",
-                inline=False
-            )
-        
         # Get user's current streak in this server
         user_stats = self.data_manager.get_user_stats(guild_id, str(interaction.user.id), interaction.user.name)
         if user_stats.current_streak > 1:

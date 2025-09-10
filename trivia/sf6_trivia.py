@@ -97,6 +97,8 @@ class SF6TriviaManager:
                 result = self._create_gauge_efficiency_question(character)
             elif question_type == "special_property":
                 result = self._create_special_property_question(character)
+            elif question_type == "find_property":
+                result = self._create_find_property_question(character)
             else:
                 # Fall back to original question generation
                 result = self._create_standard_question(character, difficulty)
@@ -120,9 +122,9 @@ class SF6TriviaManager:
         if difficulty == "easy":
             types = ["standard", "comparative"]
         elif difficulty == "medium":
-            types = ["comparative", "extreme_value", "standard", "special_property"]
+            types = ["comparative", "extreme_value", "standard", "special_property", "find_property"]
         elif difficulty == "hard":
-            types = ["extreme_value", "frame_trap", "gauge_efficiency", "comparative", "special_property"]
+            types = ["extreme_value", "frame_trap", "gauge_efficiency", "comparative", "special_property", "find_property"]
         else:
             # Random difficulty
             types = ["comparative", "extreme_value", "frame_trap", "gauge_efficiency", "special_property", "standard"]
@@ -178,20 +180,31 @@ class SF6TriviaManager:
             move_data = [dict(zip(columns, row)) for row in results]
             
             # Sort by the property value
-            def safe_int(val):
+            def _safe_int(self, val: str) -> int:
+                """Parse integer values safely, preserving negatives."""
                 try:
-                    # Handle negative values and complex strings
-                    if isinstance(val, str):
-                        val = val.replace('-', '').replace('+', '')
-                        if val.isdigit():
-                            return int(val)
-                    return int(val) if val else 0
-                except:
+                    if val is None:
+                        return 0
+                    if isinstance(val, int):
+                        return val
+                    val = str(val).strip()
+                    return int(val)
+                except Exception:
                     return 0
-            
+                
+            def _dedup_answers(self, answers: List[str], correct: str) -> List[str]:
+                """Remove duplicates and the correct answer from wrong answers."""
+                unique = []
+                seen = set([correct])
+                for a in answers:
+                    if a not in seen:
+                        unique.append(a)
+                        seen.add(a)
+                return unique[:3]
+                    
             logger.debug(f"Sorting by property '{property_name}' in {prop_info['order']} order")
             
-            move_data.sort(key=lambda x: safe_int(x[property_name]), 
+            move_data.sort(key=lambda x: _safe_int(x[property_name]), 
                           reverse=(prop_info["order"] == "desc"))
             
             # Log sorted results
@@ -225,16 +238,18 @@ class SF6TriviaManager:
             logger.info(f"Generated question: '{question_stem}' - Answer: {correct_char} ({correct_value})")
             
             # Generate wrong answers from other characters
-            wrong_chars = [data["character"] for data in move_data[1:4]]
+            # Handle ties
+            best_value = self._safe_int(move_data[0][property_name])
+            tied = [m for m in move_data if self._safe_int(m[property_name]) == best_value]
+            correct_pick = random.choice(tied)
+            correct_char = correct_pick["character"]
+
+            # Generate wrong answers excluding tied characters
+            wrong_chars = [m["character"] for m in move_data if m["character"] != correct_char]
+            wrong_chars = self._dedup_answers(wrong_chars, correct_char)
+
             if len(wrong_chars) < 3:
-                logger.debug(f"Only {len(wrong_chars)} wrong answers from move_data, filling with random characters")
-                # Fill with random characters if needed
-                all_chars = list(set(data["character"] for data in move_data))
-                while len(wrong_chars) < 3 and len(all_chars) > len(wrong_chars) + 1:
-                    char = random.choice(all_chars)
-                    if char != correct_char and char not in wrong_chars:
-                        wrong_chars.append(char)
-                        logger.debug(f"Added random character: {char}")
+                return None
             
             logger.debug(f"Wrong answer characters: {wrong_chars[:3]}")
             
@@ -267,6 +282,65 @@ class SF6TriviaManager:
         finally:
             conn.close()
     
+    def _create_find_property_question(self) -> Optional[SF6Question]:
+            """Find the move that matches an exact property value (damage, onHit, etc)."""
+            conn = sqlite3.connect(self.db_path)
+            try:
+                properties = ["damage", "onHit", "onBlock", "active", "recovery",
+                            "driveGaugeGain", "driveGaugeLoss", "superGaugeGain"]
+                prop = random.choice(properties)
+
+                # Query moves with a valid property value
+                cursor = conn.execute(f"""
+                    SELECT character, move_name, {prop}
+                    FROM moves
+                    WHERE {prop} IS NOT NULL AND {prop} != '' 
+                    AND {prop} != 'None'
+                    ORDER BY RANDOM()
+                    LIMIT 50
+                """)
+                results = cursor.fetchall()
+                if not results:
+                    return None
+
+                # Pick correct move
+                correct_char, move_name, correct_val = random.choice(results)
+                correct_val = str(correct_val).strip()
+
+                # Get wrong moves with close values
+                wrong_candidates = [(c, m, v) for (c, m, v) in results if str(v) != correct_val]
+                if not wrong_candidates:
+                    return None
+                random.shuffle(wrong_candidates)
+                wrongs = []
+                for c, m, v in wrong_candidates:
+                    move_text = f"{c} {m}".strip()
+                    if move_text not in wrongs:
+                        wrongs.append(move_text)
+                    if len(wrongs) == 3:
+                        break
+
+                if len(wrongs) < 3:
+                    return None
+
+                # Question format
+                question_text = f"Which move in Street Fighter 6 does {correct_val} {prop}?"
+                correct_answer = f"{correct_char} {move_name}".strip()
+
+                return SF6Question(
+                    question=question_text,
+                    correct_answer=correct_answer,
+                    incorrect_answers=wrongs,
+                    difficulty="hard",
+                    category="Street Fighter 6",
+                    move_name=move_name,
+                    character=correct_char,
+                    explanation=f"{correct_answer} has {correct_val} {prop}",
+                    question_type="find_property"
+                )
+            finally:
+                conn.close()
+
     def _create_extreme_value_question(self, character_filter: Optional[str] = None) -> Optional[SF6Question]:
         """Create questions like 'Which character's Standing Light Punch has the fastest startup?' - WITH LOGGING"""
         logger.info(f"Creating extreme value question for character: {character_filter}")
