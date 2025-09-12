@@ -131,7 +131,29 @@ class SF6TriviaManager:
         
         logger.debug(f"Available question types for difficulty '{difficulty}': {types}")
         return types
-    
+        
+    def _safe_int(self, val: str) -> int:
+        """Parse integer values safely, preserving negatives."""
+        try:
+            if val is None:
+                return 0
+            if isinstance(val, int):
+                return val
+            val = str(val).strip()
+            return int(val)
+        except Exception:
+            return 0
+
+    def _dedup_answers(self, answers: List[str], correct: str) -> List[str]:
+        """Remove duplicates and the correct answer from wrong answers."""
+        unique = []
+        seen = set([correct])
+        for a in answers:
+            if a not in seen:
+                unique.append(a)
+                seen.add(a)
+        return unique[:3]
+
     def _create_comparative_question(self, character_filter: Optional[str] = None) -> Optional[SF6Question]:
         """Create questions like 'Which character's Crouching Light Punch has the slowest startup?' - WITH LOGGING"""
         logger.info(f"Creating comparative question for character: {character_filter}")
@@ -178,34 +200,12 @@ class SF6TriviaManager:
             columns = ["character", "move_name", "startup", "recovery", "damage", 
                       "driveGaugeGain", "driveGaugeLoss", "superGaugeGain", "onHit", "onBlock"]
             move_data = [dict(zip(columns, row)) for row in results]
-            
-            # Sort by the property value
-            def _safe_int(self, val: str) -> int:
-                """Parse integer values safely, preserving negatives."""
-                try:
-                    if val is None:
-                        return 0
-                    if isinstance(val, int):
-                        return val
-                    val = str(val).strip()
-                    return int(val)
-                except Exception:
-                    return 0
-                
-            def _dedup_answers(self, answers: List[str], correct: str) -> List[str]:
-                """Remove duplicates and the correct answer from wrong answers."""
-                unique = []
-                seen = set([correct])
-                for a in answers:
-                    if a not in seen:
-                        unique.append(a)
-                        seen.add(a)
-                return unique[:3]
+
                     
             logger.debug(f"Sorting by property '{property_name}' in {prop_info['order']} order")
             
-            move_data.sort(key=lambda x: self._safe_int(x[property_name]),
-              reverse=(prop_info["order"] == "desc"))
+            move_data.sort(key=lambda x: (self._safe_int(x[property_name]), x["character"]),
+               reverse=(prop_info["order"] == "desc"))
             
             # Log sorted results
             logger.debug(f"Top 3 after sorting:")
@@ -238,11 +238,10 @@ class SF6TriviaManager:
             logger.info(f"Generated question: '{question_stem}' - Answer: {correct_char} ({correct_value})")
             
             # Generate wrong answers from other characters
-            # Handle ties
             best_value = self._safe_int(move_data[0][property_name])
             tied = [m for m in move_data if self._safe_int(m[property_name]) == best_value]
-            correct_pick = random.choice(tied)
-            correct_char = correct_pick["character"]
+            correct_char = move_data[0]["character"]
+            correct_value = move_data[0][property_name]
 
             # Generate wrong answers excluding tied characters
             wrong_chars = [m["character"] for m in move_data if m["character"] != correct_char]
