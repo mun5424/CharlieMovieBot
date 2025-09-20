@@ -408,7 +408,7 @@ async def check_custom_reminders():
 
 
 # Use your existing function to calculate UTC time for 11 AM Pacific
-UTC_TIME_FOR_11AM_PACIFIC = get_utc_time_for_pacific(hour=11, minute=26)
+UTC_TIME_FOR_11AM_PACIFIC = get_utc_time_for_pacific(hour=11, minute=0)
 
 async def check_dodgers_game():
     """Check if Dodgers won a home game yesterday using MLB API"""
