@@ -407,8 +407,127 @@ async def check_custom_reminders():
                     logger.warning(f"Channel {channel_id} not found.")
 
 
+# Use your existing function to calculate UTC time for 11 AM Pacific
+UTC_TIME_FOR_11AM_PACIFIC = get_utc_time_for_pacific(hour=11, minute=0)
+
+async def check_dodgers_game():
+    """Check if Dodgers won a home game yesterday using MLB API"""
+    try:
+        # Get yesterday's date in Pacific time
+        yesterday = datetime.datetime.now(PACIFIC_TZ) - datetime.timedelta(days=1)
+        date_str = yesterday.strftime('%Y-%m-%d')
+
+        # MLB Stats API endpoint for Dodgers games (Team ID: 119)
+        url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&teamId=119&startDate={date_str}&endDate={date_str}"
+
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as response:
+                if response.status == 200:
+                    data = await response.json()
+
+                    if data.get('dates'):
+                        games = data['dates'][0].get('games', [])
+                        home_wins = []
+
+                        for game in games:
+                            # Check if game is finished
+                            if game.get('status', {}).get('detailedState') == 'Final':
+                                teams = game.get('teams', {})
+
+                                # Only check if Dodgers are the HOME team
+                                if teams.get('home', {}).get('team', {}).get('id') == 119:
+                                    home_score = teams.get('home', {}).get('score', 0)
+                                    away_score = teams.get('away', {}).get('score', 0)
+                                    is_winner = home_score > away_score  
+
+                                    home_wins.append(is_winner)
+
+                                    if is_winner:
+                                        logger.info(f"[Dodgers] Won home game on {date_str} ({home_score}-{away_score})")
+                                    else:
+                                        logger.info(f"[Dodgers] Lost home game on {date_str} ({home_score}-{away_score})")
+
+                        if home_wins:
+                            return any(home_wins)
+                        else:
+                            logger.info(f"[Dodgers] No home games on {date_str}")
+                            return None
+
+                    logger.info(f"[Dodgers] No games found for {date_str}")
+                    return None
+                else:
+                    logger.error(f"[Dodgers] HTTP {response.status} from MLB API")
+                    return False
+
+    except aiohttp.ClientError as e:
+        logger.error(f"[Dodgers] Network error checking game: {e}")
+        return False
+    except Exception as e:
+        logger.error(f"[Dodgers] Unexpected error checking game: {e}")
+        return False
+
+
+@tasks.loop(time=UTC_TIME_FOR_11AM_PACIFIC)
+async def check_dodgers_and_notify():
+    """Check if Dodgers won a home game yesterday and send Panda Express notification at 11 AM PT"""
+    if bot_instance is None:
+        logger.warning("[Dodgers] Bot instance not set. Cannot send notifications.")
+        return
+
+    today = datetime.datetime.now(PACIFIC_TZ).date()
+    logger.info(f"[Dodgers] Running daily check at 11 AM PT on {today}")
+
+    # Check if Dodgers won a home game yesterday
+    dodgers_result = await check_dodgers_game()
+
+    if dodgers_result is True:
+        logger.info("[Dodgers] Home victory confirmed! Sending Panda Express notifications")
+
+        embed = discord.Embed(
+            title="🐼 PANDA EXPRESS $7 DEAL TODAY! 🐼",
+            description="**The Dodgers won at home last night!** Head to Panda Express for your victory meal! ⚾",
+            color=0x005A9C  # Dodgers blue
+        )
+
+        embed.add_field(
+            name="💰 **Deal Details**",
+            value=(
+                "• **Price:** $6.59 for a 2-Entree Plate \n"
+                "• **Valid:** Today only\n"
+                "• **Location:** All SoCal Panda Express locations\n"
+                "• **How:** Use DODGERSWIN on your Panda Express App Order Checkout!"
+            ),
+            inline=False
+        )
+
+        embed.set_footer(text="This deal happens every day after a Dodgers HOME win! 💙")
+        embed.set_thumbnail(url="https://content.sportslogos.net/logos/54/63/full/los_angeles_dodgers_logo_primary_2024_sportslogosnet-6270.png")
+
+        # Send to all Panda Express channels with role pings
+        for channel_id in config.PANDA_CHANNEL_IDS:
+            channel = bot_instance.get_channel(channel_id)
+            if channel:
+                try:
+                    # Get the role to ping for this channel
+                    role_id = config.PANDA_CHANNEL_ROLES.get(channel_id)
+                    role_mention = f"<@&{role_id}>" if role_id else ""
+
+                    await channel.send(content=role_mention, embed=embed)
+                    logger.info(f"[Dodgers] Panda Express notification sent to channel {channel_id}")
+                except Exception as e:
+                    logger.error(f"[Dodgers] Error sending to channel {channel_id}: {e}")
+            else:
+                logger.warning(f"[Dodgers] Channel {channel_id} not found")
+
+    elif dodgers_result is False:
+        logger.info("[Dodgers] Dodgers lost home game(s) yesterday. No Panda Express deal.")
+    else:  # dodgers_result is None
+        logger.info("[Dodgers] No home games yesterday. No Panda Express deal to check.")
+
+
 def setup_reminder(bot):
     global bot_instance
     bot_instance = bot
     check_todays_tournament.start() # ⏰ now runs daily at 2 PM PST
     check_custom_reminders.start() # checks daily at 1PM PST
+    check_dodgers_and_notify.start() # ⚾ checks daily at 11 AM PST
