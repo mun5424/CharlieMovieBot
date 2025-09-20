@@ -408,7 +408,7 @@ async def check_custom_reminders():
 
 
 # Use your existing function to calculate UTC time for 11 AM Pacific
-UTC_TIME_FOR_11AM_PACIFIC = get_utc_time_for_pacific(hour=11, minute=0)
+UTC_TIME_FOR_11AM_PACIFIC = get_utc_time_for_pacific(hour=11, minute=26)
 
 async def check_dodgers_game():
     """Check if Dodgers won a home game yesterday using MLB API"""
@@ -461,10 +461,12 @@ async def check_dodgers_game():
 
     except aiohttp.ClientError as e:
         logger.error(f"[Dodgers] Network error checking game: {e}")
-        return False
+        return None
     except Exception as e:
-        logger.error(f"[Dodgers] Unexpected error checking game: {e}")
-        return False
+        logger.error(f"[Dodgers] Unexpected error checking game: {type(e).__name__}: {str(e)}")
+        import traceback
+        logger.error(f"[Dodgers] Full traceback: {traceback.format_exc()}")
+        return None  # Fixed the return value
 
 
 @tasks.loop(time=UTC_TIME_FOR_11AM_PACIFIC)
