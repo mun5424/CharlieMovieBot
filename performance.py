@@ -113,7 +113,7 @@ class PerformanceMonitor:
             await self._check_thresholds(stats)
             
             # Log periodic stats
-            await self._log_periodic_stats(stats)
+            # await self._log_periodic_stats(stats)
             
             return stats
             

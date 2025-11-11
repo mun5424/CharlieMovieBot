@@ -532,4 +532,4 @@ def setup_reminder(bot):
     bot_instance = bot
     check_todays_tournament.start() # ⏰ now runs daily at 2 PM PST
     check_custom_reminders.start() # checks daily at 1PM PST
-    check_dodgers_and_notify.start() # ⚾ checks daily at 11 AM PST
+    # check_dodgers_and_notify.start() # ⚾ checks daily at 11 AM PST
