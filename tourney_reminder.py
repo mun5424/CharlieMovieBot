@@ -37,7 +37,7 @@ TOURNAMENT_SCHEDULE = {
     0: "Motivation Academy",     # Monday
     1: "Can Opener Series",      # Tuesday  
     2: "TNS Street Fighter 6",   # Wednesday
-    3: "ONi Arena: Street Fighter" # Thursday
+    # 3: "ONi Arena: Street Fighter" # Thursday
     # 3: "FlyQuest Fight Series",  # Thursday - disabling flyquest as ONi is a guarenteed weekly.
 }
 
