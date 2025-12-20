@@ -951,17 +951,10 @@ def setup(bot):
         score_text = int(score) if score == int(score) else score
 
         embed = discord.Embed(
-            title=f"🎲 Random Review: {movie_title} ({movie_year})",
-            description=f"*Maybe you should watch this one?*",
+            title=f"🎲 {movie_title} ({movie_year})",
+            description=review["review_text"],
             color=0xe91e63
         )
-
-        embed.add_field(
-            name=f"**{review['username']}** gave it ⭐ {score_text}/10",
-            value=review["review_text"],
-            inline=False
-        )
-
-        embed.set_footer(text="Use /review_movie to write your own review!")
+        embed.set_author(name=f"{review['username']} - ⭐ {score_text}/10")
 
         await interaction.followup.send(embed=embed)
