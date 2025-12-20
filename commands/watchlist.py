@@ -897,10 +897,12 @@ def setup(bot):
 
     @bot.tree.command(name="review_random", description="Get a random movie review for inspiration")
     async def review_random_cmd(interaction: discord.Interaction):
+        await interaction.response.defer()
+
         result = await get_random_review()
 
         if not result:
-            return await interaction.response.send_message(
+            return await interaction.followup.send(
                 "📭 No reviews have been written yet. Be the first to write one with `/review_movie`!"
             )
 
@@ -926,4 +928,4 @@ def setup(bot):
 
         embed.set_footer(text="Use /review_movie to write your own review!")
 
-        await interaction.response.send_message(embed=embed)
+        await interaction.followup.send(embed=embed)
