@@ -4,9 +4,133 @@ from discord.ext import commands
 from discord import app_commands
 from tmdb_client import search_movie_async, get_movie_details_async
 from commands.autocomplete import movie_search_autocomplete
+from commands.watchlist import get_movie_reviews, format_reviewers_text, add_movie_review
+
+# Constants
+REVIEW_VIEW_TIMEOUT = 300  # 5 minutes
 
 
 logger = logging.getLogger(__name__)
+
+
+class SearchReviewModal(discord.ui.Modal):
+    """Modal for entering a movie review from search results"""
+
+    def __init__(self, movie_id: int, movie_title: str, movie_year: str):
+        # Truncate title if needed (modal title max is 45 chars)
+        display_title = f"{movie_title} ({movie_year})"
+        if len(display_title) > 45:
+            display_title = display_title[:42] + "..."
+        super().__init__(title=display_title)
+        self.movie_id = movie_id
+        self.movie_title = movie_title
+        self.movie_year = movie_year
+
+    score = discord.ui.TextInput(
+        label="Score (1-10)",
+        placeholder="Enter a score from 1 to 10",
+        min_length=1,
+        max_length=2,
+        required=True
+    )
+
+    review_text = discord.ui.TextInput(
+        label="Your Review",
+        style=discord.TextStyle.paragraph,
+        placeholder="Write your review here...",
+        min_length=10,
+        max_length=2000,
+        required=True
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            score_value = int(self.score.value)
+            if score_value < 1 or score_value > 10:
+                return await interaction.response.send_message(
+                    "❌ Score must be between 1 and 10.", ephemeral=True
+                )
+        except ValueError:
+            return await interaction.response.send_message(
+                "❌ Score must be a number between 1 and 10.", ephemeral=True
+            )
+
+        result = await add_movie_review(
+            movie_id=self.movie_id,
+            movie_title=self.movie_title,
+            movie_year=self.movie_year,
+            user_id=str(interaction.user.id),
+            username=interaction.user.display_name,
+            score=score_value,
+            review_text=self.review_text.value
+        )
+
+        if result == "updated":
+            await interaction.response.send_message(
+                f"✅ Updated your review for **{self.movie_title} ({self.movie_year})** - {score_value}/10",
+                ephemeral=True
+            )
+        else:
+            await interaction.response.send_message(
+                f"✅ Review submitted for **{self.movie_title} ({self.movie_year})** - {score_value}/10"
+            )
+
+
+class SearchReviewView(discord.ui.View):
+    """View with review buttons for search results"""
+
+    def __init__(self, movie_id: int, movie_title: str, movie_year: str):
+        super().__init__(timeout=REVIEW_VIEW_TIMEOUT)
+        self.movie_id = movie_id
+        self.movie_title = movie_title
+        self.movie_year = movie_year
+        self.message = None
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+        if self.message:
+            try:
+                await self.message.edit(view=self)
+            except discord.NotFound:
+                pass
+            except Exception:
+                pass
+
+    @discord.ui.button(label="📖 View Reviews", style=discord.ButtonStyle.primary)
+    async def view_reviews_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        reviews = await get_movie_reviews(self.movie_id)
+
+        if not reviews:
+            return await interaction.response.send_message(
+                f"📭 No reviews yet for **{self.movie_title} ({self.movie_year})**",
+                ephemeral=True
+            )
+
+        embed = discord.Embed(
+            title=f"📝 Reviews for {self.movie_title} ({self.movie_year})",
+            color=0x9b59b6
+        )
+
+        for review in reviews:
+            score_display = f"{'⭐' * review['score']} ({review['score']}/10)"
+            review_preview = review['review_text']
+            if len(review_preview) > 300:
+                review_preview = review_preview[:297] + "..."
+
+            embed.add_field(
+                name=f"**{review['username']}** - {score_display}",
+                value=review_preview,
+                inline=False
+            )
+
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @discord.ui.button(label="✍️ Write Review", style=discord.ButtonStyle.success)
+    async def write_review_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        modal = SearchReviewModal(self.movie_id, self.movie_title, self.movie_year)
+        await interaction.response.send_modal(modal)
+
 
 def setup(bot):
     logger.info("Setting up general commands...")
@@ -70,11 +194,23 @@ def setup(bot):
             poster_path = detailed_movie.get('poster_path')
             if poster_path:
                 embed.set_image(url=f"https://image.tmdb.org/t/p/original{poster_path}")
-            
-            # Add TMDB disclaimer at the bottom, You dont need this if youre using a private discord
-            # embed.set_footer(text="This product uses the TMDB API but is not endorsed or certified by TMDB.")
-            
-            await interaction.followup.send(embed=embed)
+
+            # Check for reviews
+            movie_id = detailed_movie.get('id') or movie.get('id')
+            movie_title = detailed_movie.get('title', 'Unknown')
+            movie_year = detailed_movie.get('year', 'Unknown')
+
+            reviews = await get_movie_reviews(movie_id)
+
+            if reviews:
+                # Add reviewer names to embed
+                reviewers_text = format_reviewers_text(reviews)
+                embed.add_field(name="📝 Reviews", value=reviewers_text, inline=False)
+
+            # Create view with review buttons
+            view = SearchReviewView(movie_id, movie_title, str(movie_year))
+            message = await interaction.followup.send(embed=embed, view=view)
+            view.message = message
         else:
             await interaction.followup.send("❌ Movie not found. Try a different search term.")
 

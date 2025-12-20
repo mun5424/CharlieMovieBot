@@ -1,6 +1,7 @@
-# commands/watchlist.py - Updated with movie suggestions
+# commands/watchlist.py - Updated with movie suggestions and reviews
 import logging
-from typing import Optional
+import time
+from typing import Optional, List, Dict
 import discord
 from discord.ext import commands
 from discord import app_commands
@@ -13,6 +14,78 @@ logger = logging.getLogger(__name__)
 # Constants
 SUGGESTION_VIEW_TIMEOUT = 300  # 5 minutes
 WATCHED_LIST_PAGE_SIZE = 5
+REVIEW_VIEW_TIMEOUT = 300  # 5 minutes
+
+
+# Helper functions for reviews (module level so they can be imported)
+async def get_reviews_data():
+    """Get the reviews section from data store"""
+    data = await load_data_async()
+    if "reviews" not in data:
+        data["reviews"] = {}
+    return data["reviews"], data
+
+
+async def get_movie_reviews(movie_id: int) -> List[Dict]:
+    """Get all reviews for a specific movie"""
+    reviews, _ = await get_reviews_data()
+    return reviews.get(str(movie_id), [])
+
+
+async def add_movie_review(movie_id: int, movie_title: str, movie_year: str,
+                           user_id: str, username: str, score: int, review_text: str):
+    """Add a review for a movie"""
+    reviews, data = await get_reviews_data()
+    movie_key = str(movie_id)
+
+    if movie_key not in reviews:
+        reviews[movie_key] = []
+
+    # Check if user already reviewed this movie
+    for i, review in enumerate(reviews[movie_key]):
+        if review["user_id"] == user_id:
+            # Update existing review
+            reviews[movie_key][i] = {
+                "user_id": user_id,
+                "username": username,
+                "score": score,
+                "review_text": review_text,
+                "movie_title": movie_title,
+                "movie_year": movie_year,
+                "timestamp": time.time()
+            }
+            await save_data_async(data)
+            return "updated"
+
+    # Add new review
+    reviews[movie_key].append({
+        "user_id": user_id,
+        "username": username,
+        "score": score,
+        "review_text": review_text,
+        "movie_title": movie_title,
+        "movie_year": movie_year,
+        "timestamp": time.time()
+    })
+    await save_data_async(data)
+    return "added"
+
+
+def format_reviewers_text(reviews: List[Dict]) -> str:
+    """Format the reviewer names for display"""
+    if not reviews:
+        return ""
+
+    usernames = [r["username"] for r in reviews]
+
+    if len(usernames) == 1:
+        return f"**{usernames[0]}** has reviewed and rated this movie"
+    elif len(usernames) == 2:
+        return f"**{usernames[0]}** and **{usernames[1]}** have reviewed and rated this movie"
+    else:
+        # 3 or more: "User1, User2, and User3 have reviewed..."
+        all_but_last = ", ".join(f"**{name}**" for name in usernames[:-1])
+        return f"{all_but_last}, and **{usernames[-1]}** have reviewed and rated this movie"
 
 
 def setup(bot):
@@ -624,7 +697,7 @@ def setup(bot):
     @bot.tree.command(name="stats", description="View your movie watching statistics")
     async def stats_cmd(interaction: discord.Interaction):
         entry, _ = await get_user_entry(str(interaction.user.id))
-        
+
         embed = discord.Embed(
             title="📊 Your Movie Stats",
             color=0xe74c3c
@@ -633,5 +706,158 @@ def setup(bot):
         embed.add_field(name="✅ Movies Watched", value=len(entry["watched"]), inline=True)
         embed.add_field(name="📬 Pending Suggestions", value=len(entry["pending"]), inline=True)
         embed.add_field(name="📈 Total Movies", value=len(entry["watchlist"]) + len(entry["watched"]), inline=True)
-        
+
         await interaction.response.send_message(embed=embed)
+
+    # ==================== MOVIE REVIEWS ====================
+
+    class ReviewModal(discord.ui.Modal):
+        """Modal for entering a movie review"""
+
+        def __init__(self, movie_id: int, movie_title: str, movie_year: str):
+            # Truncate title if needed (modal title max is 45 chars)
+            display_title = f"{movie_title} ({movie_year})"
+            if len(display_title) > 45:
+                display_title = display_title[:42] + "..."
+            super().__init__(title=display_title)
+            self.movie_id = movie_id
+            self.movie_title = movie_title
+            self.movie_year = movie_year
+
+        score = discord.ui.TextInput(
+            label="Score (1-10)",
+            placeholder="Enter a score from 1 to 10",
+            min_length=1,
+            max_length=2,
+            required=True
+        )
+
+        review_text = discord.ui.TextInput(
+            label="Your Review",
+            style=discord.TextStyle.paragraph,
+            placeholder="Write your review here...",
+            min_length=10,
+            max_length=2000,
+            required=True
+        )
+
+        async def on_submit(self, interaction: discord.Interaction):
+            # Validate score
+            try:
+                score_value = int(self.score.value)
+                if score_value < 1 or score_value > 10:
+                    return await interaction.response.send_message(
+                        "❌ Score must be between 1 and 10.", ephemeral=True
+                    )
+            except ValueError:
+                return await interaction.response.send_message(
+                    "❌ Score must be a number between 1 and 10.", ephemeral=True
+                )
+
+            # Save the review
+            result = await add_movie_review(
+                movie_id=self.movie_id,
+                movie_title=self.movie_title,
+                movie_year=self.movie_year,
+                user_id=str(interaction.user.id),
+                username=interaction.user.display_name,
+                score=score_value,
+                review_text=self.review_text.value
+            )
+
+            if result == "updated":
+                await interaction.response.send_message(
+                    f"✅ Updated your review for **{self.movie_title} ({self.movie_year})** - {score_value}/10",
+                    ephemeral=True
+                )
+            else:
+                await interaction.response.send_message(
+                    f"✅ Review submitted for **{self.movie_title} ({self.movie_year})** - {score_value}/10"
+                )
+
+    class MovieReviewView(discord.ui.View):
+        """View with buttons for viewing and writing reviews"""
+
+        def __init__(self, movie_id: int, movie_title: str, movie_year: str):
+            super().__init__(timeout=REVIEW_VIEW_TIMEOUT)
+            self.movie_id = movie_id
+            self.movie_title = movie_title
+            self.movie_year = movie_year
+            self.message = None
+
+        async def on_timeout(self):
+            for item in self.children:
+                item.disabled = True
+            if self.message:
+                try:
+                    await self.message.edit(view=self)
+                except discord.NotFound:
+                    pass
+                except Exception:
+                    pass
+
+        @discord.ui.button(label="📖 View Reviews", style=discord.ButtonStyle.primary)
+        async def view_reviews_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+            reviews = await get_movie_reviews(self.movie_id)
+
+            if not reviews:
+                return await interaction.response.send_message(
+                    f"📭 No reviews yet for **{self.movie_title} ({self.movie_year})**",
+                    ephemeral=True
+                )
+
+            embed = discord.Embed(
+                title=f"📝 Reviews for {self.movie_title} ({self.movie_year})",
+                color=0x9b59b6
+            )
+
+            for review in reviews:
+                score_display = f"{'⭐' * review['score']} ({review['score']}/10)"
+                review_preview = review['review_text']
+                if len(review_preview) > 300:
+                    review_preview = review_preview[:297] + "..."
+
+                embed.add_field(
+                    name=f"**{review['username']}** - {score_display}",
+                    value=review_preview,
+                    inline=False
+                )
+
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+
+        @discord.ui.button(label="✍️ Write Review", style=discord.ButtonStyle.success)
+        async def write_review_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+            modal = ReviewModal(self.movie_id, self.movie_title, self.movie_year)
+            await interaction.response.send_modal(modal)
+
+    @bot.tree.command(name="review_movie", description="Write a review for a movie")
+    @app_commands.describe(title="Start typing a movie title to see suggestions")
+    @app_commands.autocomplete(title=movie_search_autocomplete)
+    async def review_movie_cmd(interaction: discord.Interaction, title: str):
+        await interaction.response.defer(ephemeral=True)
+
+        movie = await search_movie_async(title)
+        if not movie:
+            return await interaction.followup.send("❌ Movie not found.", ephemeral=True)
+
+        # Check if user already has a review for this movie
+        reviews = await get_movie_reviews(movie["id"])
+        user_review = next((r for r in reviews if r["user_id"] == str(interaction.user.id)), None)
+
+        if user_review:
+            embed = discord.Embed(
+                title=f"📝 Your existing review for {movie['title']} ({movie['year']})",
+                description=f"**Score:** {user_review['score']}/10\n\n{user_review['review_text']}",
+                color=0xf39c12
+            )
+            embed.set_footer(text="Click 'Write Review' below to update your review")
+        else:
+            embed = discord.Embed(
+                title=f"📝 Review {movie['title']} ({movie['year']})",
+                description="Click the button below to write your review!",
+                color=0x3498db
+            )
+
+        view = MovieReviewView(movie["id"], movie["title"], movie["year"])
+        message = await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+        view.message = message
