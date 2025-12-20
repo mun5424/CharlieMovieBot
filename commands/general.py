@@ -81,6 +81,65 @@ class SearchReviewModal(discord.ui.Modal):
             )
 
 
+class ReviewPaginationView(discord.ui.View):
+    """Paginated view for displaying reviews"""
+
+    REVIEWS_PER_PAGE = 5
+
+    def __init__(self, reviews: list, movie_title: str, movie_year: str):
+        super().__init__(timeout=REVIEW_VIEW_TIMEOUT)
+        self.reviews = reviews
+        self.movie_title = movie_title
+        self.movie_year = movie_year
+        self.current_page = 0
+        self.total_pages = (len(reviews) + self.REVIEWS_PER_PAGE - 1) // self.REVIEWS_PER_PAGE
+        self.message = None
+        self.update_buttons()
+
+    def get_page_embeds(self) -> list:
+        """Get embeds for current page"""
+        start = self.current_page * self.REVIEWS_PER_PAGE
+        end = start + self.REVIEWS_PER_PAGE
+        page_reviews = self.reviews[start:end]
+
+        embeds = []
+        for review in page_reviews:
+            score = review['score']
+            score_text = int(score) if score == int(score) else score
+
+            embed = discord.Embed(
+                title=f"📝 {self.movie_title} ({self.movie_year})",
+                description=review['review_text'],
+                color=0x9b59b6
+            )
+            embed.set_author(name=f"{review['username']} - ⭐ {score_text}/10")
+            embeds.append(embed)
+
+        # Add page indicator to the last embed
+        if embeds:
+            embeds[-1].set_footer(text=f"Page {self.current_page + 1} of {self.total_pages} • {len(self.reviews)} total reviews")
+
+        return embeds
+
+    def update_buttons(self):
+        self.prev_button.disabled = self.current_page == 0
+        self.next_button.disabled = self.current_page >= self.total_pages - 1
+
+    @discord.ui.button(label="⬅️ Previous", style=discord.ButtonStyle.grey)
+    async def prev_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.current_page > 0:
+            self.current_page -= 1
+            self.update_buttons()
+            await interaction.response.edit_message(embeds=self.get_page_embeds(), view=self)
+
+    @discord.ui.button(label="➡️ Next", style=discord.ButtonStyle.grey)
+    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.current_page < self.total_pages - 1:
+            self.current_page += 1
+            self.update_buttons()
+            await interaction.response.edit_message(embeds=self.get_page_embeds(), view=self)
+
+
 class SearchReviewView(discord.ui.View):
     """View with review buttons for search results"""
 
@@ -111,27 +170,9 @@ class SearchReviewView(discord.ui.View):
                 f"📭 No reviews yet for **{self.movie_title} ({self.movie_year})**"
             )
 
-        embed = discord.Embed(
-            title=f"📝 Reviews for {self.movie_title} ({self.movie_year})",
-            color=0x9b59b6
-        )
-
-        for review in reviews:
-            score = review['score']
-            # Format score (remove .0 for whole numbers)
-            score_text = int(score) if score == int(score) else score
-            score_display = f"⭐ {score_text}/10"
-            review_preview = review['review_text']
-            if len(review_preview) > 300:
-                review_preview = review_preview[:297] + "..."
-
-            embed.add_field(
-                name=f"**{review['username']}** - {score_display}",
-                value=review_preview,
-                inline=False
-            )
-
-        await interaction.response.send_message(embed=embed)
+        # Use pagination view
+        view = ReviewPaginationView(reviews, self.movie_title, self.movie_year)
+        await interaction.response.send_message(embeds=view.get_page_embeds(), view=view)
 
     @discord.ui.button(label="✍️ Write Review", style=discord.ButtonStyle.success)
     async def write_review_button(self, interaction: discord.Interaction, button: discord.ui.Button):
