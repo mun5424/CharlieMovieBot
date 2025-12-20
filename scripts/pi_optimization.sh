@@ -51,54 +51,31 @@ echo ""
 # Detect how the bot is started
 BOT_DIR="$HOME/CharlieMovieBot"
 START_SCRIPT=""
+STOP_SCRIPT=""
 
-# Check for common start script names
-if [ -f "$BOT_DIR/.start_bot.sh" ]; then
-    START_SCRIPT="$BOT_DIR/.start_bot.sh"
-elif [ -f "$BOT_DIR/start_bot.sh" ]; then
+# Check for start/stop scripts (screen-based setup)
+if [ -f "$BOT_DIR/start_bot.sh" ] && [ -f "$BOT_DIR/stop_bot.sh" ]; then
     START_SCRIPT="$BOT_DIR/start_bot.sh"
-elif [ -f "$HOME/.start_bot.sh" ]; then
-    START_SCRIPT="$HOME/.start_bot.sh"
-fi
-
-# Check for systemd service
-SERVICE_NAME=""
-if systemctl list-units --type=service 2>/dev/null | grep -q "charliebot"; then
-    SERVICE_NAME="charliebot"
-elif systemctl list-units --type=service 2>/dev/null | grep -q "charlie"; then
-    SERVICE_NAME="charlie"
-fi
-
-if [ -n "$SERVICE_NAME" ]; then
-    echo "Found systemd service: $SERVICE_NAME"
-    CRON_CMD="0 4 * * * /usr/bin/systemctl restart ${SERVICE_NAME}"
-elif [ -n "$START_SCRIPT" ]; then
+    STOP_SCRIPT="$BOT_DIR/stop_bot.sh"
+    echo -e "${GREEN}Found screen-based bot scripts:${NC}"
+    echo "  Start: $START_SCRIPT"
+    echo "  Stop:  $STOP_SCRIPT"
+    # Use stop/start scripts for clean restart
+    CRON_CMD="0 4 * * * cd $BOT_DIR && ./stop_bot.sh ; sleep 3 ; ./start_bot.sh >> /tmp/bot_restart.log 2>&1"
+elif [ -f "$BOT_DIR/.start_bot.sh" ]; then
+    START_SCRIPT="$BOT_DIR/.start_bot.sh"
     echo "Found start script: $START_SCRIPT"
-    # For shell script: kill python bot process and restart
     CRON_CMD="0 4 * * * pkill -f 'python.*bot' ; sleep 2 ; cd $BOT_DIR && $START_SCRIPT >> /tmp/bot_restart.log 2>&1 &"
 else
     echo "Could not auto-detect bot startup method."
     echo ""
-    echo "Options:"
-    echo "  1) Enter systemd service name"
-    echo "  2) Enter path to start script"
-    echo "  3) Skip"
-    read -p "Choice [1/2/3]: " choice
-
-    case $choice in
-        1)
-            read -p "Service name: " SERVICE_NAME
-            CRON_CMD="0 4 * * * /usr/bin/systemctl restart ${SERVICE_NAME}"
-            ;;
-        2)
-            read -p "Full path to start script: " START_SCRIPT
-            BOT_DIR=$(dirname "$START_SCRIPT")
-            CRON_CMD="0 4 * * * pkill -f 'python.*bot' ; sleep 2 ; cd $BOT_DIR && $START_SCRIPT >> /tmp/bot_restart.log 2>&1 &"
-            ;;
-        *)
-            CRON_CMD=""
-            ;;
-    esac
+    read -p "Enter full path to start script (or press Enter to skip): " START_SCRIPT
+    if [ -n "$START_SCRIPT" ]; then
+        BOT_DIR=$(dirname "$START_SCRIPT")
+        CRON_CMD="0 4 * * * pkill -f 'python.*bot' ; sleep 2 ; cd $BOT_DIR && $START_SCRIPT >> /tmp/bot_restart.log 2>&1 &"
+    else
+        CRON_CMD=""
+    fi
 fi
 
 if [ -n "$CRON_CMD" ]; then
