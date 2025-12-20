@@ -115,10 +115,6 @@ class ReviewPaginationView(discord.ui.View):
             embed.set_author(name=f"{review['username']} - ⭐ {score_text}/10")
             embeds.append(embed)
 
-        # Add page indicator to the last embed
-        if embeds:
-            embeds[-1].set_footer(text=f"Page {self.current_page + 1} of {self.total_pages} • {len(self.reviews)} total reviews")
-
         return embeds
 
     def update_buttons(self):
