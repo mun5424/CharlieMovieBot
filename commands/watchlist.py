@@ -1,6 +1,7 @@
 # commands/watchlist.py - Updated with movie suggestions and reviews
 import logging
 import time
+import random
 from typing import Optional, List, Dict
 import discord
 from discord.ext import commands
@@ -86,6 +87,31 @@ def format_reviewers_text(reviews: List[Dict]) -> str:
         # 3 or more: "User1, User2, and User3 have reviewed..."
         all_but_last = ", ".join(f"**{name}**" for name in usernames[:-1])
         return f"{all_but_last}, and **{usernames[-1]}** have reviewed and rated this movie"
+
+
+async def get_random_review() -> Optional[Dict]:
+    """Get a random review from all movies"""
+    reviews, _ = await get_reviews_data()
+
+    if not reviews:
+        return None
+
+    # Get all movies that have reviews
+    movies_with_reviews = [(movie_id, movie_reviews) for movie_id, movie_reviews in reviews.items() if movie_reviews]
+
+    if not movies_with_reviews:
+        return None
+
+    # Pick a random movie
+    movie_id, movie_reviews = random.choice(movies_with_reviews)
+
+    # Pick a random review from that movie
+    review = random.choice(movie_reviews)
+
+    return {
+        "movie_id": movie_id,
+        "review": review
+    }
 
 
 def setup(bot):
@@ -726,9 +752,9 @@ def setup(bot):
 
         score = discord.ui.TextInput(
             label="Score (1-10)",
-            placeholder="Enter a score from 1 to 10",
+            placeholder="Enter a score from 1 to 10 (e.g., 7.5)",
             min_length=1,
-            max_length=2,
+            max_length=4,
             required=True
         )
 
@@ -744,15 +770,20 @@ def setup(bot):
         async def on_submit(self, interaction: discord.Interaction):
             # Validate score
             try:
-                score_value = int(self.score.value)
+                score_value = float(self.score.value)
+                # Round to 1 decimal place
+                score_value = round(score_value, 1)
                 if score_value < 1 or score_value > 10:
                     return await interaction.response.send_message(
                         "❌ Score must be between 1 and 10.", ephemeral=True
                     )
             except ValueError:
                 return await interaction.response.send_message(
-                    "❌ Score must be a number between 1 and 10.", ephemeral=True
+                    "❌ Score must be a number between 1 and 10 (e.g., 7.5).", ephemeral=True
                 )
+
+            # Format score for display (remove .0 for whole numbers)
+            score_display = int(score_value) if score_value == int(score_value) else score_value
 
             # Save the review
             result = await add_movie_review(
@@ -767,12 +798,12 @@ def setup(bot):
 
             if result == "updated":
                 await interaction.response.send_message(
-                    f"✅ Updated your review for **{self.movie_title} ({self.movie_year})** - {score_value}/10",
+                    f"✅ Updated your review for **{self.movie_title} ({self.movie_year})** - {score_display}/10",
                     ephemeral=True
                 )
             else:
                 await interaction.response.send_message(
-                    f"✅ Review submitted for **{self.movie_title} ({self.movie_year})** - {score_value}/10"
+                    f"✅ Review submitted for **{self.movie_title} ({self.movie_year})** - {score_display}/10"
                 )
 
     class MovieReviewView(discord.ui.View):
@@ -802,8 +833,7 @@ def setup(bot):
 
             if not reviews:
                 return await interaction.response.send_message(
-                    f"📭 No reviews yet for **{self.movie_title} ({self.movie_year})**",
-                    ephemeral=True
+                    f"📭 No reviews yet for **{self.movie_title} ({self.movie_year})**"
                 )
 
             embed = discord.Embed(
@@ -812,7 +842,10 @@ def setup(bot):
             )
 
             for review in reviews:
-                score_display = f"{'⭐' * review['score']} ({review['score']}/10)"
+                score = review['score']
+                # Format score (remove .0 for whole numbers)
+                score_text = int(score) if score == int(score) else score
+                score_display = f"⭐ {score_text}/10"
                 review_preview = review['review_text']
                 if len(review_preview) > 300:
                     review_preview = review_preview[:297] + "..."
@@ -823,7 +856,7 @@ def setup(bot):
                     inline=False
                 )
 
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+            await interaction.response.send_message(embed=embed)
 
         @discord.ui.button(label="✍️ Write Review", style=discord.ButtonStyle.success)
         async def write_review_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -861,3 +894,36 @@ def setup(bot):
         view = MovieReviewView(movie["id"], movie["title"], movie["year"])
         message = await interaction.followup.send(embed=embed, view=view, ephemeral=True)
         view.message = message
+
+    @bot.tree.command(name="review_random", description="Get a random movie review for inspiration")
+    async def review_random_cmd(interaction: discord.Interaction):
+        result = await get_random_review()
+
+        if not result:
+            return await interaction.response.send_message(
+                "📭 No reviews have been written yet. Be the first to write one with `/review_movie`!"
+            )
+
+        review = result["review"]
+        movie_title = review.get("movie_title", "Unknown Movie")
+        movie_year = review.get("movie_year", "")
+
+        # Format score
+        score = review["score"]
+        score_text = int(score) if score == int(score) else score
+
+        embed = discord.Embed(
+            title=f"🎲 Random Review: {movie_title} ({movie_year})",
+            description=f"*Maybe you should watch this one?*",
+            color=0xe91e63
+        )
+
+        embed.add_field(
+            name=f"**{review['username']}** gave it ⭐ {score_text}/10",
+            value=review["review_text"],
+            inline=False
+        )
+
+        embed.set_footer(text="Use /review_movie to write your own review!")
+
+        await interaction.response.send_message(embed=embed)

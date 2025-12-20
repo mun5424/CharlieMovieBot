@@ -28,9 +28,9 @@ class SearchReviewModal(discord.ui.Modal):
 
     score = discord.ui.TextInput(
         label="Score (1-10)",
-        placeholder="Enter a score from 1 to 10",
+        placeholder="Enter a score from 1 to 10 (e.g., 7.5)",
         min_length=1,
-        max_length=2,
+        max_length=4,
         required=True
     )
 
@@ -45,15 +45,20 @@ class SearchReviewModal(discord.ui.Modal):
 
     async def on_submit(self, interaction: discord.Interaction):
         try:
-            score_value = int(self.score.value)
+            score_value = float(self.score.value)
+            # Round to 1 decimal place
+            score_value = round(score_value, 1)
             if score_value < 1 or score_value > 10:
                 return await interaction.response.send_message(
                     "❌ Score must be between 1 and 10.", ephemeral=True
                 )
         except ValueError:
             return await interaction.response.send_message(
-                "❌ Score must be a number between 1 and 10.", ephemeral=True
+                "❌ Score must be a number between 1 and 10 (e.g., 7.5).", ephemeral=True
             )
+
+        # Format score for display (remove .0 for whole numbers)
+        score_display = int(score_value) if score_value == int(score_value) else score_value
 
         result = await add_movie_review(
             movie_id=self.movie_id,
@@ -67,12 +72,12 @@ class SearchReviewModal(discord.ui.Modal):
 
         if result == "updated":
             await interaction.response.send_message(
-                f"✅ Updated your review for **{self.movie_title} ({self.movie_year})** - {score_value}/10",
+                f"✅ Updated your review for **{self.movie_title} ({self.movie_year})** - {score_display}/10",
                 ephemeral=True
             )
         else:
             await interaction.response.send_message(
-                f"✅ Review submitted for **{self.movie_title} ({self.movie_year})** - {score_value}/10"
+                f"✅ Review submitted for **{self.movie_title} ({self.movie_year})** - {score_display}/10"
             )
 
 
@@ -103,8 +108,7 @@ class SearchReviewView(discord.ui.View):
 
         if not reviews:
             return await interaction.response.send_message(
-                f"📭 No reviews yet for **{self.movie_title} ({self.movie_year})**",
-                ephemeral=True
+                f"📭 No reviews yet for **{self.movie_title} ({self.movie_year})**"
             )
 
         embed = discord.Embed(
@@ -113,7 +117,10 @@ class SearchReviewView(discord.ui.View):
         )
 
         for review in reviews:
-            score_display = f"{'⭐' * review['score']} ({review['score']}/10)"
+            score = review['score']
+            # Format score (remove .0 for whole numbers)
+            score_text = int(score) if score == int(score) else score
+            score_display = f"⭐ {score_text}/10"
             review_preview = review['review_text']
             if len(review_preview) > 300:
                 review_preview = review_preview[:297] + "..."
@@ -124,7 +131,7 @@ class SearchReviewView(discord.ui.View):
                 inline=False
             )
 
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.response.send_message(embed=embed)
 
     @discord.ui.button(label="✍️ Write Review", style=discord.ButtonStyle.success)
     async def write_review_button(self, interaction: discord.Interaction, button: discord.ui.Button):
