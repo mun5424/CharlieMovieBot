@@ -1,3 +1,4 @@
+import asyncio
 import datetime
 import pytz
 import aiohttp
@@ -11,6 +12,28 @@ PACIFIC_TZ = pytz.timezone("America/Los_Angeles")
 UTC_TZ = pytz.timezone("UTC")
 STARTGG_API_URL = "https://api.start.gg/gql/alpha"
 logger = logging.getLogger(__name__)
+
+# Shared timeout configuration to prevent hangs
+STARTGG_TIMEOUT = aiohttp.ClientTimeout(total=15, connect=5)
+
+# Module-level session (will be created on first use)
+_session: aiohttp.ClientSession = None
+
+
+async def get_session() -> aiohttp.ClientSession:
+    """Get or create the shared aiohttp session"""
+    global _session
+    if _session is None or _session.closed:
+        _session = aiohttp.ClientSession(timeout=STARTGG_TIMEOUT)
+    return _session
+
+
+async def close_session():
+    """Close the shared session (call on shutdown)"""
+    global _session
+    if _session and not _session.closed:
+        await _session.close()
+        _session = None
 
 # Calculate what time 2 PM Pacific is in UTC
 def get_utc_time_for_pacific(hour=14,minute=0):
@@ -120,10 +143,10 @@ async def find_todays_tournament(tournament_name):
     }
 
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(STARTGG_API_URL, headers=headers, json=query) as resp:
-                data = await resp.json()
-                logger.info(f"Found {len(data.get('data', {}).get('tournaments', {}).get('nodes', []))} total SF6 tournaments")
+        session = await get_session()
+        async with session.post(STARTGG_API_URL, headers=headers, json=query) as resp:
+            data = await resp.json()
+            logger.info(f"Found {len(data.get('data', {}).get('tournaments', {}).get('nodes', []))} total SF6 tournaments")
 
         nodes = data.get("data", {}).get("tournaments", {}).get("nodes", [])
         
@@ -212,10 +235,9 @@ async def find_todays_tournament(tournament_name):
                 "variables": {"perPage": 15, "query": search_term}
             }
 
-            async with aiohttp.ClientSession() as session:
-                async with session.post(STARTGG_API_URL, headers=headers, json=query) as resp:
-                    data = await resp.json()
-                    logger.info(f"Name-based search response for '{search_term}': Found {len(data.get('data', {}).get('tournaments', {}).get('nodes', []))} tournaments")
+            async with session.post(STARTGG_API_URL, headers=headers, json=query) as resp:
+                data = await resp.json()
+                logger.info(f"Name-based search response for '{search_term}': Found {len(data.get('data', {}).get('tournaments', {}).get('nodes', []))} tournaments")
 
             nodes = data.get("data", {}).get("tournaments", {}).get("nodes", [])
             
@@ -227,9 +249,13 @@ async def find_todays_tournament(tournament_name):
                     logger.info(f"Found today's tournament via name search: {node['name']} -> {node['slug']}")
                     return node["slug"], node["name"]
                 
+    except asyncio.TimeoutError:
+        logger.error(f"Timeout searching for tournament '{tournament_name}' - start.gg API too slow")
+    except aiohttp.ClientError as e:
+        logger.error(f"Network error searching for tournament '{tournament_name}': {e}")
     except Exception as e:
         logger.error(f"Error searching for tournament '{tournament_name}': {e}")
-    
+
     logger.warning(f"No tournament found for today ({today}) for series '{tournament_name}'")
     return None, None
 
@@ -287,14 +313,14 @@ async def check_todays_tournament(manual=False):
     }
 
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(STARTGG_API_URL, headers=headers, json=query) as resp:
-                data = await resp.json()
-                logger.info(f"Tournament query response: {data}")
-                
-                if "errors" in data:
-                    logger.error(f"Start.gg API error: {data['errors']}")
-                    return
+        session = await get_session()
+        async with session.post(STARTGG_API_URL, headers=headers, json=query) as resp:
+            data = await resp.json()
+            logger.info(f"Tournament query response: {data}")
+
+            if "errors" in data:
+                logger.error(f"Start.gg API error: {data['errors']}")
+                return
     
         # fetch tournament data
         tournament_data = data.get("data", {}).get("tournament")
@@ -353,7 +379,11 @@ async def check_todays_tournament(manual=False):
                 return
 
         logger.info("No event scheduled for today. Time for Distraction Hour.")
-        
+
+    except asyncio.TimeoutError:
+        logger.error("Timeout fetching tournament data - start.gg API too slow")
+    except aiohttp.ClientError as e:
+        logger.error(f"Network error fetching tournament data: {e}")
     except Exception as e:
         logger.error(f"Error processing tournament data: {e}")
 
@@ -420,44 +450,44 @@ async def check_dodgers_game():
         # MLB Stats API endpoint for Dodgers games (Team ID: 119)
         url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&teamId=119&startDate={date_str}&endDate={date_str}"
 
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as response:
-                if response.status == 200:
-                    data = await response.json()
+        session = await get_session()
+        async with session.get(url) as response:
+            if response.status == 200:
+                data = await response.json()
 
-                    if data.get('dates'):
-                        games = data['dates'][0].get('games', [])
-                        home_wins = []
+                if data.get('dates'):
+                    games = data['dates'][0].get('games', [])
+                    home_wins = []
 
-                        for game in games:
-                            # Check if game is finished
-                            if game.get('status', {}).get('detailedState') == 'Final':
-                                teams = game.get('teams', {})
+                    for game in games:
+                        # Check if game is finished
+                        if game.get('status', {}).get('detailedState') == 'Final':
+                            teams = game.get('teams', {})
 
-                                # Only check if Dodgers are the HOME team
-                                if teams.get('home', {}).get('team', {}).get('id') == 119:
-                                    home_score = teams.get('home', {}).get('score', 0)
-                                    away_score = teams.get('away', {}).get('score', 0)
-                                    is_winner = home_score > away_score  
+                            # Only check if Dodgers are the HOME team
+                            if teams.get('home', {}).get('team', {}).get('id') == 119:
+                                home_score = teams.get('home', {}).get('score', 0)
+                                away_score = teams.get('away', {}).get('score', 0)
+                                is_winner = home_score > away_score
 
-                                    home_wins.append(is_winner)
+                                home_wins.append(is_winner)
 
-                                    if is_winner:
-                                        logger.info(f"[Dodgers] Won home game on {date_str} ({home_score}-{away_score})")
-                                    else:
-                                        logger.info(f"[Dodgers] Lost home game on {date_str} ({home_score}-{away_score})")
+                                if is_winner:
+                                    logger.info(f"[Dodgers] Won home game on {date_str} ({home_score}-{away_score})")
+                                else:
+                                    logger.info(f"[Dodgers] Lost home game on {date_str} ({home_score}-{away_score})")
 
-                        if home_wins:
-                            return any(home_wins)
-                        else:
-                            logger.info(f"[Dodgers] No home games on {date_str}")
-                            return None
+                    if home_wins:
+                        return any(home_wins)
+                    else:
+                        logger.info(f"[Dodgers] No home games on {date_str}")
+                        return None
 
-                    logger.info(f"[Dodgers] No games found for {date_str}")
-                    return None
-                else:
-                    logger.error(f"[Dodgers] HTTP {response.status} from MLB API")
-                    return False
+                logger.info(f"[Dodgers] No games found for {date_str}")
+                return None
+            else:
+                logger.error(f"[Dodgers] HTTP {response.status} from MLB API")
+                return False
 
     except aiohttp.ClientError as e:
         logger.error(f"[Dodgers] Network error checking game: {e}")
@@ -530,6 +560,10 @@ async def check_dodgers_and_notify():
 def setup_reminder(bot):
     global bot_instance
     bot_instance = bot
-    check_todays_tournament.start() # ⏰ now runs daily at 2 PM PST
-    check_custom_reminders.start() # checks daily at 1PM PST
-    # check_dodgers_and_notify.start() # ⚾ checks daily at 11 AM PST
+    check_todays_tournament.start()  # runs daily at 2 PM PST
+    check_custom_reminders.start()  # checks daily at 1PM PST
+    # check_dodgers_and_notify.start()  # checks daily at 11 AM PST
+
+    # Register cleanup handler for the shared session
+    if hasattr(bot, 'add_shutdown_handler'):
+        bot.add_shutdown_handler(lambda: asyncio.create_task(close_session()))

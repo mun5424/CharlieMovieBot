@@ -157,19 +157,28 @@ class TriviaCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.data_manager = MultiServerDataManager()
-        
+
         # Track active questions per server - now includes intentional difficulty flag
         self.active_questions: Dict[str, Tuple] = {}  # guild_id -> question_data
         self.timeout_tasks: Dict[str, asyncio.Task] = {}  # guild_id -> timeout_task
-        
+
+        # Lock to prevent race conditions when processing answers
+        self.answer_locks: Dict[str, asyncio.Lock] = {}  # guild_id -> lock
+
         self.session = None
-        
+
         self.question_cache = QuestionCache()  # Use the new smart cache
-        
+
         # Initialize SF6 Trivia Manager
         self.sf6_trivia = SF6TriviaManager()
-        
+
         logger.info("Multi-server TriviaCog with SF6 support initialized")
+
+    def _get_answer_lock(self, guild_id: str) -> asyncio.Lock:
+        """Get or create a lock for a specific guild"""
+        if guild_id not in self.answer_locks:
+            self.answer_locks[guild_id] = asyncio.Lock()
+        return self.answer_locks[guild_id]
     
     async def cog_load(self):
         """Called when the cog is loaded"""
@@ -192,20 +201,41 @@ class TriviaCog(commands.Cog):
     async def cog_unload(self):
         """Called when the cog is unloaded"""
         # Cancel all timeout tasks
-        for guild_id, task in self.timeout_tasks.items():
+        for guild_id, task in list(self.timeout_tasks.items()):
             if not task.done():
                 task.cancel()
-        
+
+        # Clear all active questions
+        self.active_questions.clear()
+        self.timeout_tasks.clear()
+        self.answer_locks.clear()
+
         if self.session and not self.session.closed:
             await self.session.close()
-        
+
         # Force save all pending data
         self.data_manager.force_save_all()
         logger.info("Multi-server TriviaCog cleaned up")
+
+    async def cleanup_stale_questions(self):
+        """Periodic cleanup for questions that may have been left behind due to bugs"""
+        current_time = time.time()
+        stale_guilds = []
+
+        for guild_id, question_data in self.active_questions.items():
+            _, _, _, _, start_time, _, _, _, _ = question_data
+            # If question has been active for more than 2x the timeout, it's stale
+            if current_time - start_time > QUESTION_TIMEOUT * 2:
+                stale_guilds.append(guild_id)
+
+        for guild_id in stale_guilds:
+            logger.warning(f"Cleaning up stale question in guild {guild_id}")
+            self._cleanup_question(guild_id)
     
     async def cleanup_memory(self):
         """Clean up memory (called by performance monitor)"""
         self.data_manager.cleanup_memory()
+        await self.cleanup_stale_questions()
         logger.info("Trivia memory cleanup completed")
 
     def _cleanup_question(self, guild_id: str):
@@ -391,13 +421,14 @@ class TriviaCog(commands.Cog):
         await self._create_trivia_question(interaction, question_data, guild_id, was_intentional)
         
     
+    @staticmethod
     def is_authorized_user(interaction: discord.Interaction) -> bool:
         """Check if user is authorized to reset scores"""
         return str(interaction.user.id) == AUTHORIZED_RESET_USER_ID
-    
+
     @app_commands.command(name="reset_scores", description="Reset all scores for this server (authorized users only)")
     @app_commands.describe(season_name="Name for this season (e.g., 'Season 1', 'Winter 2024')")
-    @app_commands.check(is_authorized_user)
+    @app_commands.check(is_authorized_user.__func__)
     async def reset_scores(self, interaction: discord.Interaction, season_name: str):
         """Reset all trivia scores for the server with hall of fame archival"""
         await interaction.response.defer()
@@ -808,30 +839,28 @@ class TriviaCog(commands.Cog):
     
     async def _timeout_question(self, guild_id: str):
         """Handle question timeout for a specific server"""
-        await asyncio.sleep(QUESTION_TIMEOUT)
-        
-        if guild_id in self.active_questions:
+        try:
+            await asyncio.sleep(QUESTION_TIMEOUT)
+
+            if guild_id not in self.active_questions:
+                return  # Already answered
+
             user_id, correct_letter, correct_answer, msg_id, _, channel_id, difficulty, was_intentional, question_data = self.active_questions[guild_id]
-            
+
             # Track this question as seen (even if timeout)
             self.data_manager.mark_question_seen(guild_id, str(user_id), question_data)
-            
+
             # Apply timeout penalty
             user_stats = self.data_manager.get_user_stats(guild_id, str(user_id), "Unknown")
             penalty = SCORING_CONFIG["penalties"]["timeout"]
             self.data_manager.update_user_stats(guild_id, str(user_id), difficulty, False, QUESTION_TIMEOUT, penalty)
-            
-            # Clear active question for this server
-            del self.active_questions[guild_id]
-            if guild_id in self.timeout_tasks:
-                del self.timeout_tasks[guild_id]
-            
+
             # Update message
             channel = self.bot.get_channel(channel_id)
             if channel:
                 try:
                     message = await channel.fetch_message(msg_id)
-                    
+
                     timeout_embed = discord.Embed(
                         title="⏰ Time's Up!",
                         description=f"<@{user_id}> took too long to answer!\n\n"
@@ -840,13 +869,22 @@ class TriviaCog(commands.Cog):
                                    f"**New Score:** {user_stats.total_score} points",
                         color=discord.Color.red()
                     )
-                    
+
                     await message.edit(embed=timeout_embed)
-                    
+
                 except discord.NotFound:
                     logger.warning("Timeout message not found")
                 except Exception as e:
-                    logger.error(f"Error during timeout: {e}")
+                    logger.error(f"Error updating timeout message: {e}")
+
+        except asyncio.CancelledError:
+            # Task was cancelled because question was answered - this is normal
+            pass
+        except Exception as e:
+            logger.error(f"Error in timeout handler for guild {guild_id}: {e}")
+        finally:
+            # ALWAYS clean up, even if there was an error
+            self._cleanup_question(guild_id)
     
 
     def _create_question_hash(self, question_data: Dict) -> str:
@@ -860,69 +898,77 @@ class TriviaCog(commands.Cog):
         content = f"{question_text}|{correct_answer}".encode('utf-8')
         return hashlib.md5(content).hexdigest()[:12]  # First 12 chars of MD5
 
-    # Wrap the main logic in on_message with try-catch
+    # Wrap the main logic in on_message with try-catch and lock
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         if message.author.bot or not message.guild:
             return
-        
-        guild_id = str(message.guild.id)
-        
-        try:
-            if guild_id not in self.active_questions:
-                return
-        
-            user_id, correct_letter, correct_answer, msg_id, start_time, channel_id, difficulty, was_intentional, question_data = self.active_questions[guild_id]
-        
-            # Only the person who started the question can answer
-            if message.author.id != user_id or message.channel.id != channel_id:
-                return
-        
-            content = message.content.strip().upper()
-            if content not in ["A", "B", "C", "D"]:
-                return
-        
-            # Cancel timeout task
-            if guild_id in self.timeout_tasks and not self.timeout_tasks[guild_id].done():
-                self.timeout_tasks[guild_id].cancel()
-        
-            # Calculate response time and score
-            response_time = time.time() - start_time
-            is_correct = content == correct_letter
-        
-            # Get user stats for this server
-            user_stats = self.data_manager.get_user_stats(guild_id, str(user_id), message.author.name)
-        
-            # Calculate score with improved system
-            category = html.unescape(question_data["category"])
-            is_sf6 = category == "Street Fighter 6"
 
-            # Calculate score with improved system
-            score_change, breakdown = ScoreCalculator.calculate_final_score(
-                difficulty, response_time, is_correct, user_stats.current_streak, was_intentional, is_sf6
-            )
-        
-            # Track this question as seen - use question_data which we already have
-            self.data_manager.mark_question_seen(guild_id, str(user_id), question_data)
-        
-            # Clear active question for this server AFTER using all the data
-            del self.active_questions[guild_id]
-            if guild_id in self.timeout_tasks:
-                del self.timeout_tasks[guild_id]
-        
-            # Update user stats for this server
-            self.data_manager.update_user_stats(guild_id, str(user_id), difficulty, is_correct, response_time, score_change)
-        
-            # GET UPDATED USER STATS AFTER THE UPDATE
-            updated_user_stats = self.data_manager.get_user_stats(guild_id, str(user_id), message.author.name)
-        
-            # Create response embed
-            await self._send_answer_response(message, is_correct, correct_letter, correct_answer,
-                                        response_time, score_change, breakdown, updated_user_stats, was_intentional, question_data)
-        except Exception as e:
-            logger.error(f"Error in trivia message handler: {e}")
-            # Ensure cleanup happens
-            self._cleanup_question(guild_id)
+        guild_id = str(message.guild.id)
+
+        # Quick check before acquiring lock (optimization)
+        if guild_id not in self.active_questions:
+            return
+
+        # Acquire lock to prevent race conditions from rapid messages
+        lock = self._get_answer_lock(guild_id)
+        async with lock:
+            try:
+                # Check again under lock - question may have been answered while waiting
+                if guild_id not in self.active_questions:
+                    return
+
+                user_id, correct_letter, correct_answer, msg_id, start_time, channel_id, difficulty, was_intentional, question_data = self.active_questions[guild_id]
+
+                # Only the person who started the question can answer
+                if message.author.id != user_id or message.channel.id != channel_id:
+                    return
+
+                content = message.content.strip().upper()
+                if content not in ["A", "B", "C", "D"]:
+                    return
+
+                # Cancel timeout task
+                if guild_id in self.timeout_tasks and not self.timeout_tasks[guild_id].done():
+                    self.timeout_tasks[guild_id].cancel()
+
+                # Calculate response time and score
+                response_time = time.time() - start_time
+                is_correct = content == correct_letter
+
+                # Get user stats for this server
+                user_stats = self.data_manager.get_user_stats(guild_id, str(user_id), message.author.name)
+
+                # Calculate score with improved system
+                category = html.unescape(question_data["category"])
+                is_sf6 = category == "Street Fighter 6"
+
+                # Calculate score with improved system
+                score_change, breakdown = ScoreCalculator.calculate_final_score(
+                    difficulty, response_time, is_correct, user_stats.current_streak, was_intentional, is_sf6
+                )
+
+                # Track this question as seen - use question_data which we already have
+                self.data_manager.mark_question_seen(guild_id, str(user_id), question_data)
+
+                # Clear active question for this server AFTER using all the data
+                del self.active_questions[guild_id]
+                if guild_id in self.timeout_tasks:
+                    del self.timeout_tasks[guild_id]
+
+                # Update user stats for this server
+                self.data_manager.update_user_stats(guild_id, str(user_id), difficulty, is_correct, response_time, score_change)
+
+                # GET UPDATED USER STATS AFTER THE UPDATE
+                updated_user_stats = self.data_manager.get_user_stats(guild_id, str(user_id), message.author.name)
+
+                # Create response embed
+                await self._send_answer_response(message, is_correct, correct_letter, correct_answer,
+                                            response_time, score_change, breakdown, updated_user_stats, was_intentional, question_data)
+            except Exception as e:
+                logger.error(f"Error in trivia message handler: {e}")
+                # Ensure cleanup happens
+                self._cleanup_question(guild_id)
 
 
     

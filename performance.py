@@ -21,11 +21,12 @@ class PerformanceMonitor:
         self.logger = logging.getLogger(__name__)
         
         # Configuration
-        self.memory_threshold = self._get_config_value('MEMORY_THRESHOLD', 80)
+        # Lower threshold for Pi Zero 2 W (512MB RAM) - trigger cleanup earlier
+        self.memory_threshold = self._get_config_value('MEMORY_THRESHOLD', 65)
         self.cpu_threshold = self._get_config_value('CPU_THRESHOLD', 90)
         self.disk_threshold = self._get_config_value('DISK_THRESHOLD', 90)
         self.enable_monitoring = self._get_config_value('ENABLE_PERFORMANCE_MONITORING', True)
-        self.monitoring_interval = self._get_config_value('MONITORING_INTERVAL', 60)
+        self.monitoring_interval = self._get_config_value('MONITORING_INTERVAL', 600)  # 10 minutes
         self.stats_log_interval = self._get_config_value('STATS_LOG_INTERVAL', 600)  # 10 minutes
         
         # State
@@ -90,15 +91,16 @@ class PerformanceMonitor:
         """Check system resources and trigger alerts"""
         if not self.psutil_available:
             return {}
-        
+
         try:
             import psutil
-            
-            # Get system stats
+
+            # Get system stats - use interval=0 to avoid blocking
+            # This returns the CPU usage since the last call (or 0 on first call)
             memory = psutil.virtual_memory()
-            cpu_percent = psutil.cpu_percent(interval=1)
+            cpu_percent = psutil.cpu_percent(interval=0)  # Non-blocking!
             disk = psutil.disk_usage('/')
-            
+
             stats = {
                 'memory_percent': memory.percent,
                 'memory_available': memory.available,

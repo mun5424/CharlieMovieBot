@@ -2,29 +2,14 @@ import discord
 import logging
 from discord.ext import commands
 from discord import app_commands
-from tmdb_client import search_movie, get_movie_details, search_movies_autocomplete
+from tmdb_client import search_movie_async, get_movie_details_async
+from commands.autocomplete import movie_search_autocomplete
 
 
 logger = logging.getLogger(__name__)
 
 def setup(bot):
-    print("🔍 Setting up general commands...")
-    
-    # Autocomplete function for movie search
-    async def movie_search_autocomplete(interaction: discord.Interaction, current: str):
-        """Autocomplete function for movie titles"""
-        if len(current) < 2:
-            return []
-        
-        try:
-            movies = await search_movies_autocomplete(current, limit=25)
-            return [
-                app_commands.Choice(name=movie["name"], value=movie["value"])
-                for movie in movies
-            ]
-        except Exception as e:
-            print(f"Autocomplete error: {e}")
-            return []
+    logger.info("Setting up general commands...")
 
     # ALL COMMANDS MUST BE INSIDE setup(bot) FUNCTION
     @bot.tree.command(name="search", description="Search for a movie")
@@ -33,12 +18,12 @@ def setup(bot):
     async def search_cmd(interaction: discord.Interaction, title: str):
         await interaction.response.defer()
 
-        movie = search_movie(title)
+        movie = await search_movie_async(title)
         if movie:
             # Get detailed info for genres, runtime, etc.
             detailed_movie = movie
             if movie.get('id'):
-                detailed_info = get_movie_details(movie['id'])
+                detailed_info = await get_movie_details_async(movie['id'])
                 if detailed_info:
                     detailed_movie = detailed_info
             
@@ -60,8 +45,8 @@ def setup(bot):
             
             # Format rating with star
             rating_text = "N/A"
-            if detailed_movie.get('vote_average') and detailed_movie['vote_average'] > 0:
-                rating = detailed_movie['vote_average']
+            if detailed_movie.get('rating') and detailed_movie['rating'] > 0:
+                rating = detailed_movie['rating']
                 rating_text = f"⭐ {rating:.1f}/10"
             
             # Create embed with green line
@@ -108,25 +93,23 @@ def setup(bot):
 
         except ImportError as e:
             error_msg = f"❌ Import error: {e}"
-            print(error_msg)
+            logger.error(error_msg)
             await interaction.followup.send(error_msg, ephemeral=True)
-            
+
         except discord.errors.NotFound as e:
             error_msg = f"❌ Discord error (channel not found?): {e}"
-            print(error_msg)
+            logger.error(error_msg)
             await interaction.followup.send(error_msg, ephemeral=True)
-            
+
         except discord.errors.Forbidden as e:
             error_msg = f"❌ Discord permission error: {e}"
-            print(error_msg)
+            logger.error(error_msg)
             await interaction.followup.send(error_msg, ephemeral=True)
-            
+
         except Exception as e:
             error_msg = f"❌ Unexpected error: {str(e)}"
-            print(f"Error in /reminder_tournament: {e}")
-            logger.error(f"Discord command error: {e}")
+            logger.error(f"Error in /reminder_tournament: {e}")
             try:
                 await interaction.followup.send(error_msg, ephemeral=True)
-            except:
-                # If followup fails, the interaction might be dead
-                print("Failed to send error message to Discord")
+            except Exception:
+                logger.error("Failed to send error message to Discord")

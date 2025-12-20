@@ -69,7 +69,7 @@ class BotManager:
             # Add shutdown handler for trivia data
             if hasattr(trivia_cog, 'data_manager'):
                 self.bot.add_shutdown_handler(
-                    lambda: trivia_cog.data_manager.save_data()
+                    lambda: trivia_cog.data_manager.force_save_all()
                 )
             
             # Log registered commands
