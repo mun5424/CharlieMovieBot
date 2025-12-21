@@ -70,14 +70,23 @@ class SearchReviewModal(discord.ui.Modal):
             review_text=self.review_text.value
         )
 
+        # Create embed with the review
+        embed = discord.Embed(
+            title=f"📝 {self.movie_title} ({self.movie_year})",
+            description=self.review_text.value,
+            color=0x2ecc71
+        )
+        embed.set_author(name=f"{interaction.user.display_name} - ⭐ {score_display}/10")
+
         if result == "updated":
             await interaction.response.send_message(
-                f"✅ Updated your review for **{self.movie_title} ({self.movie_year})** - {score_display}/10",
-                ephemeral=True
+                content=f"✅ **{interaction.user.display_name}** updated their review for **{self.movie_title} ({self.movie_year})**",
+                embed=embed
             )
         else:
             await interaction.response.send_message(
-                f"✅ Review submitted for **{self.movie_title} ({self.movie_year})** - {score_display}/10"
+                content=f"✅ **{interaction.user.display_name}** submitted a review for **{self.movie_title} ({self.movie_year})**",
+                embed=embed
             )
 
 
@@ -147,11 +156,10 @@ class SearchReviewView(discord.ui.View):
         self.message = None
 
     async def on_timeout(self):
-        for item in self.children:
-            item.disabled = True
+        # Remove buttons entirely instead of disabling
         if self.message:
             try:
-                await self.message.edit(view=self)
+                await self.message.edit(view=None)
             except discord.NotFound:
                 pass
             except Exception:
@@ -166,9 +174,24 @@ class SearchReviewView(discord.ui.View):
                 f"📭 No reviews yet for **{self.movie_title} ({self.movie_year})**"
             )
 
-        # Use pagination view
-        view = ReviewPaginationView(reviews, self.movie_title, self.movie_year)
-        await interaction.response.send_message(embeds=view.get_page_embeds(), view=view)
+        # If 5 or fewer reviews, just show them without pagination buttons
+        if len(reviews) <= ReviewPaginationView.REVIEWS_PER_PAGE:
+            embeds = []
+            for review in reviews:
+                score = review['score']
+                score_text = int(score) if score == int(score) else score
+                embed = discord.Embed(
+                    title=f"📝 {self.movie_title} ({self.movie_year})",
+                    description=review['review_text'],
+                    color=0x9b59b6
+                )
+                embed.set_author(name=f"{review['username']} - ⭐ {score_text}/10")
+                embeds.append(embed)
+            await interaction.response.send_message(embeds=embeds)
+        else:
+            # Use pagination view for more reviews
+            view = ReviewPaginationView(reviews, self.movie_title, self.movie_year)
+            await interaction.response.send_message(embeds=view.get_page_embeds(), view=view)
 
     @discord.ui.button(label="✍️ Write Review", style=discord.ButtonStyle.success)
     async def write_review_button(self, interaction: discord.Interaction, button: discord.ui.Button):
