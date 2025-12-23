@@ -5,8 +5,8 @@ from tmdb_client import search_movies_autocomplete
 
 logger = logging.getLogger(__name__)
 
-# Constants
-AUTOCOMPLETE_LIMIT = 25
+# Constants - reduced for Pi Zero 2 W memory efficiency
+AUTOCOMPLETE_LIMIT = 10  # Reduced from 25 for faster response
 
 
 async def movie_search_autocomplete(interaction, current: str):

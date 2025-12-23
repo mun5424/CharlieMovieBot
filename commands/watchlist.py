@@ -1,128 +1,49 @@
-# commands/watchlist.py - Updated with movie suggestions and reviews
+# commands/watchlist.py - Updated with SQLite storage for Pi optimization
 import logging
-import time
-import random
 from typing import Optional, List, Dict
 import discord
 from discord.ext import commands
 from discord import app_commands
-from data_store import load_data_async, save_data_async
 from tmdb_client import search_movie_async
 from commands.autocomplete import movie_search_autocomplete, AUTOCOMPLETE_LIMIT
 
+# Import SQLite store functions
+import sqlite_store
+
 logger = logging.getLogger(__name__)
 
-# Constants
-SUGGESTION_VIEW_TIMEOUT = 300  # 5 minutes
+# Constants - reduced for Pi Zero 2 W memory efficiency
+SUGGESTION_VIEW_TIMEOUT = 120  # 2 minutes (reduced from 5)
 WATCHED_LIST_PAGE_SIZE = 5
-REVIEW_VIEW_TIMEOUT = 300  # 5 minutes
+REVIEW_VIEW_TIMEOUT = 120  # 2 minutes (reduced from 5)
 
 
-# Helper functions for reviews (module level so they can be imported)
-async def get_reviews_data():
-    """Get the reviews section from data store"""
-    data = await load_data_async()
-    if "reviews" not in data:
-        data["reviews"] = {}
-    return data["reviews"], data
-
-
+# Re-export from sqlite_store for compatibility with general.py imports
 async def get_movie_reviews(movie_id: int) -> List[Dict]:
     """Get all reviews for a specific movie"""
-    reviews, _ = await get_reviews_data()
-    return reviews.get(str(movie_id), [])
+    return await sqlite_store.get_movie_reviews(movie_id)
 
 
 async def add_movie_review(movie_id: int, movie_title: str, movie_year: str,
-                           user_id: str, username: str, score: int, review_text: str):
+                           user_id: str, username: str, score: float, review_text: str) -> str:
     """Add a review for a movie"""
-    reviews, data = await get_reviews_data()
-    movie_key = str(movie_id)
-
-    if movie_key not in reviews:
-        reviews[movie_key] = []
-
-    # Check if user already reviewed this movie
-    for i, review in enumerate(reviews[movie_key]):
-        if review["user_id"] == user_id:
-            # Update existing review
-            reviews[movie_key][i] = {
-                "user_id": user_id,
-                "username": username,
-                "score": score,
-                "review_text": review_text,
-                "movie_title": movie_title,
-                "movie_year": movie_year,
-                "timestamp": time.time()
-            }
-            await save_data_async(data)
-            return "updated"
-
-    # Add new review
-    reviews[movie_key].append({
-        "user_id": user_id,
-        "username": username,
-        "score": score,
-        "review_text": review_text,
-        "movie_title": movie_title,
-        "movie_year": movie_year,
-        "timestamp": time.time()
-    })
-    await save_data_async(data)
-    return "added"
+    return await sqlite_store.add_movie_review(
+        movie_id, movie_title, movie_year, user_id, username, score, review_text
+    )
 
 
 def format_reviewers_text(reviews: List[Dict]) -> str:
     """Format the reviewer names for display"""
-    if not reviews:
-        return ""
-
-    usernames = [r["username"] for r in reviews]
-
-    if len(usernames) == 1:
-        return f"**{usernames[0]}** has reviewed and rated this movie"
-    elif len(usernames) == 2:
-        return f"**{usernames[0]}** and **{usernames[1]}** have reviewed and rated this movie"
-    else:
-        # 3 or more: "User1, User2, and User3 have reviewed..."
-        all_but_last = ", ".join(f"**{name}**" for name in usernames[:-1])
-        return f"{all_but_last}, and **{usernames[-1]}** have reviewed and rated this movie"
+    return sqlite_store.format_reviewers_text(reviews)
 
 
 async def get_random_review() -> Optional[Dict]:
     """Get a random review from all movies"""
-    reviews, _ = await get_reviews_data()
-
-    if not reviews:
-        return None
-
-    # Get all movies that have reviews
-    movies_with_reviews = [(movie_id, movie_reviews) for movie_id, movie_reviews in reviews.items() if movie_reviews]
-
-    if not movies_with_reviews:
-        return None
-
-    # Pick a random movie
-    movie_id, movie_reviews = random.choice(movies_with_reviews)
-
-    # Pick a random review from that movie
-    review = random.choice(movie_reviews)
-
-    return {
-        "movie_id": movie_id,
-        "review": review
-    }
+    return await sqlite_store.get_random_review()
 
 
 def setup(bot):
-    async def get_user_entry(uid):
-        data = await load_data_async()
-        user_data = data.setdefault(str(uid), {"watchlist": [], "watched": [], "pending": []})
-        # Ensure pending key exists for existing users
-        if "pending" not in user_data:
-            user_data["pending"] = []
-        return user_data, data
-
+    # Helper functions for finding movies in lists (used by Views)
     def find_movie_by_id(movie_list, movie_id):
         """Find a movie in a list by its TMDB ID. Returns the movie dict or None."""
         for movie in movie_list:
@@ -141,30 +62,21 @@ def setup(bot):
     async def user_watchlist_autocomplete(interaction: discord.Interaction, current: str):
         try:
             uid = str(interaction.user.id)
-            entry, _ = await get_user_entry(uid)
-            
+            watchlist = await sqlite_store.get_user_watchlist(uid)
+
             matching_movies = []
-            for movie in entry["watchlist"]:
+            for movie in watchlist:
                 try:
-                    # Safety checks
-                    if not isinstance(movie, dict):
-                        continue
-                    
-                    if 'title' not in movie:
-                        continue
-                    
-                    title = str(movie['title'])
+                    title = str(movie.get('title', ''))
                     year = str(movie.get('year', 'Unknown'))
-                    
-                    # Check if current input matches (allow empty current for showing all)
+
                     if not current or current.lower() in title.lower():
-                        choice_name = f"{title} ({year})"
-                        choice_value = title
-                        matching_movies.append(app_commands.Choice(name=choice_name, value=choice_value))
-                        
-                except Exception as movie_error:
+                        matching_movies.append(
+                            app_commands.Choice(name=f"{title} ({year})", value=title)
+                        )
+                except Exception:
                     continue
-            
+
             return matching_movies[:AUTOCOMPLETE_LIMIT]
 
         except Exception as e:
@@ -175,15 +87,12 @@ def setup(bot):
     async def user_watched_autocomplete(interaction: discord.Interaction, current: str):
         try:
             uid = str(interaction.user.id)
-            entry, _ = await get_user_entry(uid)
+            watched = await sqlite_store.get_user_watched(uid)
 
             matching_movies = []
-            for movie in entry["watched"]:
+            for movie in watched:
                 try:
-                    if not isinstance(movie, dict) or 'title' not in movie:
-                        continue
-
-                    title = str(movie['title'])
+                    title = str(movie.get('title', ''))
                     year = str(movie.get('year', 'Unknown'))
 
                     if not current or current.lower() in title.lower():
@@ -202,18 +111,15 @@ def setup(bot):
     async def user_pending_autocomplete(interaction: discord.Interaction, current: str):
         try:
             uid = str(interaction.user.id)
-            entry, _ = await get_user_entry(uid)
+            pending = await sqlite_store.get_user_pending(uid)
 
             matching_movies = []
-            for suggestion in entry["pending"]:
+            for suggestion in pending:
                 try:
                     movie = suggestion.get("movie", {})
-                    if not isinstance(movie, dict) or 'title' not in movie:
-                        continue
-
-                    title = str(movie['title'])
+                    title = str(movie.get('title', ''))
                     year = str(movie.get('year', 'Unknown'))
-                    from_user = suggestion.get('from_user', 'Unknown')
+                    from_user = suggestion.get('from_username', 'Unknown')
 
                     if not current or current.lower() in title.lower():
                         matching_movies.append(
@@ -237,17 +143,15 @@ def setup(bot):
         await interaction.response.defer()
 
         uid = str(interaction.user.id)
-        entry, data = await get_user_entry(uid)
         mov = await search_movie_async(title)
 
         if not mov:
             return await interaction.followup.send("❌ Movie not found.")
 
-        if find_movie_by_id(entry["watchlist"], mov["id"]):
+        if await sqlite_store.is_in_watchlist(uid, mov["id"]):
             return await interaction.followup.send("⚠️ Already in your watchlist.")
 
-        entry["watchlist"].append(mov)
-        await save_data_async(data)
+        await sqlite_store.add_to_watchlist(uid, mov)
         await interaction.followup.send(f"✅ {interaction.user.display_name} added **{mov['title']} ({mov['year']})** to their watchlist.")
 
     @bot.tree.command(name="suggest", description="Suggest a movie to another user's watchlist")
@@ -258,73 +162,67 @@ def setup(bot):
     @app_commands.autocomplete(title=movie_search_autocomplete)
     async def suggest_cmd(interaction: discord.Interaction, user: discord.Member, title: str):
         await interaction.response.defer()
-        
-        # disable for testing 
-        # if user.id == interaction.user.id:
-        #     return await interaction.followup.send("❌ You can't suggest movies to yourself! Use `/add` instead.")
-        
+
         target_uid = str(user.id)
-        target_entry, data = await get_user_entry(target_uid)
         mov = await search_movie_async(title)
-        
+
         if not mov:
             return await interaction.followup.send("❌ Movie not found.")
 
         # Check if movie is already in their watchlist or watched
-        if find_movie_by_id(target_entry["watchlist"], mov["id"]):
+        if await sqlite_store.is_in_watchlist(target_uid, mov["id"]):
             return await interaction.followup.send(f"⚠️ **{mov['title']} ({mov['year']})** is already in {user.display_name}'s watchlist.")
 
-        if find_movie_by_id(target_entry["watched"], mov["id"]):
+        if await sqlite_store.is_in_watched(target_uid, mov["id"]):
             return await interaction.followup.send(f"⚠️ {user.display_name} has already watched **{mov['title']} ({mov['year']})**.")
 
         # Check if suggestion already exists
-        if find_pending_by_id(target_entry["pending"], mov["id"]):
+        existing_pending = await sqlite_store.get_pending_by_movie_id(target_uid, mov["id"])
+        if existing_pending:
             return await interaction.followup.send(f"⚠️ **{mov['title']} ({mov['year']})** has already been suggested to {user.display_name}.")
-        
+
         # Add suggestion to pending list
-        suggestion = {
-            "movie": mov,
-            "from_user": interaction.user.display_name,
-            "from_id": str(interaction.user.id)
-        }
-        target_entry["pending"].append(suggestion)
-        await save_data_async(data)
-        
+        await sqlite_store.add_pending_suggestion(
+            target_uid,
+            str(interaction.user.id),
+            interaction.user.display_name,
+            mov
+        )
+
         # Send confirmation to suggester
         await interaction.followup.send(f"📬 Suggested **{mov['title']} ({mov['year']})** to {user.display_name}!")
 
     @bot.tree.command(name="pending", description="View your pending movie suggestions")
     async def pending_cmd(interaction: discord.Interaction):
-        entry, _ = await get_user_entry(str(interaction.user.id))
-        suggestions = entry["pending"]
-        
+        suggestions = await sqlite_store.get_user_pending(str(interaction.user.id))
+
         if not suggestions:
             return await interaction.response.send_message("📭 You have no pending movie suggestions.")
-        
+
         embed = discord.Embed(
             title=f"📬 {interaction.user.display_name}'s Pending Suggestions",
             description=f"You have {len(suggestions)} pending suggestion{'s' if len(suggestions) != 1 else ''}",
             color=0xf39c12
         )
-        
+
         suggestion_list = []
         for i, suggestion in enumerate(suggestions, 1):
             movie = suggestion["movie"]
-            from_user = suggestion["from_user"]
+            from_user = suggestion.get("from_username", "Unknown")
             suggestion_list.append(f"{i}. **{movie['title']} ({movie['year']})** - from {from_user}")
-        
+
         embed.add_field(
             name="🎬 Movies",
             value="\n".join(suggestion_list),
             inline=False
         )
-        
+
         embed.add_field(
             name="💡 Next Steps",
             value="Use `/approve <movie>` to add to watchlist\nUse `/decline <movie>` to reject suggestion",
             inline=False
         )
-        
+
         await interaction.response.send_message(embed=embed)
 
     @bot.tree.command(name="approve", description="Approve a pending movie suggestion")
@@ -334,31 +232,29 @@ def setup(bot):
         await interaction.response.defer()
 
         uid = str(interaction.user.id)
-        entry, data = await get_user_entry(uid)
         mov = await search_movie_async(title)
 
         if not mov:
             return await interaction.followup.send("❌ Movie not found.")
 
         # Find the suggestion in pending list by ID
-        suggestion_to_remove = find_pending_by_id(entry["pending"], mov["id"])
+        pending_suggestion = await sqlite_store.get_pending_by_movie_id(uid, mov["id"])
 
-        if not suggestion_to_remove:
+        if not pending_suggestion:
             return await interaction.followup.send("❌ No pending suggestion found for this movie.")
 
+        from_user = pending_suggestion.get("from_username", "Unknown")
+
         # Check if already in watchlist
-        if find_movie_by_id(entry["watchlist"], mov["id"]):
+        if await sqlite_store.is_in_watchlist(uid, mov["id"]):
             # Remove from pending but don't add duplicate
-            entry["pending"].remove(suggestion_to_remove)
-            await save_data_async(data)
+            await sqlite_store.remove_pending_by_movie_id(uid, mov["id"])
             return await interaction.followup.send(f"⚠️ **{mov['title']} ({mov['year']})** is already in your watchlist. Removed from pending.")
 
         # Remove from pending and add to watchlist
-        entry["pending"].remove(suggestion_to_remove)
-        entry["watchlist"].append(mov)
-        await save_data_async(data)
+        await sqlite_store.remove_pending_by_movie_id(uid, mov["id"])
+        await sqlite_store.add_to_watchlist(uid, mov)
 
-        from_user = suggestion_to_remove["from_user"]
         await interaction.followup.send(f"✅ {interaction.user.display_name} approved **{mov['title']} ({mov['year']})** from {from_user} and added it to their watchlist!")
 
     @bot.tree.command(name="decline", description="Decline a pending movie suggestion")
@@ -368,23 +264,22 @@ def setup(bot):
         await interaction.response.defer()
 
         uid = str(interaction.user.id)
-        entry, data = await get_user_entry(uid)
         mov = await search_movie_async(title)
 
         if not mov:
             return await interaction.followup.send("❌ Movie not found.")
 
         # Find the suggestion in pending list by ID
-        suggestion_to_remove = find_pending_by_id(entry["pending"], mov["id"])
+        pending_suggestion = await sqlite_store.get_pending_by_movie_id(uid, mov["id"])
 
-        if not suggestion_to_remove:
+        if not pending_suggestion:
             return await interaction.followup.send("❌ No pending suggestion found for this movie.")
 
-        # Remove from pending
-        entry["pending"].remove(suggestion_to_remove)
-        await save_data_async(data)
+        from_user = pending_suggestion.get("from_username", "Unknown")
 
-        from_user = suggestion_to_remove["from_user"]
+        # Remove from pending
+        await sqlite_store.remove_pending_by_movie_id(uid, mov["id"])
+
         await interaction.followup.send(f"❌ {interaction.user.display_name} Declined **{mov['title']} ({mov['year']})** from {from_user}!")
 
     # View class for handling suggestion buttons
@@ -436,7 +331,7 @@ def setup(bot):
                 
             embed = discord.Embed(
                 title="📬 Pending Movie Suggestion",
-                description=f"**{current['from_user']}** suggested:",
+                description=f"**{current.get('from_username', 'Someone')}** suggested:",
                 color=0xf39c12
             )
             
@@ -481,21 +376,15 @@ def setup(bot):
             if not current:
                 return await interaction.response.send_message("❌ No suggestion to accept!", ephemeral=True)
 
-            # Get user data and add to watchlist
-            entry, data = await get_user_entry(self.user_id)
             movie = current['movie']
-            from_user = current['from_user']
+            from_user = current.get('from_username', 'Someone')
 
-            # Find and remove from pending by ID
-            pending_to_remove = find_pending_by_id(entry['pending'], movie['id'])
-            if pending_to_remove:
-                entry['pending'].remove(pending_to_remove)
+            # Remove from pending in database
+            await sqlite_store.remove_pending_by_movie_id(self.user_id, movie['id'])
 
-            # Check for duplicates before adding to watchlist
-            if not find_movie_by_id(entry['watchlist'], movie['id']):
-                entry['watchlist'].append(movie)
-
-            await save_data_async(data)
+            # Add to watchlist if not already there
+            if not await sqlite_store.is_in_watchlist(self.user_id, movie['id']):
+                await sqlite_store.add_to_watchlist(self.user_id, movie)
 
             # Remove from local suggestions list
             self.suggestions.remove(current)
@@ -525,16 +414,11 @@ def setup(bot):
             if not current:
                 return await interaction.response.send_message("❌ No suggestion to decline!", ephemeral=True)
 
-            # Get user data and remove from pending
-            entry, data = await get_user_entry(self.user_id)
             movie = current['movie']
-            from_user = current['from_user']
+            from_user = current.get('from_username', 'Someone')
 
-            # Find and remove from pending by ID
-            pending_to_remove = find_pending_by_id(entry['pending'], movie['id'])
-            if pending_to_remove:
-                entry['pending'].remove(pending_to_remove)
-                await save_data_async(data)
+            # Remove from pending in database
+            await sqlite_store.remove_pending_by_movie_id(self.user_id, movie['id'])
 
             # Remove from local suggestions list
             self.suggestions.remove(current)
@@ -585,10 +469,10 @@ def setup(bot):
         # Use the provided user, or fallback to the command invoker
         target_user = user or interaction.user
         is_self = target_user.id == interaction.user.id
+        target_uid = str(target_user.id)
 
-        entry, _ = await get_user_entry(str(target_user.id))
-        movies = entry["watchlist"]
-        pending_suggestions = entry["pending"]
+        movies = await sqlite_store.get_user_watchlist(target_uid)
+        pending_suggestions = await sqlite_store.get_user_pending(target_uid) if is_self else []
 
         if not movies:
             message = "📭 Your watchlist is empty." if is_self else f"📭 {target_user.display_name}'s watchlist is empty."
@@ -618,9 +502,8 @@ def setup(bot):
     @bot.tree.command(name="watchedlist", description="View your watched movies")
     @app_commands.describe(page="Page number to view (default: 1)")
     async def watchedlist_cmd(interaction: discord.Interaction, page: int = 1):
-        entry, _ = await get_user_entry(str(interaction.user.id))
-        movies = entry["watched"]
-        
+        movies = await sqlite_store.get_user_watched(str(interaction.user.id))
+
         if not movies:
             return await interaction.response.send_message(f"📭 {interaction.user.display_name} has no movies watched yet.")
 
@@ -629,23 +512,23 @@ def setup(bot):
 
         start = (page - 1) * WATCHED_LIST_PAGE_SIZE
         chunk = movies[start:start + WATCHED_LIST_PAGE_SIZE]
-        
+
         embed = discord.Embed(
             title=f"✅ {interaction.user.display_name}'s Watched Movies (Page {page}/{total_pages})",
             description=f"Total watched: {len(movies)}",
             color=0x2ecc71
         )
-        
+
         movie_list = []
         for i, movie in enumerate(chunk, start + 1):
             movie_list.append(f"{i}. {movie['title']} ({movie['year']})")
-        
+
         embed.add_field(
             name="\u200b",
             value="\n".join(movie_list),
             inline=False
         )
-        
+
         await interaction.response.send_message(embed=embed)
 
     @bot.tree.command(name="watched", description="Mark a movie as watched")
@@ -655,23 +538,19 @@ def setup(bot):
         await interaction.response.defer()
 
         uid = str(interaction.user.id)
-        entry, data = await get_user_entry(uid)
         mov = await search_movie_async(title)
 
         if not mov:
             return await interaction.followup.send("❌ Movie not found.")
 
-        if find_movie_by_id(entry["watched"], mov["id"]):
+        if await sqlite_store.is_in_watched(uid, mov["id"]):
             return await interaction.followup.send("⚠️ Already marked as watched.")
 
-        entry["watched"].append(mov)
+        await sqlite_store.add_to_watched(uid, mov)
 
-        # Remove from watchlist by ID
-        existing_in_watchlist = find_movie_by_id(entry["watchlist"], mov["id"])
-        if existing_in_watchlist:
-            entry["watchlist"].remove(existing_in_watchlist)
+        # Remove from watchlist if present
+        await sqlite_store.remove_from_watchlist(uid, mov["id"])
 
-        await save_data_async(data)
         await interaction.followup.send(f"🎉 {interaction.user.display_name} marked **{mov['title']} ({mov['year']})** as watched!")
 
     @bot.tree.command(name="unwatch", description="Remove a movie from watched list")
@@ -681,16 +560,13 @@ def setup(bot):
         await interaction.response.defer()
 
         uid = str(interaction.user.id)
-        entry, data = await get_user_entry(uid)
         mov = await search_movie_async(title)
 
         if not mov:
             return await interaction.followup.send("❌ Movie not found.")
 
-        existing_in_watched = find_movie_by_id(entry["watched"], mov["id"])
-        if existing_in_watched:
-            entry["watched"].remove(existing_in_watched)
-            await save_data_async(data)
+        removed = await sqlite_store.remove_from_watched(uid, mov["id"])
+        if removed:
             return await interaction.followup.send(f"↩️ {interaction.user.display_name} unmarked **{mov['title']} ({mov['year']})** as watched.")
 
         await interaction.followup.send("❌ Movie wasn't marked as watched.")
@@ -702,36 +578,33 @@ def setup(bot):
         await interaction.response.defer()
 
         uid = str(interaction.user.id)
-        entry, data = await get_user_entry(uid)
-
         mov = await search_movie_async(title)
 
         if not mov:
             return await interaction.followup.send("❌ Movie not found.")
 
-        # Find movie by ID
-        movie_to_remove = find_movie_by_id(entry["watchlist"], mov["id"])
-
-        if movie_to_remove:
-            entry["watchlist"].remove(movie_to_remove)
-            await save_data_async(data)
-            return await interaction.followup.send(f"🗑️ {interaction.user.display_name} removed **{movie_to_remove['title']} ({movie_to_remove['year']})** from their watchlist.")
+        removed = await sqlite_store.remove_from_watchlist(uid, mov["id"])
+        if removed:
+            return await interaction.followup.send(f"🗑️ {interaction.user.display_name} removed **{mov['title']} ({mov['year']})** from their watchlist.")
         else:
             await interaction.followup.send("❌ Movie not found in your watchlist.")
 
 
     @bot.tree.command(name="stats", description="View your movie watching statistics")
     async def stats_cmd(interaction: discord.Interaction):
-        entry, _ = await get_user_entry(str(interaction.user.id))
+        uid = str(interaction.user.id)
+        watchlist = await sqlite_store.get_user_watchlist(uid)
+        watched = await sqlite_store.get_user_watched(uid)
+        pending = await sqlite_store.get_user_pending(uid)
 
         embed = discord.Embed(
             title="📊 Your Movie Stats",
             color=0xe74c3c
         )
-        embed.add_field(name="🎬 Movies in Watchlist", value=len(entry["watchlist"]), inline=True)
-        embed.add_field(name="✅ Movies Watched", value=len(entry["watched"]), inline=True)
-        embed.add_field(name="📬 Pending Suggestions", value=len(entry["pending"]), inline=True)
-        embed.add_field(name="📈 Total Movies", value=len(entry["watchlist"]) + len(entry["watched"]), inline=True)
+        embed.add_field(name="🎬 Movies in Watchlist", value=len(watchlist), inline=True)
+        embed.add_field(name="✅ Movies Watched", value=len(watched), inline=True)
+        embed.add_field(name="📬 Pending Suggestions", value=len(pending), inline=True)
+        embed.add_field(name="📈 Total Movies", value=len(watchlist) + len(watched), inline=True)
 
         await interaction.response.send_message(embed=embed)
 

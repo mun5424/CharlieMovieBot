@@ -8,13 +8,25 @@ from discord.ext import tasks
 from custom_reminder import CUSTOM_REMINDERS
 import config
 
+# Use zoneinfo for DST-aware scheduling (Python 3.9+)
+try:
+    from zoneinfo import ZoneInfo
+    PACIFIC_TZ_SCHEDULE = ZoneInfo("America/Los_Angeles")
+except ImportError:
+    # Fallback for older Python - DST bug may still occur
+    PACIFIC_TZ_SCHEDULE = None
+
 PACIFIC_TZ = pytz.timezone("America/Los_Angeles")
 UTC_TZ = pytz.timezone("UTC")
 STARTGG_API_URL = "https://api.start.gg/gql/alpha"
 logger = logging.getLogger(__name__)
 
-# Shared timeout configuration to prevent hangs
-STARTGG_TIMEOUT = aiohttp.ClientTimeout(total=15, connect=5)
+# Shared timeout configuration - increased connect timeout for reliability
+STARTGG_TIMEOUT = aiohttp.ClientTimeout(total=20, connect=10)
+
+# Retry configuration
+MAX_RETRIES = 2
+RETRY_DELAY = 3  # seconds
 
 # Module-level session (will be created on first use)
 _session: aiohttp.ClientSession = None
@@ -35,23 +47,26 @@ async def close_session():
         await _session.close()
         _session = None
 
-# Calculate what time 2 PM Pacific is in UTC
-def get_utc_time_for_pacific(hour=14,minute=0):
-    """Get the UTC time that corresponds to 2 PM Pacific"""
-    # Create a Pacific time for 2 PM today
-    pacific_now = datetime.datetime.now(PACIFIC_TZ)
+def get_scheduled_time(hour: int, minute: int = 0) -> datetime.time:
+    """
+    Get a DST-aware time for task scheduling.
+    Uses zoneinfo (Python 3.9+) for proper DST handling.
+    Falls back to UTC calculation for older Python (may have DST issues).
+    """
+    if PACIFIC_TZ_SCHEDULE:
+        # DST-aware scheduling - discord.py handles timezone correctly
+        return datetime.time(hour=hour, minute=minute, tzinfo=PACIFIC_TZ_SCHEDULE)
+    else:
+        # Fallback: Calculate UTC time (not DST-aware at module load)
+        pacific_now = datetime.datetime.now(PACIFIC_TZ)
+        pacific_time = pacific_now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        utc_time = pacific_time.astimezone(UTC_TZ)
+        return utc_time.time()
 
-    # update this to 2pm
-    pacific_2pm = pacific_now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-    
-    # Convert to UTC
-    utc_2pm = pacific_2pm.astimezone(UTC_TZ)
-    
-    return utc_2pm.time()
-
-# This will calculate the correct UTC time automatically
-UTC_TIME_FOR_2PM_PACIFIC = get_utc_time_for_pacific()
-UTC_TIME_FOR_1PM_PACIFIC = get_utc_time_for_pacific(13)
+# Scheduled times (DST-aware with Python 3.9+)
+SCHEDULED_TIME_2PM = get_scheduled_time(14, 0)
+SCHEDULED_TIME_1PM = get_scheduled_time(13, 0)
+SCHEDULED_TIME_11AM = get_scheduled_time(11, 0)
 
 
 # Tournament schedule by day of week
@@ -107,15 +122,68 @@ def get_day_and_today():
 
 
 
-async def find_todays_tournament(tournament_name):
-    """Find today's tournament for the given tournament series"""
-    logger.info(f"Searching for today's tournament: '{tournament_name}'")
-    
-    _ , today = get_day_and_today() 
+def _matches_tournament_series(node_name: str, series_name: str) -> bool:
+    """Check if a tournament name matches our series using keyword matching."""
+    node_lower = node_name.lower()
+    series_lower = series_name.lower()
 
-    # Strategy 1: Search all SF6 tournaments and filter by name
-    logger.info("Strategy 1: Searching all Street Fighter 6 tournaments")
-    
+    # Extract key identifiers from series name
+    if "tns" in series_lower:
+        return "tns" in node_lower
+    elif "can opener" in series_lower:
+        return "can opener" in node_lower
+    elif "motivation academy" in series_lower:
+        return "motivation academy" in node_lower
+    elif "flyquest" in series_lower:
+        return "flyquest" in node_lower
+    elif "oni" in series_lower:
+        return "oni" in node_lower
+
+    # Fallback: check if first two words match
+    keywords = series_lower.split()[:2]
+    return all(kw in node_lower for kw in keywords)
+
+
+async def _search_tournaments_with_retry(session, headers: dict, query: dict) -> list:
+    """Execute tournament search with retry logic."""
+    last_error = None
+
+    for attempt in range(MAX_RETRIES):
+        try:
+            async with session.post(STARTGG_API_URL, headers=headers, json=query) as resp:
+                data = await resp.json()
+                return data.get("data", {}).get("tournaments", {}).get("nodes", [])
+
+        except asyncio.TimeoutError:
+            last_error = "timeout"
+            logger.warning(f"Attempt {attempt + 1}/{MAX_RETRIES}: start.gg timeout")
+        except aiohttp.ClientError as e:
+            last_error = str(e)
+            logger.warning(f"Attempt {attempt + 1}/{MAX_RETRIES}: network error - {e}")
+
+        if attempt < MAX_RETRIES - 1:
+            await asyncio.sleep(RETRY_DELAY)
+
+    logger.error(f"All {MAX_RETRIES} attempts failed. Last error: {last_error}")
+    return []
+
+
+async def find_todays_tournament(tournament_name: str, today: datetime.date = None):
+    """
+    Find today's tournament for the given tournament series.
+    Returns (slug, name) tuple or (None, None) if not found.
+    """
+    if today is None:
+        _, today = get_day_and_today()
+
+    logger.info(f"Searching for '{tournament_name}' on {today}")
+
+    headers = {
+        "Authorization": f"Bearer {config.STARTGG_TOKEN}",
+        "Content-Type": "application/json"
+    }
+
+    # Query all upcoming SF6 tournaments
     query = {
         "query": """
         query FindTournaments($perPage: Int!) {
@@ -134,261 +202,144 @@ async def find_todays_tournament(tournament_name):
           }
         }
         """,
-        "variables": {"perPage": 50}  # Increased to catch more tournaments
-    }
-
-    headers = {
-        "Authorization": f"Bearer {config.STARTGG_TOKEN}",
-        "Content-Type": "application/json"
+        "variables": {"perPage": 50}
     }
 
     try:
         session = await get_session()
-        async with session.post(STARTGG_API_URL, headers=headers, json=query) as resp:
-            data = await resp.json()
-            logger.info(f"Found {len(data.get('data', {}).get('tournaments', {}).get('nodes', []))} total SF6 tournaments")
+        nodes = await _search_tournaments_with_retry(session, headers, query)
 
-        nodes = data.get("data", {}).get("tournaments", {}).get("nodes", [])
-        
-        # Filter tournaments that match our tournament series
-        matching_tournaments = []
-        tournament_name_lower = tournament_name.lower()
-        
-        for node in nodes:
-            node_name_lower = node["name"].lower()
-            
-            # Check if this tournament belongs to our series
-            is_match = False
-            if "tns" in tournament_name_lower and "tns" in node_name_lower:
-                is_match = True
-            elif "can opener" in tournament_name_lower and "can opener" in node_name_lower:
-                is_match = True
-            elif "motivation academy" in tournament_name_lower and "motivation academy" in node_name_lower:
-                is_match = True
-            elif "flyquest" in tournament_name_lower and "flyquest" in node_name_lower:
-                is_match = True       
-            
-            if is_match:
-                matching_tournaments.append(node)
-                logger.info(f"Found matching tournament: {node['name']} (slug: {node['slug']})")
-        
-        logger.info(f"Found {len(matching_tournaments)} matching tournaments for '{tournament_name}'")
-        
+        if not nodes:
+            logger.warning("No tournaments returned from start.gg")
+            return None, None
+
+        logger.debug(f"Retrieved {len(nodes)} SF6 tournaments")
+
+        # Find matching tournaments for our series
+        matching = [n for n in nodes if _matches_tournament_series(n["name"], tournament_name)]
+        logger.debug(f"Found {len(matching)} matching '{tournament_name}' tournaments")
+
         # Look for today's tournament
-        for node in matching_tournaments:
+        for node in matching:
             event_date = datetime.datetime.fromtimestamp(node["startAt"], tz=PACIFIC_TZ).date()
-            logger.info(f"Tournament: {node['name']} on {event_date} (today: {today})")
             if event_date == today:
-                logger.info(f"Found today's tournament: {node['name']} -> {node['slug']}")
+                logger.info(f"Found today's tournament: {node['name']}")
                 return node["slug"], node["name"]
-        
-        # If no tournament found for today, log upcoming tournaments for debugging
-        if matching_tournaments:
-            logger.info(f"No tournament for today, but found {len(matching_tournaments)} upcoming tournaments:")
-            future_tournaments = [node for node in matching_tournaments 
-                                if datetime.datetime.fromtimestamp(node["startAt"], tz=PACIFIC_TZ).date() >= today]
-            
-            # Sort by date
-            future_tournaments.sort(key=lambda x: datetime.datetime.fromtimestamp(x["startAt"], tz=PACIFIC_TZ).date())
-            
-            for node in future_tournaments[:5]:  # Show next 5
-                event_date = datetime.datetime.fromtimestamp(node["startAt"], tz=PACIFIC_TZ).date()
-                logger.info(f"  - {node['name']} on {event_date}")
-        
-        # Strategy 2: Try name-based search as fallback
-        logger.info("Strategy 2: Trying name-based search as fallback")
-        
-        search_terms = [tournament_name]
-        if "TNS" in tournament_name:
-            search_terms = ["TNS", "TNS Street Fighter 6", tournament_name]
-        elif "Can Opener" in tournament_name:
-            search_terms = ["Can Opener", "Can Opener Series", tournament_name]
-        elif "Motivation Academy" in tournament_name:
-            search_terms = ["Motivation Academy", tournament_name]
-        elif "FlyQuest" in tournament_name:
-            search_terms = ["FlyQuest", "FlyQuest Fight Series", tournament_name]
-        elif "ONi" in tournament_name:
-            search_terms = ["ONi", "ONi Arena", tournament_name]
-        
-        for search_term in search_terms:
-            logger.info(f"Trying name-based search term: '{search_term}'")
-            
-            query = {
-                "query": """
-                query FindTournaments($perPage: Int!, $query: String!) {
-                  tournaments(query: {
-                    perPage: $perPage,
-                    filter: {
-                      past: false,
-                      name: $query,
-                      videogameIds: [43868]
-                    }
-                  }) {
-                    nodes {
-                      name
-                      slug
-                      startAt
-                    }
-                  }
+
+        # Log next upcoming if no match today
+        if matching:
+            future = sorted(
+                [n for n in matching if datetime.datetime.fromtimestamp(n["startAt"], tz=PACIFIC_TZ).date() >= today],
+                key=lambda x: x["startAt"]
+            )
+            if future:
+                next_date = datetime.datetime.fromtimestamp(future[0]["startAt"], tz=PACIFIC_TZ).date()
+                logger.info(f"No tournament today. Next: {future[0]['name']} on {next_date}")
+
+        # Fallback: name-based search (single attempt, not multiple terms)
+        logger.debug("Trying name-based search fallback")
+        fallback_query = {
+            "query": """
+            query FindTournaments($perPage: Int!, $query: String!) {
+              tournaments(query: {
+                perPage: $perPage,
+                filter: {
+                  past: false,
+                  name: $query,
+                  videogameIds: [43868]
                 }
-                """,
-                "variables": {"perPage": 15, "query": search_term}
+              }) {
+                nodes {
+                  name
+                  slug
+                  startAt
+                }
+              }
             }
+            """,
+            "variables": {"perPage": 15, "query": tournament_name}
+        }
 
-            async with session.post(STARTGG_API_URL, headers=headers, json=query) as resp:
-                data = await resp.json()
-                logger.info(f"Name-based search response for '{search_term}': Found {len(data.get('data', {}).get('tournaments', {}).get('nodes', []))} tournaments")
+        fallback_nodes = await _search_tournaments_with_retry(session, headers, fallback_query)
+        for node in fallback_nodes:
+            event_date = datetime.datetime.fromtimestamp(node["startAt"], tz=PACIFIC_TZ).date()
+            if event_date == today:
+                logger.info(f"Found via fallback: {node['name']}")
+                return node["slug"], node["name"]
 
-            nodes = data.get("data", {}).get("tournaments", {}).get("nodes", [])
-            
-            # Look for today's tournament
-            for node in nodes:
-                event_date = datetime.datetime.fromtimestamp(node["startAt"], tz=PACIFIC_TZ).date()
-                logger.info(f"Name-based result: {node['name']} on {event_date}")
-                if event_date == today:
-                    logger.info(f"Found today's tournament via name search: {node['name']} -> {node['slug']}")
-                    return node["slug"], node["name"]
-                
-    except asyncio.TimeoutError:
-        logger.error(f"Timeout searching for tournament '{tournament_name}' - start.gg API too slow")
-    except aiohttp.ClientError as e:
-        logger.error(f"Network error searching for tournament '{tournament_name}': {e}")
     except Exception as e:
-        logger.error(f"Error searching for tournament '{tournament_name}': {e}")
+        logger.error(f"Error searching for '{tournament_name}': {e}")
 
-    logger.warning(f"No tournament found for today ({today}) for series '{tournament_name}'")
+    logger.warning(f"No tournament found for {tournament_name} on {today}")
     return None, None
 
 
-@tasks.loop(time=UTC_TIME_FOR_2PM_PACIFIC)
+@tasks.loop(time=SCHEDULED_TIME_2PM)
 async def check_todays_tournament(manual=False):
+    """Check for today's tournament and send reminder to configured channels."""
     if bot_instance is None:
-        logger.warning("Bot instance is not set. Cannot send tournament reminder.")
+        logger.warning("Bot instance not set. Cannot send tournament reminder.")
         return
 
-    day, today = get_day_and_today() 
+    day, today = get_day_and_today()
+    logger.info(f"Tournament check for {today} (day {day})")
 
-    logger.info(f"Checking tournaments for day {day} ({today})")
-    
     # Check if there's a tournament scheduled for today
     if day not in TOURNAMENT_SCHEDULE:
-        logger.info(f"No tournament scheduled for day {day}")
+        logger.debug(f"No tournament scheduled for day {day}")
         return
-    
+
     tournament_name = TOURNAMENT_SCHEDULE[day]
-    logger.info(f"Today's tournament series: {tournament_name}")
-    
-    # Find today's specific tournament
-    slug, name = await find_todays_tournament(tournament_name)
-    
-    if not slug:
+
+    # Find today's specific tournament (already verified it's today)
+    slug, name = await find_todays_tournament(tournament_name, today)
+
+    if not slug or not name:
         logger.warning(f"No tournament found for {tournament_name} on {today}")
         return
 
-    # Final validation before API call
-    if not name:
-        logger.error(f"Tournament name is None after processing. Cannot proceed.")
-        return
-
-    logger.info(f"Proceeding with tournament check: {name} (slug: {slug})")
+    # Build the registration URL
     url = f"https://start.gg/{slug}"
+    logger.info(f"Sending reminder for: {name}")
 
-    headers = {
-        "Authorization": f"Bearer {config.STARTGG_TOKEN}",
-        "Content-Type": "application/json"
-    }
+    # Send to all configured channels
+    for channel_id in config.TOURNEY_CHANNEL_IDS:
+        channel = bot_instance.get_channel(channel_id)
+        if not channel:
+            logger.warning(f"Channel {channel_id} not found")
+            continue
 
-    query = {
-        "query": """
-        query TournamentQuery($slug: String!) {
-          tournament(slug: $slug) {
-            events {
-              name
-              startAt
-            }
-          }
-        }
-        """,
-        "variables": {"slug": slug}
-    }
+        try:
+            embed = discord.Embed(
+                title=f"🥊 Tournament of the Day - **{name}**",
+                description=f"Alright you gooners, **{name}** is happening TODAY! GO SIGN UP.",
+                color=0xFF6B35,
+                url=url
+            )
+            embed.add_field(
+                name="🔥 Click This Link to Sign Up!",
+                value=url,
+                inline=False
+            )
+            embed.add_field(
+                name="🚨 Tournament Rules",
+                value=TOURNAMENT_DESCRIPTION.get(day, "See tournament page for rules."),
+                inline=False
+            )
+            embed.set_footer(text="Click the title or use the link to register!")
 
-    try:
-        session = await get_session()
-        async with session.post(STARTGG_API_URL, headers=headers, json=query) as resp:
-            data = await resp.json()
-            logger.info(f"Tournament query response: {data}")
+            # Get role to ping (skip if manual test)
+            role_id = config.TOURNEY_CHANNEL_ROLES.get(channel_id)
+            role_mention = f"<@&{role_id}>" if role_id and not manual else ""
 
-            if "errors" in data:
-                logger.error(f"Start.gg API error: {data['errors']}")
-                return
-    
-        # fetch tournament data
-        tournament_data = data.get("data", {}).get("tournament")
-        if not tournament_data or "events" not in tournament_data:
-            logger.warning("Tournament data missing or malformed in API response.")
-            return
+            await channel.send(content=role_mention, embed=embed)
+            logger.info(f"Reminder sent to channel {channel_id}")
 
-        events = tournament_data["events"]
-        logger.info(f"Found {len(events)} events in tournament")
-
-        for event in events:
-            event_date = datetime.datetime.fromtimestamp(event["startAt"], tz=PACIFIC_TZ).date()
-            logger.info(f"Event: {event['name']} on {event_date}")
-            if event_date == today:
-                logger.info(f"Found today's event: {event['name']}")
-                
-                # Send to all channels
-                for channel_id in config.TOURNEY_CHANNEL_IDS:
-                    channel = bot_instance.get_channel(channel_id)
-                    if channel:
-                        try:
-                            embed = discord.Embed(
-                                title=f"🥊 Tournament of the Day - **{name}**",
-                                description=f"Alright you gooners, **{name}** is happening TODAY! GO SIGN UP.",
-                                color=0xFF6B35,  # Orange color
-                                url=url
-                            )
-                            embed.add_field(
-                                name="🔥 Click This Link to Sign Up!",
-                                value=f"{url}",
-                                inline=False
-                            )
-                            embed.add_field(
-                                name="🚨 Tournament Rules",
-                                value=f"{TOURNAMENT_DESCRIPTION[day]}",
-                                inline=False
-                            )
-
-                            embed.set_footer(text="Click the title or use the link to register!")
-                            
-                            role_id = config.TOURNEY_CHANNEL_ROLES.get(channel_id)
-                            if role_id and not manual:
-                                role_mention = f"<@&{role_id}>"
-                            else:
-                                role_mention = ""  # No role to ping for this channel
-
-                            await channel.send(content=role_mention, embed=embed)
-                            logger.info(f"Tournament reminder sent successfully to channel {channel_id}")
-                            
-                        except Exception as e:
-                            logger.error(f"Error sending message to channel {channel_id}: {e}")
-                            
-                    else:
-                        logger.warning(f"Channel {channel_id} not found. Check your config.TOURNEY_CHANNEL_IDS.")
-                
-                return
-
-        logger.info("No event scheduled for today. Time for Distraction Hour.")
-
-    except asyncio.TimeoutError:
-        logger.error("Timeout fetching tournament data - start.gg API too slow")
-    except aiohttp.ClientError as e:
-        logger.error(f"Network error fetching tournament data: {e}")
-    except Exception as e:
-        logger.error(f"Error processing tournament data: {e}")
+        except Exception as e:
+            logger.error(f"Error sending to channel {channel_id}: {e}")
 
 
-@tasks.loop(time=UTC_TIME_FOR_1PM_PACIFIC)
+@tasks.loop(time=SCHEDULED_TIME_1PM)
 async def check_custom_reminders():
     if bot_instance is None:
         logger.warning("Bot instance not set. Cannot run custom reminders.")
@@ -437,8 +388,6 @@ async def check_custom_reminders():
                     logger.warning(f"Channel {channel_id} not found.")
 
 
-# Use your existing function to calculate UTC time for 11 AM Pacific
-UTC_TIME_FOR_11AM_PACIFIC = get_utc_time_for_pacific(hour=11, minute=0)
 
 async def check_dodgers_game():
     """Check if Dodgers won a home game yesterday using MLB API"""
@@ -499,7 +448,7 @@ async def check_dodgers_game():
         return None  # Fixed the return value
 
 
-@tasks.loop(time=UTC_TIME_FOR_11AM_PACIFIC)
+@tasks.loop(time=SCHEDULED_TIME_11AM)
 async def check_dodgers_and_notify():
     """Check if Dodgers won a home game yesterday and send Panda Express notification at 11 AM PT"""
     if bot_instance is None:
@@ -560,10 +509,10 @@ async def check_dodgers_and_notify():
 def setup_reminder(bot):
     global bot_instance
     bot_instance = bot
-    check_todays_tournament.start()  # runs daily at 2 PM PST
-    check_custom_reminders.start()  # checks daily at 1PM PST
-    # check_dodgers_and_notify.start()  # checks daily at 11 AM PST
+    check_todays_tournament.start()  # runs daily at 2 PM PT
+    check_custom_reminders.start()   # runs daily at 1 PM PT
+    # check_dodgers_and_notify.start()  # runs daily at 11 AM PT
 
     # Register cleanup handler for the shared session
     if hasattr(bot, 'add_shutdown_handler'):
-        bot.add_shutdown_handler(lambda: asyncio.create_task(close_session()))
+        bot.add_shutdown_handler(close_session)

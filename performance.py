@@ -311,20 +311,25 @@ class PerformanceOptimizer:
 
 class OptimizedBot(commands.Bot):
     """Enhanced bot class with performance features"""
-    
+
     def __init__(self, config_module=None):
         # Store config first
         self.config = config_module
         self.logger = logging.getLogger(__name__)
-        
-        # Get performance settings
-        max_messages = self._get_config_value('MAX_MESSAGES', 500)
+
+        # Get performance settings - reduced for Pi Zero 2 W (512MB RAM)
+        max_messages = self._get_config_value('MAX_MESSAGES', 100)  # Reduced from 500
         chunk_guilds = self._get_config_value('CHUNK_GUILDS_AT_STARTUP', False)
-        
-        # Discord intents
-        intents = discord.Intents.default()
-        intents.message_content = True
-        
+
+        # Minimal Discord intents for memory efficiency
+        intents = discord.Intents.none()
+        intents.guilds = True          # Required for guild info
+        intents.guild_messages = True  # Required for trivia answer detection
+        intents.message_content = True # Required for reading trivia answers
+
+        # Disable member caching to save memory
+        member_cache = discord.MemberCacheFlags.none()
+
         # Initialize bot with performance optimizations
         super().__init__(
             command_prefix="!",
@@ -332,6 +337,7 @@ class OptimizedBot(commands.Bot):
             intents=intents,
             chunk_guilds_at_startup=chunk_guilds,
             max_messages=max_messages,
+            member_cache_flags=member_cache,
         )
         
         # Performance components (initialize after super().__init__)

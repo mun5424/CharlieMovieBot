@@ -115,6 +115,26 @@ class BotManager:
     async def load_additional_components(self):
         """Load additional bot components"""
         try:
+            # Initialize SQLite database
+            try:
+                import sqlite_store
+                await sqlite_store.get_db()
+                # Register cleanup on shutdown
+                self.bot.add_shutdown_handler(sqlite_store.close_db)
+                self.logger.info("✅ SQLite database initialized")
+            except Exception as e:
+                self.logger.error(f"❌ Failed to initialize SQLite database: {e}")
+
+            # Pre-warm TMDB session to avoid first-request latency
+            try:
+                from tmdb_client import warmup_session, close_session
+                await warmup_session()
+                # Register cleanup on shutdown
+                self.bot.add_shutdown_handler(close_session)
+                self.logger.info("✅ TMDB session pre-warmed")
+            except Exception as e:
+                self.logger.warning(f"⚠️ Failed to pre-warm TMDB session: {e}")
+
             # Load tournament reminder if available
             try:
                 import tourney_reminder
@@ -124,9 +144,9 @@ class BotManager:
                 self.logger.info("ℹ️ Tournament reminder not available")
             except Exception as e:
                 self.logger.error(f"❌ Failed to load tournament reminder: {e}")
-            
+
             # Add other components here as needed
-            
+
         except Exception as e:
             self.logger.error(f"❌ Error loading additional components: {e}")
     

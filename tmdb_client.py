@@ -1,9 +1,56 @@
 import aiohttp
 import asyncio
+import logging
 from config import TMDB_API_KEY
+
+logger = logging.getLogger(__name__)
 
 # Shared timeout configuration
 TMDB_TIMEOUT = aiohttp.ClientTimeout(total=10, connect=5)
+
+# Shared session for connection reuse (avoids cold-start latency)
+_session: aiohttp.ClientSession = None
+
+
+async def get_session() -> aiohttp.ClientSession:
+    """Get or create the shared aiohttp session"""
+    global _session
+    if _session is None or _session.closed:
+        # Use a connector with connection pooling
+        connector = aiohttp.TCPConnector(
+            limit=10,  # Max connections
+            keepalive_timeout=60,  # Keep connections alive
+            enable_cleanup_closed=True
+        )
+        _session = aiohttp.ClientSession(
+            timeout=TMDB_TIMEOUT,
+            connector=connector
+        )
+        logger.info("Created new TMDB aiohttp session")
+    return _session
+
+
+async def warmup_session():
+    """Pre-warm the session by making a lightweight request"""
+    try:
+        session = await get_session()
+        # Make a simple request to establish connection
+        url = "https://api.themoviedb.org/3/configuration"
+        params = {"api_key": TMDB_API_KEY}
+        async with session.get(url, params=params) as resp:
+            await resp.read()
+        logger.info("TMDB session pre-warmed successfully")
+    except Exception as e:
+        logger.warning(f"Failed to pre-warm TMDB session: {e}")
+
+
+async def close_session():
+    """Close the shared session (call on bot shutdown)"""
+    global _session
+    if _session and not _session.closed:
+        await _session.close()
+        _session = None
+        logger.info("Closed TMDB aiohttp session")
 
 
 async def search_movies_autocomplete(query: str, limit: int = 25):
@@ -14,11 +61,11 @@ async def search_movies_autocomplete(query: str, limit: int = 25):
     params = {"api_key": TMDB_API_KEY, "query": query, "page": 1}
 
     try:
-        async with aiohttp.ClientSession(timeout=TMDB_TIMEOUT) as session:
-            async with session.get(url, params=params) as resp:
-                if resp.status != 200:
-                    return []
-                res = await resp.json()
+        session = await get_session()
+        async with session.get(url, params=params) as resp:
+            if resp.status != 200:
+                return []
+            res = await resp.json()
 
         hits = res.get("results", [])
 
@@ -65,11 +112,11 @@ async def search_movie_async(title_with_year: str):
         params["year"] = year
 
     try:
-        async with aiohttp.ClientSession(timeout=TMDB_TIMEOUT) as session:
-            async with session.get(url, params=params) as resp:
-                if resp.status != 200:
-                    return None
-                res = await resp.json()
+        session = await get_session()
+        async with session.get(url, params=params) as resp:
+            if resp.status != 200:
+                return None
+            res = await resp.json()
 
         hits = res.get("results", [])
         if hits:
@@ -123,11 +170,11 @@ async def get_movie_details_async(movie_id: int):
     }
 
     try:
-        async with aiohttp.ClientSession(timeout=TMDB_TIMEOUT) as session:
-            async with session.get(url, params=params) as resp:
-                if resp.status != 200:
-                    return None
-                res = await resp.json()
+        session = await get_session()
+        async with session.get(url, params=params) as resp:
+            if resp.status != 200:
+                return None
+            res = await resp.json()
 
         # Get director from credits
         director = "Unknown"
