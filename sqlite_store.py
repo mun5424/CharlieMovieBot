@@ -43,7 +43,7 @@ async def close_db():
 async def _init_tables(db: aiosqlite.Connection):
     """Initialize database tables"""
     await db.executescript("""
-        -- User watchlists
+        -- User watchlists (unified: includes watched status)
         CREATE TABLE IF NOT EXISTS watchlist (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id TEXT NOT NULL,
@@ -54,10 +54,11 @@ async def _init_tables(db: aiosqlite.Connection):
             rating REAL,
             poster_path TEXT,
             added_at REAL,
+            watched_at REAL,
             UNIQUE(user_id, movie_id)
         );
 
-        -- Watched movies
+        -- Legacy watched table (kept for migration, will be deprecated)
         CREATE TABLE IF NOT EXISTS watched (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id TEXT NOT NULL,
@@ -98,24 +99,58 @@ async def _init_tables(db: aiosqlite.Connection):
 
         -- Indexes for fast lookups
         CREATE INDEX IF NOT EXISTS idx_watchlist_user ON watchlist(user_id);
+        CREATE INDEX IF NOT EXISTS idx_watchlist_watched ON watchlist(user_id, watched_at);
         CREATE INDEX IF NOT EXISTS idx_watched_user ON watched(user_id);
         CREATE INDEX IF NOT EXISTS idx_pending_user ON pending(user_id);
         CREATE INDEX IF NOT EXISTS idx_reviews_movie ON reviews(movie_id);
     """)
+
+    # Add watched_at column if it doesn't exist (for existing databases)
+    try:
+        await db.execute("ALTER TABLE watchlist ADD COLUMN watched_at REAL")
+        await db.commit()
+        logger.info("Added watched_at column to watchlist table")
+    except Exception:
+        pass  # Column already exists
+
     await db.commit()
 
 
 # ============== Watchlist Operations ==============
 
-async def get_user_watchlist(user_id: str) -> List[Dict]:
-    """Get a user's watchlist"""
+async def get_user_watchlist(user_id: str, filter_mode: str = "all") -> List[Dict]:
+    """
+    Get a user's watchlist with optional filtering.
+
+    Args:
+        user_id: The user's ID
+        filter_mode: "all" (default), "unwatched", or "watched"
+
+    Returns:
+        List of movies sorted by added_at DESC (most recent first)
+    """
     db = await get_db()
     async with _lock:
-        cursor = await db.execute(
-            "SELECT movie_id, title, year, overview, rating, poster_path "
-            "FROM watchlist WHERE user_id = ? ORDER BY added_at DESC",
-            (user_id,)
-        )
+        if filter_mode == "unwatched":
+            query = """
+                SELECT movie_id, title, year, overview, rating, poster_path, added_at, watched_at
+                FROM watchlist WHERE user_id = ? AND watched_at IS NULL
+                ORDER BY added_at DESC
+            """
+        elif filter_mode == "watched":
+            query = """
+                SELECT movie_id, title, year, overview, rating, poster_path, added_at, watched_at
+                FROM watchlist WHERE user_id = ? AND watched_at IS NOT NULL
+                ORDER BY watched_at DESC
+            """
+        else:  # "all"
+            query = """
+                SELECT movie_id, title, year, overview, rating, poster_path, added_at, watched_at
+                FROM watchlist WHERE user_id = ?
+                ORDER BY added_at DESC
+            """
+
+        cursor = await db.execute(query, (user_id,))
         rows = await cursor.fetchall()
         return [
             {
@@ -124,10 +159,34 @@ async def get_user_watchlist(user_id: str) -> List[Dict]:
                 "year": row["year"],
                 "overview": row["overview"],
                 "rating": row["rating"],
-                "poster_path": row["poster_path"]
+                "poster_path": row["poster_path"],
+                "added_at": row["added_at"],
+                "watched_at": row["watched_at"]
             }
             for row in rows
         ]
+
+
+async def get_watchlist_counts(user_id: str) -> Dict[str, int]:
+    """Get counts of total, watched, and unwatched movies."""
+    db = await get_db()
+    async with _lock:
+        cursor = await db.execute(
+            """
+            SELECT
+                COUNT(*) as total,
+                SUM(CASE WHEN watched_at IS NOT NULL THEN 1 ELSE 0 END) as watched,
+                SUM(CASE WHEN watched_at IS NULL THEN 1 ELSE 0 END) as unwatched
+            FROM watchlist WHERE user_id = ?
+            """,
+            (user_id,)
+        )
+        row = await cursor.fetchone()
+        return {
+            "total": row["total"] or 0,
+            "watched": row["watched"] or 0,
+            "unwatched": row["unwatched"] or 0
+        }
 
 
 async def add_to_watchlist(user_id: str, movie: Dict) -> bool:
@@ -184,7 +243,7 @@ async def get_watchlist_movie(user_id: str, movie_id: int) -> Optional[Dict]:
     db = await get_db()
     async with _lock:
         cursor = await db.execute(
-            "SELECT movie_id, title, year, overview, rating, poster_path "
+            "SELECT movie_id, title, year, overview, rating, poster_path, added_at, watched_at "
             "FROM watchlist WHERE user_id = ? AND movie_id = ?",
             (user_id, movie_id)
         )
@@ -196,9 +255,82 @@ async def get_watchlist_movie(user_id: str, movie_id: int) -> Optional[Dict]:
                 "year": row["year"],
                 "overview": row["overview"],
                 "rating": row["rating"],
-                "poster_path": row["poster_path"]
+                "poster_path": row["poster_path"],
+                "added_at": row["added_at"],
+                "watched_at": row["watched_at"]
             }
         return None
+
+
+async def mark_as_watched(user_id: str, movie_id: int, movie: Optional[Dict] = None) -> str:
+    """
+    Mark a movie as watched. If not in watchlist, adds it first.
+
+    Args:
+        user_id: The user's ID
+        movie_id: The movie's TMDB ID
+        movie: Movie data dict (required if movie not already in watchlist)
+
+    Returns:
+        "marked" if already in watchlist and marked
+        "added_and_marked" if added to watchlist and marked
+        "already_watched" if already marked as watched
+        "error" if movie data required but not provided
+    """
+    import time
+    db = await get_db()
+    async with _lock:
+        # Check if movie is already in watchlist
+        cursor = await db.execute(
+            "SELECT watched_at FROM watchlist WHERE user_id = ? AND movie_id = ?",
+            (user_id, movie_id)
+        )
+        row = await cursor.fetchone()
+
+        if row:
+            # Movie exists in watchlist
+            if row["watched_at"] is not None:
+                return "already_watched"
+            # Mark as watched
+            await db.execute(
+                "UPDATE watchlist SET watched_at = ? WHERE user_id = ? AND movie_id = ?",
+                (time.time(), user_id, movie_id)
+            )
+            await db.commit()
+            return "marked"
+        else:
+            # Movie not in watchlist - need to add it
+            if not movie:
+                return "error"
+            await db.execute(
+                "INSERT INTO watchlist (user_id, movie_id, title, year, overview, rating, poster_path, added_at, watched_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    user_id,
+                    movie.get("id"),
+                    movie.get("title"),
+                    movie.get("year"),
+                    movie.get("overview"),
+                    movie.get("rating"),
+                    movie.get("poster_path"),
+                    time.time(),
+                    time.time()  # Also set watched_at since we're marking as watched
+                )
+            )
+            await db.commit()
+            return "added_and_marked"
+
+
+async def mark_as_unwatched(user_id: str, movie_id: int) -> bool:
+    """Mark a movie as unwatched. Returns True if updated."""
+    db = await get_db()
+    async with _lock:
+        cursor = await db.execute(
+            "UPDATE watchlist SET watched_at = NULL WHERE user_id = ? AND movie_id = ?",
+            (user_id, movie_id)
+        )
+        await db.commit()
+        return cursor.rowcount > 0
 
 
 # ============== Watched Operations ==============

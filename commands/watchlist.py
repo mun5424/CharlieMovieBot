@@ -1,5 +1,6 @@
-# commands/watchlist.py - Updated with SQLite storage for Pi optimization
+# commands/watchlist.py - Updated with unified watchlist (watched status integrated)
 import logging
+from datetime import datetime
 from typing import Optional, List, Dict
 import discord
 from discord.ext import commands
@@ -14,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 # Constants - reduced for Pi Zero 2 W memory efficiency
 SUGGESTION_VIEW_TIMEOUT = 120  # 2 minutes (reduced from 5)
-WATCHED_LIST_PAGE_SIZE = 5
+WATCHLIST_PAGE_SIZE = 15  # Movies per page in watchlist
 REVIEW_VIEW_TIMEOUT = 120  # 2 minutes (reduced from 5)
 
 
@@ -40,6 +41,21 @@ def format_reviewers_text(reviews: List[Dict]) -> str:
 async def get_random_review() -> Optional[Dict]:
     """Get a random review from all movies"""
     return await sqlite_store.get_random_review()
+
+
+def format_watchlist_entry(movie: Dict) -> str:
+    """Format a single watchlist entry with watched status and date."""
+    title = movie.get('title', 'Unknown')
+    year = movie.get('year', '')
+    watched_at = movie.get('watched_at')
+
+    if watched_at:
+        # Format the watched date
+        watched_date = datetime.fromtimestamp(watched_at)
+        date_str = watched_date.strftime("%b %d")
+        return f"✅ {title} ({year}) - watched {date_str}"
+    else:
+        return f"❌ {title} ({year})"
 
 
 def setup(bot):
@@ -136,6 +152,135 @@ def setup(bot):
             logger.error(f"Error in pending autocomplete: {e}")
             return []
 
+    # ==================== WATCHLIST VIEW WITH FILTER BUTTONS ====================
+
+    class WatchlistView(discord.ui.View):
+        """Paginated watchlist view with filter buttons"""
+
+        def __init__(self, user_id: str, display_name: str, filter_mode: str = "all"):
+            super().__init__(timeout=SUGGESTION_VIEW_TIMEOUT)
+            self.user_id = user_id
+            self.display_name = display_name
+            self.filter_mode = filter_mode
+            self.current_page = 0
+            self.movies = []
+            self.counts = {"total": 0, "watched": 0, "unwatched": 0}
+            self.message = None
+
+        async def load_data(self):
+            """Load watchlist data from database"""
+            self.movies = await sqlite_store.get_user_watchlist(self.user_id, self.filter_mode)
+            self.counts = await sqlite_store.get_watchlist_counts(self.user_id)
+            self.update_buttons()
+
+        def get_total_pages(self) -> int:
+            return max(1, (len(self.movies) + WATCHLIST_PAGE_SIZE - 1) // WATCHLIST_PAGE_SIZE)
+
+        def create_embed(self) -> discord.Embed:
+            """Create the watchlist embed for current page"""
+            # Title based on filter mode
+            filter_labels = {
+                "all": "Watchlist",
+                "unwatched": "Unwatched Movies",
+                "watched": "Watched Movies"
+            }
+            title = f"🎬 {self.display_name}'s {filter_labels.get(self.filter_mode, 'Watchlist')}"
+
+            embed = discord.Embed(title=title, color=0x3498db)
+
+            if not self.movies:
+                if self.filter_mode == "unwatched":
+                    embed.add_field(name="\u200b", value="🎉 All caught up! No unwatched movies.", inline=False)
+                elif self.filter_mode == "watched":
+                    embed.add_field(name="\u200b", value="📭 No movies watched yet.", inline=False)
+                else:
+                    embed.add_field(name="\u200b", value="📭 Watchlist is empty. Use `/add` to add movies!", inline=False)
+            else:
+                # Paginate
+                start = self.current_page * WATCHLIST_PAGE_SIZE
+                end = start + WATCHLIST_PAGE_SIZE
+                page_movies = self.movies[start:end]
+
+                movie_lines = [format_watchlist_entry(m) for m in page_movies]
+                embed.add_field(name="\u200b", value="\n".join(movie_lines), inline=False)
+
+                # Page indicator - only show if more than 1 page
+                total_pages = self.get_total_pages()
+                if total_pages > 1:
+                    embed.set_footer(text=f"Page {self.current_page + 1} of {total_pages}")
+
+            return embed
+
+        def update_buttons(self):
+            """Update button states based on current filter and page"""
+            total_pages = self.get_total_pages()
+
+            # Filter buttons - highlight active filter
+            self.recent_btn.style = discord.ButtonStyle.primary if self.filter_mode == "all" else discord.ButtonStyle.secondary
+            self.unwatched_btn.style = discord.ButtonStyle.primary if self.filter_mode == "unwatched" else discord.ButtonStyle.secondary
+            self.watched_btn.style = discord.ButtonStyle.primary if self.filter_mode == "watched" else discord.ButtonStyle.secondary
+
+            # Pagination buttons
+            self.prev_btn.disabled = self.current_page == 0
+            self.next_btn.disabled = self.current_page >= total_pages - 1
+
+            # Hide pagination if only one page
+            if total_pages <= 1:
+                self.prev_btn.disabled = True
+                self.next_btn.disabled = True
+
+        async def refresh(self, interaction: discord.Interaction):
+            """Refresh the view with new data"""
+            await self.load_data()
+            embed = self.create_embed()
+            await interaction.response.edit_message(embed=embed, view=self)
+
+        async def on_timeout(self):
+            """Disable buttons on timeout"""
+            for item in self.children:
+                item.disabled = True
+            if self.message:
+                try:
+                    embed = self.create_embed()
+                    embed.set_footer(text="⏰ View expired. Use /watchlist to refresh.")
+                    await self.message.edit(embed=embed, view=self)
+                except Exception:
+                    pass
+
+        @discord.ui.button(label="📅 Recent", style=discord.ButtonStyle.primary, row=0)
+        async def recent_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+            self.filter_mode = "all"
+            self.current_page = 0
+            await self.refresh(interaction)
+
+        @discord.ui.button(label="❌ Unwatched", style=discord.ButtonStyle.secondary, row=0)
+        async def unwatched_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+            self.filter_mode = "unwatched"
+            self.current_page = 0
+            await self.refresh(interaction)
+
+        @discord.ui.button(label="✅ Watched", style=discord.ButtonStyle.secondary, row=0)
+        async def watched_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+            self.filter_mode = "watched"
+            self.current_page = 0
+            await self.refresh(interaction)
+
+        @discord.ui.button(label="⬅️", style=discord.ButtonStyle.grey, row=1)
+        async def prev_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+            if self.current_page > 0:
+                self.current_page -= 1
+                self.update_buttons()
+                embed = self.create_embed()
+                await interaction.response.edit_message(embed=embed, view=self)
+
+        @discord.ui.button(label="➡️", style=discord.ButtonStyle.grey, row=1)
+        async def next_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+            if self.current_page < self.get_total_pages() - 1:
+                self.current_page += 1
+                self.update_buttons()
+                embed = self.create_embed()
+                await interaction.response.edit_message(embed=embed, view=self)
+
     @bot.tree.command(name="add", description="Add a movie to your watchlist")
     @app_commands.describe(title="Start typing a movie title to see suggestions")
     @app_commands.autocomplete(title=movie_search_autocomplete)
@@ -169,12 +314,13 @@ def setup(bot):
         if not mov:
             return await interaction.followup.send("❌ Movie not found.")
 
-        # Check if movie is already in their watchlist or watched
-        if await sqlite_store.is_in_watchlist(target_uid, mov["id"]):
-            return await interaction.followup.send(f"⚠️ **{mov['title']} ({mov['year']})** is already in {user.display_name}'s watchlist.")
-
-        if await sqlite_store.is_in_watched(target_uid, mov["id"]):
-            return await interaction.followup.send(f"⚠️ {user.display_name} has already watched **{mov['title']} ({mov['year']})**.")
+        # Check if movie is already in their watchlist (unified - includes watched)
+        existing = await sqlite_store.get_watchlist_movie(target_uid, mov["id"])
+        if existing:
+            if existing.get("watched_at"):
+                return await interaction.followup.send(f"⚠️ {user.display_name} has already watched **{mov['title']} ({mov['year']})**.")
+            else:
+                return await interaction.followup.send(f"⚠️ **{mov['title']} ({mov['year']})** is already in {user.display_name}'s watchlist.")
 
         # Check if suggestion already exists
         existing_pending = await sqlite_store.get_pending_by_movie_id(target_uid, mov["id"])
@@ -463,77 +609,44 @@ def setup(bot):
             embed = self.create_embed()
             await interaction.response.edit_message(embed=embed, view=self)
 
-    @bot.tree.command(name="watchlist", description="View a user's watchlist")
+    @bot.tree.command(name="watchlist", description="View a user's watchlist with watched status")
     @app_commands.describe(user="Whose watchlist do you want to view?")
     async def watchlist_cmd(interaction: discord.Interaction, user: Optional[discord.User] = None):
+        await interaction.response.defer()
+
         # Use the provided user, or fallback to the command invoker
         target_user = user or interaction.user
         is_self = target_user.id == interaction.user.id
         target_uid = str(target_user.id)
 
-        movies = await sqlite_store.get_user_watchlist(target_uid)
+        # Create and load the watchlist view
+        view = WatchlistView(target_uid, target_user.display_name)
+        await view.load_data()
+
+        embed = view.create_embed()
+
+        # Send with buttons only if viewing own watchlist
+        if is_self:
+            message = await interaction.followup.send(embed=embed, view=view)
+            view.message = message
+        else:
+            # Other users see a static view without buttons
+            await interaction.followup.send(embed=embed)
+
+        # Show pending suggestions if user is viewing their own watchlist
         pending_suggestions = await sqlite_store.get_user_pending(target_uid) if is_self else []
-
-        if not movies:
-            message = "📭 Your watchlist is empty." if is_self else f"📭 {target_user.display_name}'s watchlist is empty."
-            await interaction.response.send_message(message)
-            return
-
-        embed = discord.Embed(
-            title=f"🎬 {target_user.display_name}'s Watchlist",
-            color=0x3498db
-        )
-
-        movie_list = [f"{i}. {movie['title']} ({movie['year']})" for i, movie in enumerate(movies, 1)]
-        embed.add_field(name="\u200b", value="\n".join(movie_list), inline=False)
-
-        await interaction.response.send_message(embed=embed)
-
-        # Only show pending suggestions if user is viewing their own watchlist
         if is_self and pending_suggestions:
-            view = SuggestionView(str(interaction.user.id), pending_suggestions.copy())
-            view.update_buttons()
-            embed = view.create_embed()
+            sugg_view = SuggestionView(str(interaction.user.id), pending_suggestions.copy())
+            sugg_view.update_buttons()
+            sugg_embed = sugg_view.create_embed()
 
             # Send as ephemeral (hidden) follow-up message with interactive buttons
-            message = await interaction.followup.send(embed=embed, view=view, ephemeral=True)
-            view.message = message  # Store reference for timeout handling
+            sugg_message = await interaction.followup.send(embed=sugg_embed, view=sugg_view, ephemeral=True)
+            sugg_view.message = sugg_message
 
-    @bot.tree.command(name="watchedlist", description="View your watched movies")
-    @app_commands.describe(page="Page number to view (default: 1)")
-    async def watchedlist_cmd(interaction: discord.Interaction, page: int = 1):
-        movies = await sqlite_store.get_user_watched(str(interaction.user.id))
-
-        if not movies:
-            return await interaction.response.send_message(f"📭 {interaction.user.display_name} has no movies watched yet.")
-
-        total_pages = (len(movies) + WATCHED_LIST_PAGE_SIZE - 1) // WATCHED_LIST_PAGE_SIZE
-        page = max(1, min(page, total_pages))
-
-        start = (page - 1) * WATCHED_LIST_PAGE_SIZE
-        chunk = movies[start:start + WATCHED_LIST_PAGE_SIZE]
-
-        embed = discord.Embed(
-            title=f"✅ {interaction.user.display_name}'s Watched Movies (Page {page}/{total_pages})",
-            description=f"Total watched: {len(movies)}",
-            color=0x2ecc71
-        )
-
-        movie_list = []
-        for i, movie in enumerate(chunk, start + 1):
-            movie_list.append(f"{i}. {movie['title']} ({movie['year']})")
-
-        embed.add_field(
-            name="\u200b",
-            value="\n".join(movie_list),
-            inline=False
-        )
-
-        await interaction.response.send_message(embed=embed)
-
-    @bot.tree.command(name="watched", description="Mark a movie as watched")
-    @app_commands.describe(title="Select from your watchlist or search for a movie")
-    @app_commands.autocomplete(title=user_watchlist_autocomplete)
+    @bot.tree.command(name="watched", description="Mark any movie as watched (searches TMDB)")
+    @app_commands.describe(title="Search for a movie to mark as watched")
+    @app_commands.autocomplete(title=movie_search_autocomplete)
     async def watched_cmd(interaction: discord.Interaction, title: str):
         await interaction.response.defer()
 
@@ -543,19 +656,21 @@ def setup(bot):
         if not mov:
             return await interaction.followup.send("❌ Movie not found.")
 
-        if await sqlite_store.is_in_watched(uid, mov["id"]):
-            return await interaction.followup.send("⚠️ Already marked as watched.")
+        # Use the new unified mark_as_watched function
+        result = await sqlite_store.mark_as_watched(uid, mov["id"], mov)
 
-        await sqlite_store.add_to_watched(uid, mov)
+        if result == "already_watched":
+            return await interaction.followup.send(f"⚠️ **{mov['title']} ({mov['year']})** is already marked as watched.")
+        elif result == "marked":
+            await interaction.followup.send(f"✅ {interaction.user.display_name} marked **{mov['title']} ({mov['year']})** as watched!")
+        elif result == "added_and_marked":
+            await interaction.followup.send(f"✅ {interaction.user.display_name} added **{mov['title']} ({mov['year']})** to watchlist and marked it as watched!")
+        else:
+            await interaction.followup.send("❌ Something went wrong. Please try again.")
 
-        # Remove from watchlist if present
-        await sqlite_store.remove_from_watchlist(uid, mov["id"])
-
-        await interaction.followup.send(f"🎉 {interaction.user.display_name} marked **{mov['title']} ({mov['year']})** as watched!")
-
-    @bot.tree.command(name="unwatch", description="Remove a movie from watched list")
-    @app_commands.describe(title="Select a movie from your watched list")
-    @app_commands.autocomplete(title=user_watched_autocomplete)
+    @bot.tree.command(name="unwatch", description="Mark a movie as unwatched (keeps it in watchlist)")
+    @app_commands.describe(title="Select a movie from your watchlist")
+    @app_commands.autocomplete(title=user_watchlist_autocomplete)
     async def unwatch_cmd(interaction: discord.Interaction, title: str):
         await interaction.response.defer()
 
@@ -565,11 +680,17 @@ def setup(bot):
         if not mov:
             return await interaction.followup.send("❌ Movie not found.")
 
-        removed = await sqlite_store.remove_from_watched(uid, mov["id"])
-        if removed:
-            return await interaction.followup.send(f"↩️ {interaction.user.display_name} unmarked **{mov['title']} ({mov['year']})** as watched.")
+        # Check if movie is in watchlist
+        watchlist_movie = await sqlite_store.get_watchlist_movie(uid, mov["id"])
+        if not watchlist_movie:
+            return await interaction.followup.send("❌ Movie not found in your watchlist.")
 
-        await interaction.followup.send("❌ Movie wasn't marked as watched.")
+        if not watchlist_movie.get("watched_at"):
+            return await interaction.followup.send("❌ Movie isn't marked as watched.")
+
+        # Mark as unwatched (keeps in watchlist)
+        await sqlite_store.mark_as_unwatched(uid, mov["id"])
+        await interaction.followup.send(f"↩️ {interaction.user.display_name} unmarked **{mov['title']} ({mov['year']})** as watched. It's still in your watchlist.")
 
     @bot.tree.command(name="remove", description="Remove a movie from your watchlist")
     @app_commands.describe(title="Select a movie from your watchlist")
@@ -593,18 +714,22 @@ def setup(bot):
     @bot.tree.command(name="stats", description="View your movie watching statistics")
     async def stats_cmd(interaction: discord.Interaction):
         uid = str(interaction.user.id)
-        watchlist = await sqlite_store.get_user_watchlist(uid)
-        watched = await sqlite_store.get_user_watched(uid)
+        counts = await sqlite_store.get_watchlist_counts(uid)
         pending = await sqlite_store.get_user_pending(uid)
 
         embed = discord.Embed(
             title="📊 Your Movie Stats",
             color=0xe74c3c
         )
-        embed.add_field(name="🎬 Movies in Watchlist", value=len(watchlist), inline=True)
-        embed.add_field(name="✅ Movies Watched", value=len(watched), inline=True)
+        embed.add_field(name="🎬 Total in Watchlist", value=counts["total"], inline=True)
+        embed.add_field(name="✅ Movies Watched", value=counts["watched"], inline=True)
+        embed.add_field(name="❌ Still to Watch", value=counts["unwatched"], inline=True)
         embed.add_field(name="📬 Pending Suggestions", value=len(pending), inline=True)
-        embed.add_field(name="📈 Total Movies", value=len(watchlist) + len(watched), inline=True)
+
+        # Calculate completion percentage
+        if counts["total"] > 0:
+            pct = round(counts["watched"] / counts["total"] * 100)
+            embed.add_field(name="📈 Completion", value=f"{pct}%", inline=True)
 
         await interaction.response.send_message(embed=embed)
 
