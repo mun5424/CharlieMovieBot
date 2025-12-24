@@ -684,7 +684,6 @@ def setup(bot):
         if result == "already_watched":
             return await interaction.followup.send(f"⚠️ **{mov['title']} ({mov['year']})** is already marked as watched.")
         elif result == "marked":
-            view = WatchedReviewView(mov["id"], mov["title"], mov["year"])
             embed = discord.Embed(
                 title="✅ Marked as Watched",
                 description=f"**{mov['title']} ({mov['year']})**",
@@ -692,9 +691,8 @@ def setup(bot):
             )
             if mov.get("poster_path"):
                 embed.set_thumbnail(url=f"https://image.tmdb.org/t/p/w200{mov['poster_path']}")
-            await interaction.followup.send(embed=embed, view=view)
+            await interaction.followup.send(embed=embed)
         elif result == "added_and_marked":
-            view = WatchedReviewView(mov["id"], mov["title"], mov["year"])
             embed = discord.Embed(
                 title="✅ Added & Marked as Watched",
                 description=f"**{mov['title']} ({mov['year']})**",
@@ -702,7 +700,7 @@ def setup(bot):
             )
             if mov.get("poster_path"):
                 embed.set_thumbnail(url=f"https://image.tmdb.org/t/p/w200{mov['poster_path']}")
-            await interaction.followup.send(embed=embed, view=view)
+            await interaction.followup.send(embed=embed)
         else:
             await interaction.followup.send("❌ Something went wrong. Please try again.")
 
@@ -772,25 +770,6 @@ def setup(bot):
         await interaction.response.send_message(embed=embed)
 
     # ==================== MOVIE REVIEWS ====================
-
-    class WatchedReviewView(discord.ui.View):
-        """View with a button to leave a review after marking a movie as watched"""
-
-        def __init__(self, movie_id: int, movie_title: str, movie_year: str):
-            super().__init__(timeout=120)  # 2 minute timeout
-            self.movie_id = movie_id
-            self.movie_title = movie_title
-            self.movie_year = movie_year
-
-        @discord.ui.button(label="Leave a Review", style=discord.ButtonStyle.primary)
-        async def review_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-            modal = ReviewModal(self.movie_id, self.movie_title, self.movie_year)
-            await interaction.response.send_modal(modal)
-
-        async def on_timeout(self):
-            # Disable button on timeout
-            for item in self.children:
-                item.disabled = True
 
     class ReviewModal(discord.ui.Modal):
         """Modal for entering a movie review"""

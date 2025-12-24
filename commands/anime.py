@@ -311,7 +311,6 @@ def setup(bot):
         if result == "already_watched":
             return await interaction.followup.send(f"⚠️ **{anime['title']}** is already marked as watched.")
         elif result == "marked":
-            view = AnimeWatchedReviewView(anime["mal_id"], anime["title"])
             embed = discord.Embed(
                 title="✅ Marked as Watched",
                 description=f"**{anime['title']}**",
@@ -319,9 +318,8 @@ def setup(bot):
             )
             if anime.get("image_url"):
                 embed.set_thumbnail(url=anime["image_url"])
-            await interaction.followup.send(embed=embed, view=view)
+            await interaction.followup.send(embed=embed)
         elif result == "added_and_marked":
-            view = AnimeWatchedReviewView(anime["mal_id"], anime["title"])
             embed = discord.Embed(
                 title="✅ Added & Marked as Watched",
                 description=f"**{anime['title']}**",
@@ -329,7 +327,7 @@ def setup(bot):
             )
             if anime.get("image_url"):
                 embed.set_thumbnail(url=anime["image_url"])
-            await interaction.followup.send(embed=embed, view=view)
+            await interaction.followup.send(embed=embed)
         else:
             await interaction.followup.send("❌ Something went wrong. Please try again.")
 
@@ -385,9 +383,13 @@ def setup(bot):
             return await interaction.followup.send("❌ Anime not found.")
 
         # Create detailed embed
+        synopsis = anime.get("synopsis", "No synopsis available.")
+        # Remove MAL attribution text
+        synopsis = synopsis.replace("[Written by MAL Rewrite]", "").strip()
+
         embed = discord.Embed(
             title=anime["title"],
-            description=anime.get("synopsis", "No synopsis available."),
+            description=synopsis,
             color=0xe91e63,
             url=f"https://myanimelist.net/anime/{anime['mal_id']}"
         )
@@ -429,23 +431,6 @@ def setup(bot):
         await interaction.response.send_message(embed=embed)
 
     # ==================== ANIME REVIEWS ====================
-
-    class AnimeWatchedReviewView(discord.ui.View):
-        """View with a button to leave a review after marking an anime as watched"""
-
-        def __init__(self, mal_id: int, anime_title: str):
-            super().__init__(timeout=120)  # 2 minute timeout
-            self.mal_id = mal_id
-            self.anime_title = anime_title
-
-        @discord.ui.button(label="Leave a Review", style=discord.ButtonStyle.primary)
-        async def review_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-            modal = AnimeReviewModal(self.mal_id, self.anime_title)
-            await interaction.response.send_modal(modal)
-
-        async def on_timeout(self):
-            for item in self.children:
-                item.disabled = True
 
     class AnimeReviewModal(discord.ui.Modal):
         """Modal for entering an anime review"""
