@@ -53,13 +53,14 @@ class BotManager:
         """Load all command modules"""
         try:
             # Import command modules
-            from commands import general, watchlist
+            from commands import general, watchlist, anime
             from trivia.trivia import TriviaCog
-            
+
             # Load traditional commands
             general.setup(self.bot)
             watchlist.setup(self.bot)
-            self.logger.info("✅ General commands loaded")
+            anime.setup(self.bot)
+            self.logger.info("✅ Commands loaded (general, watchlist, anime)")
             
             # Load trivia cog
             trivia_cog = TriviaCog(self.bot)
@@ -134,6 +135,16 @@ class BotManager:
                 self.logger.info("✅ TMDB session pre-warmed")
             except Exception as e:
                 self.logger.warning(f"⚠️ Failed to pre-warm TMDB session: {e}")
+
+            # Pre-warm Jikan session for anime commands
+            try:
+                from jikan_client import warmup_session as jikan_warmup, close_session as jikan_close
+                await jikan_warmup()
+                # Register cleanup on shutdown
+                self.bot.add_shutdown_handler(jikan_close)
+                self.logger.info("✅ Jikan session pre-warmed")
+            except Exception as e:
+                self.logger.warning(f"⚠️ Failed to pre-warm Jikan session: {e}")
 
             # Load tournament reminder if available
             try:

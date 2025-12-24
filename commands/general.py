@@ -203,7 +203,7 @@ def setup(bot):
     logger.info("Setting up general commands...")
 
     # ALL COMMANDS MUST BE INSIDE setup(bot) FUNCTION
-    @bot.tree.command(name="search", description="Search for a movie")
+    @bot.tree.command(name="search_movie", description="Search for a movie")
     @app_commands.describe(title="Start typing a movie title to see suggestions")
     @app_commands.autocomplete(title=movie_search_autocomplete)
     async def search_cmd(interaction: discord.Interaction, title: str):

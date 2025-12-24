@@ -113,10 +113,10 @@ class PerformanceMonitor:
             
             # Check thresholds and trigger alerts
             await self._check_thresholds(stats)
-            
-            # Log periodic stats
-            # await self._log_periodic_stats(stats)
-            
+
+            # Log periodic stats (every 10 minutes)
+            await self._log_periodic_stats(stats)
+
             return stats
             
         except Exception as e:

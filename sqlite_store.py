@@ -97,12 +97,32 @@ async def _init_tables(db: aiosqlite.Connection):
             UNIQUE(movie_id, user_id)
         );
 
+        -- Anime watchlist (unified: includes watched status)
+        CREATE TABLE IF NOT EXISTS anime_watchlist (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL,
+            mal_id INTEGER NOT NULL,
+            title TEXT,
+            title_japanese TEXT,
+            episodes INTEGER,
+            status TEXT,
+            score REAL,
+            image_url TEXT,
+            year INTEGER,
+            anime_type TEXT,
+            added_at REAL,
+            watched_at REAL,
+            UNIQUE(user_id, mal_id)
+        );
+
         -- Indexes for fast lookups
         CREATE INDEX IF NOT EXISTS idx_watchlist_user ON watchlist(user_id);
         CREATE INDEX IF NOT EXISTS idx_watchlist_watched ON watchlist(user_id, watched_at);
         CREATE INDEX IF NOT EXISTS idx_watched_user ON watched(user_id);
         CREATE INDEX IF NOT EXISTS idx_pending_user ON pending(user_id);
         CREATE INDEX IF NOT EXISTS idx_reviews_movie ON reviews(movie_id);
+        CREATE INDEX IF NOT EXISTS idx_anime_watchlist_user ON anime_watchlist(user_id);
+        CREATE INDEX IF NOT EXISTS idx_anime_watchlist_watched ON anime_watchlist(user_id, watched_at);
     """)
 
     # Add watched_at column if it doesn't exist (for existing databases)
@@ -609,3 +629,232 @@ def format_reviewers_text(reviews: List[Dict]) -> str:
     else:
         all_but_last = ", ".join(f"**{name}**" for name in usernames[:-1])
         return f"{all_but_last}, and **{usernames[-1]}** have reviewed and rated this movie"
+
+
+# ============== Anime Watchlist Operations ==============
+
+async def get_anime_watchlist(user_id: str, filter_mode: str = "all") -> List[Dict]:
+    """
+    Get a user's anime watchlist with optional filtering.
+
+    Args:
+        user_id: The user's ID
+        filter_mode: "all" (default), "unwatched", or "watched"
+    """
+    db = await get_db()
+    async with _lock:
+        if filter_mode == "unwatched":
+            query = """
+                SELECT mal_id, title, title_japanese, episodes, status, score,
+                       image_url, year, anime_type, added_at, watched_at
+                FROM anime_watchlist WHERE user_id = ? AND watched_at IS NULL
+                ORDER BY added_at DESC
+            """
+        elif filter_mode == "watched":
+            query = """
+                SELECT mal_id, title, title_japanese, episodes, status, score,
+                       image_url, year, anime_type, added_at, watched_at
+                FROM anime_watchlist WHERE user_id = ? AND watched_at IS NOT NULL
+                ORDER BY watched_at DESC
+            """
+        else:  # "all"
+            query = """
+                SELECT mal_id, title, title_japanese, episodes, status, score,
+                       image_url, year, anime_type, added_at, watched_at
+                FROM anime_watchlist WHERE user_id = ?
+                ORDER BY added_at DESC
+            """
+
+        cursor = await db.execute(query, (user_id,))
+        rows = await cursor.fetchall()
+        return [
+            {
+                "mal_id": row["mal_id"],
+                "title": row["title"],
+                "title_japanese": row["title_japanese"],
+                "episodes": row["episodes"],
+                "status": row["status"],
+                "score": row["score"],
+                "image_url": row["image_url"],
+                "year": row["year"],
+                "type": row["anime_type"],
+                "added_at": row["added_at"],
+                "watched_at": row["watched_at"]
+            }
+            for row in rows
+        ]
+
+
+async def get_anime_watchlist_counts(user_id: str) -> Dict[str, int]:
+    """Get counts of total, watched, and unwatched anime."""
+    db = await get_db()
+    async with _lock:
+        cursor = await db.execute(
+            """
+            SELECT
+                COUNT(*) as total,
+                SUM(CASE WHEN watched_at IS NOT NULL THEN 1 ELSE 0 END) as watched,
+                SUM(CASE WHEN watched_at IS NULL THEN 1 ELSE 0 END) as unwatched
+            FROM anime_watchlist WHERE user_id = ?
+            """,
+            (user_id,)
+        )
+        row = await cursor.fetchone()
+        return {
+            "total": row["total"] or 0,
+            "watched": row["watched"] or 0,
+            "unwatched": row["unwatched"] or 0
+        }
+
+
+async def add_to_anime_watchlist(user_id: str, anime: Dict) -> bool:
+    """Add an anime to user's watchlist. Returns False if already exists."""
+    db = await get_db()
+    async with _lock:
+        try:
+            import time
+            await db.execute(
+                """INSERT INTO anime_watchlist
+                   (user_id, mal_id, title, title_japanese, episodes, status,
+                    score, image_url, year, anime_type, added_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    user_id,
+                    anime.get("mal_id"),
+                    anime.get("title"),
+                    anime.get("title_japanese"),
+                    anime.get("episodes"),
+                    anime.get("status"),
+                    anime.get("score"),
+                    anime.get("image_url"),
+                    anime.get("year"),
+                    anime.get("type"),
+                    time.time()
+                )
+            )
+            await db.commit()
+            return True
+        except aiosqlite.IntegrityError:
+            return False
+
+
+async def remove_from_anime_watchlist(user_id: str, mal_id: int) -> bool:
+    """Remove an anime from user's watchlist. Returns True if removed."""
+    db = await get_db()
+    async with _lock:
+        cursor = await db.execute(
+            "DELETE FROM anime_watchlist WHERE user_id = ? AND mal_id = ?",
+            (user_id, mal_id)
+        )
+        await db.commit()
+        return cursor.rowcount > 0
+
+
+async def is_in_anime_watchlist(user_id: str, mal_id: int) -> bool:
+    """Check if an anime is in user's watchlist"""
+    db = await get_db()
+    async with _lock:
+        cursor = await db.execute(
+            "SELECT 1 FROM anime_watchlist WHERE user_id = ? AND mal_id = ?",
+            (user_id, mal_id)
+        )
+        return await cursor.fetchone() is not None
+
+
+async def get_anime_watchlist_entry(user_id: str, mal_id: int) -> Optional[Dict]:
+    """Get a specific anime from user's watchlist"""
+    db = await get_db()
+    async with _lock:
+        cursor = await db.execute(
+            """SELECT mal_id, title, title_japanese, episodes, status, score,
+                      image_url, year, anime_type, added_at, watched_at
+               FROM anime_watchlist WHERE user_id = ? AND mal_id = ?""",
+            (user_id, mal_id)
+        )
+        row = await cursor.fetchone()
+        if row:
+            return {
+                "mal_id": row["mal_id"],
+                "title": row["title"],
+                "title_japanese": row["title_japanese"],
+                "episodes": row["episodes"],
+                "status": row["status"],
+                "score": row["score"],
+                "image_url": row["image_url"],
+                "year": row["year"],
+                "type": row["anime_type"],
+                "added_at": row["added_at"],
+                "watched_at": row["watched_at"]
+            }
+        return None
+
+
+async def mark_anime_as_watched(user_id: str, mal_id: int, anime: Optional[Dict] = None) -> str:
+    """
+    Mark an anime as watched. If not in watchlist, adds it first.
+
+    Returns:
+        "marked" if already in watchlist and marked
+        "added_and_marked" if added to watchlist and marked
+        "already_watched" if already marked as watched
+        "error" if anime data required but not provided
+    """
+    import time
+    db = await get_db()
+    async with _lock:
+        # Check if anime is already in watchlist
+        cursor = await db.execute(
+            "SELECT watched_at FROM anime_watchlist WHERE user_id = ? AND mal_id = ?",
+            (user_id, mal_id)
+        )
+        row = await cursor.fetchone()
+
+        if row:
+            # Anime exists in watchlist
+            if row["watched_at"] is not None:
+                return "already_watched"
+            # Mark as watched
+            await db.execute(
+                "UPDATE anime_watchlist SET watched_at = ? WHERE user_id = ? AND mal_id = ?",
+                (time.time(), user_id, mal_id)
+            )
+            await db.commit()
+            return "marked"
+        else:
+            # Anime not in watchlist - need to add it
+            if not anime:
+                return "error"
+            await db.execute(
+                """INSERT INTO anime_watchlist
+                   (user_id, mal_id, title, title_japanese, episodes, status,
+                    score, image_url, year, anime_type, added_at, watched_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    user_id,
+                    anime.get("mal_id"),
+                    anime.get("title"),
+                    anime.get("title_japanese"),
+                    anime.get("episodes"),
+                    anime.get("status"),
+                    anime.get("score"),
+                    anime.get("image_url"),
+                    anime.get("year"),
+                    anime.get("type"),
+                    time.time(),
+                    time.time()
+                )
+            )
+            await db.commit()
+            return "added_and_marked"
+
+
+async def mark_anime_as_unwatched(user_id: str, mal_id: int) -> bool:
+    """Mark an anime as unwatched. Returns True if updated."""
+    db = await get_db()
+    async with _lock:
+        cursor = await db.execute(
+            "UPDATE anime_watchlist SET watched_at = NULL WHERE user_id = ? AND mal_id = ?",
+            (user_id, mal_id)
+        )
+        await db.commit()
+        return cursor.rowcount > 0
