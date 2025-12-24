@@ -60,6 +60,9 @@ class SearchReviewModal(discord.ui.Modal):
         # Format score for display (remove .0 for whole numbers)
         score_display = int(score_value) if score_value == int(score_value) else score_value
 
+        # Defer before doing database work to avoid interaction timeout
+        await interaction.response.defer()
+
         result = await add_movie_review(
             movie_id=self.movie_id,
             movie_title=self.movie_title,
@@ -79,12 +82,12 @@ class SearchReviewModal(discord.ui.Modal):
         embed.set_author(name=f"{interaction.user.display_name} - ⭐ {score_display}/10")
 
         if result == "updated":
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 content=f"✅ **{interaction.user.display_name}** updated their review for **{self.movie_title} ({self.movie_year})**",
                 embed=embed
             )
         else:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 content=f"✅ **{interaction.user.display_name}** submitted a review for **{self.movie_title} ({self.movie_year})**",
                 embed=embed
             )

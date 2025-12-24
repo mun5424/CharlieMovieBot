@@ -460,6 +460,9 @@ def setup(bot):
 
             score_display = int(score_value) if score_value == int(score_value) else score_value
 
+            # Defer before doing database work to avoid interaction timeout
+            await interaction.response.defer()
+
             result = await sqlite_store.add_anime_review(
                 mal_id=self.mal_id,
                 anime_title=self.anime_title,
@@ -477,12 +480,12 @@ def setup(bot):
             embed.set_author(name=f"{interaction.user.display_name} - ⭐ {score_display}/10")
 
             if result == "updated":
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     content=f"✅ **{interaction.user.display_name}** updated their review for **{self.anime_title}**",
                     embed=embed
                 )
             else:
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     content=f"✅ **{interaction.user.display_name}** submitted a review for **{self.anime_title}**",
                     embed=embed
                 )

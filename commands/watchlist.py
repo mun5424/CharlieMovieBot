@@ -310,7 +310,16 @@ def setup(bot):
             return await interaction.followup.send("⚠️ Already in your watchlist.")
 
         await sqlite_store.add_to_watchlist(uid, mov)
-        await interaction.followup.send(f"✅ {interaction.user.display_name} added **{mov['title']} ({mov['year']})** to their watchlist.")
+
+        embed = discord.Embed(
+            title="✅ Added to Watchlist",
+            description=f"**{mov['title']} ({mov['year']})**",
+            color=0x2ecc71
+        )
+        if mov.get("poster_path"):
+            embed.set_thumbnail(url=f"https://image.tmdb.org/t/p/w200{mov['poster_path']}")
+
+        await interaction.followup.send(embed=embed)
 
     @bot.tree.command(name="suggest", description="Suggest a movie to another user's watchlist")
     @app_commands.describe(
@@ -675,9 +684,25 @@ def setup(bot):
         if result == "already_watched":
             return await interaction.followup.send(f"⚠️ **{mov['title']} ({mov['year']})** is already marked as watched.")
         elif result == "marked":
-            await interaction.followup.send(f"✅ {interaction.user.display_name} marked **{mov['title']} ({mov['year']})** as watched!")
+            view = WatchedReviewView(mov["id"], mov["title"], mov["year"])
+            embed = discord.Embed(
+                title="✅ Marked as Watched",
+                description=f"**{mov['title']} ({mov['year']})**",
+                color=0x2ecc71
+            )
+            if mov.get("poster_path"):
+                embed.set_thumbnail(url=f"https://image.tmdb.org/t/p/w200{mov['poster_path']}")
+            await interaction.followup.send(embed=embed, view=view)
         elif result == "added_and_marked":
-            await interaction.followup.send(f"✅ {interaction.user.display_name} added **{mov['title']} ({mov['year']})** to watchlist and marked it as watched!")
+            view = WatchedReviewView(mov["id"], mov["title"], mov["year"])
+            embed = discord.Embed(
+                title="✅ Added & Marked as Watched",
+                description=f"**{mov['title']} ({mov['year']})**",
+                color=0x2ecc71
+            )
+            if mov.get("poster_path"):
+                embed.set_thumbnail(url=f"https://image.tmdb.org/t/p/w200{mov['poster_path']}")
+            await interaction.followup.send(embed=embed, view=view)
         else:
             await interaction.followup.send("❌ Something went wrong. Please try again.")
 
@@ -748,6 +773,25 @@ def setup(bot):
 
     # ==================== MOVIE REVIEWS ====================
 
+    class WatchedReviewView(discord.ui.View):
+        """View with a button to leave a review after marking a movie as watched"""
+
+        def __init__(self, movie_id: int, movie_title: str, movie_year: str):
+            super().__init__(timeout=120)  # 2 minute timeout
+            self.movie_id = movie_id
+            self.movie_title = movie_title
+            self.movie_year = movie_year
+
+        @discord.ui.button(label="Leave a Review", style=discord.ButtonStyle.primary)
+        async def review_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+            modal = ReviewModal(self.movie_id, self.movie_title, self.movie_year)
+            await interaction.response.send_modal(modal)
+
+        async def on_timeout(self):
+            # Disable button on timeout
+            for item in self.children:
+                item.disabled = True
+
     class ReviewModal(discord.ui.Modal):
         """Modal for entering a movie review"""
 
@@ -796,6 +840,9 @@ def setup(bot):
             # Format score for display (remove .0 for whole numbers)
             score_display = int(score_value) if score_value == int(score_value) else score_value
 
+            # Defer before doing database work to avoid interaction timeout
+            await interaction.response.defer()
+
             # Save the review
             result = await add_movie_review(
                 movie_id=self.movie_id,
@@ -816,12 +863,12 @@ def setup(bot):
             embed.set_author(name=f"{interaction.user.display_name} - ⭐ {score_display}/10")
 
             if result == "updated":
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     content=f"✅ **{interaction.user.display_name}** updated their review for **{self.movie_title} ({self.movie_year})**",
                     embed=embed
                 )
             else:
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     content=f"✅ **{interaction.user.display_name}** submitted a review for **{self.movie_title} ({self.movie_year})**",
                     embed=embed
                 )
