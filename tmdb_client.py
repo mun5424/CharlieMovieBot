@@ -1,6 +1,7 @@
 import aiohttp
 import asyncio
 import logging
+import time
 from config import TMDB_API_KEY
 
 logger = logging.getLogger(__name__)
@@ -10,6 +11,26 @@ TMDB_TIMEOUT = aiohttp.ClientTimeout(total=10, connect=5)
 
 # Shared session for connection reuse (avoids cold-start latency)
 _session: aiohttp.ClientSession = None
+
+# Search cache with TTL (query -> (results, timestamp))
+_search_cache: dict = {}
+CACHE_TTL = 60  # Cache results for 60 seconds
+MAX_CACHE_SIZE = 100  # Maximum cached queries
+
+
+def _clean_cache():
+    """Remove expired entries from cache."""
+    global _search_cache
+    now = time.time()
+    expired = [k for k, (_, ts) in _search_cache.items() if now - ts > CACHE_TTL]
+    for k in expired:
+        del _search_cache[k]
+
+    # If still too large, remove oldest entries
+    if len(_search_cache) > MAX_CACHE_SIZE:
+        sorted_keys = sorted(_search_cache.keys(), key=lambda k: _search_cache[k][1])
+        for k in sorted_keys[:len(_search_cache) - MAX_CACHE_SIZE]:
+            del _search_cache[k]
 
 
 async def get_session() -> aiohttp.ClientSession:
@@ -57,6 +78,18 @@ async def search_movies_autocomplete(query: str, limit: int = 25):
     if len(query) < 2:  # Don't search for very short queries
         return []
 
+    # Normalize query for cache key
+    cache_key = f"ac:{query.lower().strip()}:{limit}"
+
+    # Check cache first
+    if cache_key in _search_cache:
+        results, timestamp = _search_cache[cache_key]
+        if time.time() - timestamp < CACHE_TTL:
+            return results
+
+    # Clean cache periodically
+    _clean_cache()
+
     url = "https://api.themoviedb.org/3/search/movie"
     params = {"api_key": TMDB_API_KEY, "query": query, "page": 1}
 
@@ -83,12 +116,15 @@ async def search_movies_autocomplete(query: str, limit: int = 25):
                 "value": display_name      # What gets passed to the command
             })
 
+        # Cache the results
+        _search_cache[cache_key] = (movies, time.time())
+
         return movies
     except asyncio.TimeoutError:
-        print("TMDB autocomplete request timed out")
+        logger.warning("TMDB autocomplete request timed out")
         return []
     except Exception as e:
-        print(f"Error in autocomplete search: {e}")
+        logger.error(f"Error in autocomplete search: {e}")
         return []
 
 
@@ -103,6 +139,13 @@ async def search_movie_async(title_with_year: str):
     else:
         title = title_with_year
         year = None
+
+    # Check cache first
+    cache_key = f"search:{title.lower().strip()}:{year or ''}"
+    if cache_key in _search_cache:
+        result, timestamp = _search_cache[cache_key]
+        if time.time() - timestamp < CACHE_TTL:
+            return result
 
     url = "https://api.themoviedb.org/3/search/movie"
     params = {"api_key": TMDB_API_KEY, "query": title}
@@ -121,7 +164,7 @@ async def search_movie_async(title_with_year: str):
         hits = res.get("results", [])
         if hits:
             m = hits[0]
-            return {
+            result = {
                 "id": m["id"],
                 "title": m["title"],
                 "year": m.get("release_date", "").split("-")[0] if m.get("release_date") else "Unknown",
@@ -130,12 +173,15 @@ async def search_movie_async(title_with_year: str):
                 "poster_path": m.get("poster_path"),
                 "genre_ids": m.get("genre_ids", [])
             }
+            # Cache the result
+            _search_cache[cache_key] = (result, time.time())
+            return result
         return None
     except asyncio.TimeoutError:
-        print("TMDB search request timed out")
+        logger.warning("TMDB search request timed out")
         return None
     except Exception as e:
-        print(f"Error searching movie: {e}")
+        logger.error(f"Error searching movie: {e}")
         return None
 
 

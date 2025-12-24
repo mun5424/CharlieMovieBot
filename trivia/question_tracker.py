@@ -19,9 +19,9 @@ class QuestionTracker:
         # User-question tracking using Bloom filter concept
         # Maps guild_id -> user_id -> set of compact question hashes
         self.user_seen_questions: Dict[str, Dict[str, set]] = {}
-        
+
         # For very active users, we'll use a more memory-efficient approach
-        self.MAX_TRACKED_QUESTIONS = 1000  # Per user limit
+        self.MAX_TRACKED_QUESTIONS = 500  # Reduced from 1000 for Pi memory
     
     def create_question_hash(self, question_data: Dict) -> str:
         """Create a compact, unique hash for a question"""
@@ -95,7 +95,7 @@ class QuestionTracker:
     def cleanup_old_questions(self):
         """Clean up old question metadata (called periodically)"""
         current_time = time.time()
-        cutoff_time = current_time - (30 * 24 * 60 * 60)  # 30 days
+        cutoff_time = current_time - (7 * 24 * 60 * 60)  # 7 days (reduced from 30 for Pi)
         
         old_questions = [
             qhash for qhash, data in self.question_pool.items()

@@ -6,6 +6,7 @@ https://jikan.moe/ - Unofficial MyAnimeList API
 import aiohttp
 import asyncio
 import logging
+import time
 from typing import Optional, List, Dict
 
 logger = logging.getLogger(__name__)
@@ -21,6 +22,11 @@ MIN_REQUEST_INTERVAL = 0.35  # ~3 requests per second
 
 # Shared session
 _session: Optional[aiohttp.ClientSession] = None
+
+# Search cache with TTL (query -> (results, timestamp))
+_search_cache: Dict[str, tuple] = {}
+CACHE_TTL = 60  # Cache results for 60 seconds
+MAX_CACHE_SIZE = 100  # Maximum cached queries
 
 
 async def get_session() -> aiohttp.ClientSession:
@@ -51,7 +57,6 @@ async def _rate_limited_request(url: str, params: dict = None) -> Optional[dict]
 
     async with _request_lock:
         # Enforce rate limiting
-        import time
         now = time.time()
         elapsed = now - _last_request_time
         if elapsed < MIN_REQUEST_INTERVAL:
@@ -79,9 +84,24 @@ async def _rate_limited_request(url: str, params: dict = None) -> Optional[dict]
         return None
 
 
+def _clean_cache():
+    """Remove expired entries from cache."""
+    global _search_cache
+    now = time.time()
+    expired = [k for k, (_, ts) in _search_cache.items() if now - ts > CACHE_TTL]
+    for k in expired:
+        del _search_cache[k]
+
+    # If still too large, remove oldest entries
+    if len(_search_cache) > MAX_CACHE_SIZE:
+        sorted_keys = sorted(_search_cache.keys(), key=lambda k: _search_cache[k][1])
+        for k in sorted_keys[:len(_search_cache) - MAX_CACHE_SIZE]:
+            del _search_cache[k]
+
+
 async def search_anime(query: str, limit: int = 10) -> List[Dict]:
     """
-    Search for anime by title.
+    Search for anime by title with caching.
 
     Returns list of anime with:
     - mal_id: MyAnimeList ID
@@ -94,6 +114,18 @@ async def search_anime(query: str, limit: int = 10) -> List[Dict]:
     - synopsis: Description
     - year: Release year
     """
+    # Normalize query for cache key
+    cache_key = f"{query.lower().strip()}:{limit}"
+
+    # Check cache first
+    if cache_key in _search_cache:
+        results, timestamp = _search_cache[cache_key]
+        if time.time() - timestamp < CACHE_TTL:
+            return results
+
+    # Clean cache periodically
+    _clean_cache()
+
     url = f"{JIKAN_BASE_URL}/anime"
     params = {"q": query, "limit": limit, "sfw": "true"}
 
@@ -124,6 +156,9 @@ async def search_anime(query: str, limit: int = 10) -> List[Dict]:
             "season": item.get("season"),
             "type": item.get("type", "TV"),  # TV, Movie, OVA, etc.
         })
+
+    # Cache the results
+    _search_cache[cache_key] = (results, time.time())
 
     return results
 

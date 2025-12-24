@@ -115,6 +115,19 @@ async def _init_tables(db: aiosqlite.Connection):
             UNIQUE(user_id, mal_id)
         );
 
+        -- Anime reviews
+        CREATE TABLE IF NOT EXISTS anime_reviews (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            mal_id INTEGER NOT NULL,
+            anime_title TEXT,
+            user_id TEXT NOT NULL,
+            username TEXT,
+            score REAL,
+            review_text TEXT,
+            timestamp REAL,
+            UNIQUE(mal_id, user_id)
+        );
+
         -- Indexes for fast lookups
         CREATE INDEX IF NOT EXISTS idx_watchlist_user ON watchlist(user_id);
         CREATE INDEX IF NOT EXISTS idx_watchlist_watched ON watchlist(user_id, watched_at);
@@ -123,6 +136,7 @@ async def _init_tables(db: aiosqlite.Connection):
         CREATE INDEX IF NOT EXISTS idx_reviews_movie ON reviews(movie_id);
         CREATE INDEX IF NOT EXISTS idx_anime_watchlist_user ON anime_watchlist(user_id);
         CREATE INDEX IF NOT EXISTS idx_anime_watchlist_watched ON anime_watchlist(user_id, watched_at);
+        CREATE INDEX IF NOT EXISTS idx_anime_reviews_mal ON anime_reviews(mal_id);
     """)
 
     # Add watched_at column if it doesn't exist (for existing databases)
@@ -858,3 +872,100 @@ async def mark_anime_as_unwatched(user_id: str, mal_id: int) -> bool:
         )
         await db.commit()
         return cursor.rowcount > 0
+
+
+# ============== Anime Review Operations ==============
+
+async def get_anime_reviews(mal_id: int) -> List[Dict]:
+    """Get all reviews for an anime"""
+    db = await get_db()
+    async with _lock:
+        cursor = await db.execute(
+            "SELECT user_id, username, score, review_text, anime_title, timestamp "
+            "FROM anime_reviews WHERE mal_id = ? ORDER BY timestamp DESC",
+            (mal_id,)
+        )
+        rows = await cursor.fetchall()
+        return [
+            {
+                "user_id": row["user_id"],
+                "username": row["username"],
+                "score": row["score"],
+                "review_text": row["review_text"],
+                "anime_title": row["anime_title"],
+                "timestamp": row["timestamp"]
+            }
+            for row in rows
+        ]
+
+
+async def add_anime_review(mal_id: int, anime_title: str,
+                           user_id: str, username: str, score: float, review_text: str) -> str:
+    """Add or update an anime review. Returns 'added' or 'updated'."""
+    db = await get_db()
+    async with _lock:
+        import time
+        # Check if review exists
+        cursor = await db.execute(
+            "SELECT 1 FROM anime_reviews WHERE mal_id = ? AND user_id = ?",
+            (mal_id, user_id)
+        )
+        exists = await cursor.fetchone() is not None
+
+        if exists:
+            await db.execute(
+                "UPDATE anime_reviews SET username = ?, score = ?, review_text = ?, "
+                "anime_title = ?, timestamp = ? "
+                "WHERE mal_id = ? AND user_id = ?",
+                (username, score, review_text, anime_title, time.time(), mal_id, user_id)
+            )
+            await db.commit()
+            return "updated"
+        else:
+            await db.execute(
+                "INSERT INTO anime_reviews (mal_id, anime_title, user_id, username, score, review_text, timestamp) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (mal_id, anime_title, user_id, username, score, review_text, time.time())
+            )
+            await db.commit()
+            return "added"
+
+
+async def get_random_anime_review() -> Optional[Dict]:
+    """Get a random anime review"""
+    db = await get_db()
+    async with _lock:
+        cursor = await db.execute(
+            "SELECT mal_id, user_id, username, score, review_text, anime_title, timestamp "
+            "FROM anime_reviews ORDER BY RANDOM() LIMIT 1"
+        )
+        row = await cursor.fetchone()
+        if row:
+            return {
+                "mal_id": row["mal_id"],
+                "review": {
+                    "user_id": row["user_id"],
+                    "username": row["username"],
+                    "score": row["score"],
+                    "review_text": row["review_text"],
+                    "anime_title": row["anime_title"],
+                    "timestamp": row["timestamp"]
+                }
+            }
+        return None
+
+
+def format_anime_reviewers_text(reviews: List[Dict]) -> str:
+    """Format the reviewer names for display"""
+    if not reviews:
+        return ""
+
+    usernames = [r["username"] for r in reviews]
+
+    if len(usernames) == 1:
+        return f"**{usernames[0]}** has reviewed this anime"
+    elif len(usernames) == 2:
+        return f"**{usernames[0]}** and **{usernames[1]}** have reviewed this anime"
+    else:
+        all_but_last = ", ".join(f"**{name}**" for name in usernames[:-1])
+        return f"{all_but_last}, and **{usernames[-1]}** have reviewed this anime"

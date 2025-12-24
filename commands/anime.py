@@ -395,4 +395,177 @@ def setup(bot):
 
         await interaction.response.send_message(embed=embed)
 
+    # ==================== ANIME REVIEWS ====================
+
+    class AnimeReviewModal(discord.ui.Modal):
+        """Modal for entering an anime review"""
+
+        def __init__(self, mal_id: int, anime_title: str):
+            display_title = anime_title
+            if len(display_title) > 45:
+                display_title = display_title[:42] + "..."
+            super().__init__(title=display_title)
+            self.mal_id = mal_id
+            self.anime_title = anime_title
+
+        score = discord.ui.TextInput(
+            label="Score (1-10)",
+            placeholder="Enter a score from 1 to 10 (e.g., 8.5)",
+            min_length=1,
+            max_length=4,
+            required=True
+        )
+
+        review_text = discord.ui.TextInput(
+            label="Your Review",
+            style=discord.TextStyle.paragraph,
+            placeholder="Write your review here...",
+            min_length=10,
+            max_length=2000,
+            required=True
+        )
+
+        async def on_submit(self, interaction: discord.Interaction):
+            try:
+                score_value = float(self.score.value)
+                score_value = round(score_value, 1)
+                if score_value < 1 or score_value > 10:
+                    return await interaction.response.send_message(
+                        "❌ Score must be between 1 and 10.", ephemeral=True
+                    )
+            except ValueError:
+                return await interaction.response.send_message(
+                    "❌ Score must be a number between 1 and 10 (e.g., 8.5).", ephemeral=True
+                )
+
+            score_display = int(score_value) if score_value == int(score_value) else score_value
+
+            result = await sqlite_store.add_anime_review(
+                mal_id=self.mal_id,
+                anime_title=self.anime_title,
+                user_id=str(interaction.user.id),
+                username=interaction.user.display_name,
+                score=score_value,
+                review_text=self.review_text.value
+            )
+
+            embed = discord.Embed(
+                title=f"📝 {self.anime_title}",
+                description=self.review_text.value,
+                color=0x2ecc71
+            )
+            embed.set_author(name=f"{interaction.user.display_name} - ⭐ {score_display}/10")
+
+            if result == "updated":
+                await interaction.response.send_message(
+                    content=f"✅ **{interaction.user.display_name}** updated their review for **{self.anime_title}**",
+                    embed=embed
+                )
+            else:
+                await interaction.response.send_message(
+                    content=f"✅ **{interaction.user.display_name}** submitted a review for **{self.anime_title}**",
+                    embed=embed
+                )
+
+    class AnimeReviewView(discord.ui.View):
+        """View with buttons for viewing and writing anime reviews"""
+
+        def __init__(self, mal_id: int, anime_title: str):
+            super().__init__(timeout=ANIME_VIEW_TIMEOUT)
+            self.mal_id = mal_id
+            self.anime_title = anime_title
+            self.message = None
+
+        async def on_timeout(self):
+            if self.message:
+                try:
+                    await self.message.edit(view=None)
+                except Exception:
+                    pass
+
+        @discord.ui.button(label="📖 View Reviews", style=discord.ButtonStyle.primary)
+        async def view_reviews_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+            reviews = await sqlite_store.get_anime_reviews(self.mal_id)
+
+            if not reviews:
+                return await interaction.response.send_message(
+                    f"📭 No reviews yet for **{self.anime_title}**"
+                )
+
+            embeds = []
+            for review in reviews[:5]:  # Show up to 5 reviews
+                score = review['score']
+                score_text = int(score) if score == int(score) else score
+                embed = discord.Embed(
+                    title=f"📝 {self.anime_title}",
+                    description=review['review_text'],
+                    color=0x9b59b6
+                )
+                embed.set_author(name=f"{review['username']} - ⭐ {score_text}/10")
+                embeds.append(embed)
+
+            await interaction.response.send_message(embeds=embeds)
+
+        @discord.ui.button(label="✍️ Write Review", style=discord.ButtonStyle.success)
+        async def write_review_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+            modal = AnimeReviewModal(self.mal_id, self.anime_title)
+            await interaction.response.send_modal(modal)
+
+    @bot.tree.command(name="anime_review", description="Write a review for an anime")
+    @app_commands.describe(title="Search for an anime to review")
+    @app_commands.autocomplete(title=anime_search_autocomplete)
+    async def anime_review_cmd(interaction: discord.Interaction, title: str):
+        await interaction.response.defer(ephemeral=True)
+
+        anime = await search_anime_async(title)
+        if not anime:
+            return await interaction.followup.send("❌ Anime not found.", ephemeral=True)
+
+        reviews = await sqlite_store.get_anime_reviews(anime["mal_id"])
+        user_review = next((r for r in reviews if r["user_id"] == str(interaction.user.id)), None)
+
+        if user_review:
+            embed = discord.Embed(
+                title=f"📝 Your existing review for {anime['title']}",
+                description=f"**Score:** {user_review['score']}/10\n\n{user_review['review_text']}",
+                color=0xf39c12
+            )
+            embed.set_footer(text="Click 'Write Review' below to update your review")
+        else:
+            embed = discord.Embed(
+                title=f"📝 Review {anime['title']}",
+                description="Click the button below to write your review!",
+                color=0xe91e63
+            )
+
+        view = AnimeReviewView(anime["mal_id"], anime["title"])
+        message = await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+        view.message = message
+
+    @bot.tree.command(name="anime_review_random", description="Get a random anime review")
+    async def anime_review_random_cmd(interaction: discord.Interaction):
+        await interaction.response.defer()
+
+        result = await sqlite_store.get_random_anime_review()
+
+        if not result:
+            return await interaction.followup.send(
+                "📭 No anime reviews have been written yet. Be the first with `/anime_review`!"
+            )
+
+        review = result["review"]
+        anime_title = review.get("anime_title", "Unknown Anime")
+
+        score = review["score"]
+        score_text = int(score) if score == int(score) else score
+
+        embed = discord.Embed(
+            title=f"🎲 {anime_title}",
+            description=review["review_text"],
+            color=0xe91e63
+        )
+        embed.set_author(name=f"{review['username']} - ⭐ {score_text}/10")
+
+        await interaction.followup.send(embed=embed)
+
     logger.info("✅ Anime commands loaded")

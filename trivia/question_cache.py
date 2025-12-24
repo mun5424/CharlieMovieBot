@@ -11,8 +11,8 @@ logger = logging.getLogger(__name__)
 
 class QuestionCache:
     """Smart question cache that fetches in bulk and serves instantly"""
-    
-    def __init__(self, max_total_questions=150):
+
+    def __init__(self, max_total_questions=75):  # Reduced from 150 for Pi memory
         self.max_total_questions = max_total_questions
         self.last_request_time = 0
         self.min_interval = 5.1  # 5.1 seconds to be safe
