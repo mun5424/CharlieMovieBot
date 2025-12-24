@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 # Shared timeout configuration
 # Autocomplete has 3s Discord limit, so use shorter timeouts
 TMDB_TIMEOUT = aiohttp.ClientTimeout(total=8, connect=3)
-TMDB_AUTOCOMPLETE_TIMEOUT = aiohttp.ClientTimeout(total=2.5, connect=1.5)  # Must respond within 3s
+TMDB_AUTOCOMPLETE_TIMEOUT = aiohttp.ClientTimeout(total=2.8, connect=1.5)  # Must respond within 3s
 
 # Shared session for connection reuse (avoids cold-start latency)
 _session: aiohttp.ClientSession = None

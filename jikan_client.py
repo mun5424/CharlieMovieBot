@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 # Jikan API configuration
 JIKAN_BASE_URL = "https://api.jikan.moe/v4"
 JIKAN_TIMEOUT = aiohttp.ClientTimeout(total=10, connect=3)
-JIKAN_AUTOCOMPLETE_TIMEOUT = aiohttp.ClientTimeout(total=2.5, connect=1.5)  # Discord has 3s limit
+JIKAN_AUTOCOMPLETE_TIMEOUT = aiohttp.ClientTimeout(total=2.8, connect=1.5)  # Discord has 3s limit
 
 # Rate limiting: 3 requests per second, 60 per minute
 _last_request_time = 0

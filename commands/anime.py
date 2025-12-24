@@ -371,13 +371,18 @@ def setup(bot):
         # Create detailed embed
         embed = discord.Embed(
             title=anime["title"],
-            description=anime.get("synopsis", "No synopsis available.")[:500] + "..." if len(anime.get("synopsis", "")) > 500 else anime.get("synopsis", "No synopsis available."),
+            description=anime.get("synopsis", "No synopsis available."),
             color=0xe91e63,
             url=f"https://myanimelist.net/anime/{anime['mal_id']}"
         )
 
         if anime.get("title_japanese") and anime["title_japanese"] != anime["title"]:
-            embed.add_field(name="Japanese Title", value=anime["title_japanese"], inline=False)
+            embed.add_field(name="Japanese Title", value=anime["title_japanese"], inline=True)
+        if anime.get("year"):
+            embed.add_field(name="Year", value=anime["year"], inline=True)
+
+        # Force new row for next fields
+        embed.add_field(name="\u200b", value="\u200b", inline=False)
 
         if anime.get("episodes"):
             embed.add_field(name="Episodes", value=anime["episodes"], inline=True)
@@ -385,14 +390,9 @@ def setup(bot):
             embed.add_field(name="MAL Score", value=f"⭐ {anime['score']}", inline=True)
         if anime.get("status"):
             embed.add_field(name="Status", value=anime["status"], inline=True)
-        if anime.get("year"):
-            embed.add_field(name="Year", value=anime["year"], inline=True)
-        if anime.get("type"):
-            embed.add_field(name="Type", value=anime["type"], inline=True)
 
         if anime.get("image_url"):
-            embed.set_thumbnail(url=anime["image_url"])
-
+            embed.set_image(url=anime["image_url"])
 
         await interaction.followup.send(embed=embed)
 
