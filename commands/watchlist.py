@@ -43,17 +43,20 @@ async def get_random_review() -> Optional[Dict]:
     return await sqlite_store.get_random_review()
 
 
-def format_watchlist_entry(movie: Dict) -> str:
-    """Format a single watchlist entry with watched status and date."""
+def format_watchlist_entry(movie: Dict, show_date: bool = True) -> str:
+    """Format a single watchlist entry with watched status and optional date."""
     title = movie.get('title', 'Unknown')
     year = movie.get('year', '')
     watched_at = movie.get('watched_at')
 
     if watched_at:
-        # Format the watched date
-        watched_date = datetime.fromtimestamp(watched_at)
-        date_str = watched_date.strftime("%b %d")
-        return f"✅ {title} ({year}) - watched {date_str}"
+        if show_date:
+            # Format the watched date
+            watched_date = datetime.fromtimestamp(watched_at)
+            date_str = watched_date.strftime("%b %-d %y")
+            return f"✅ {title} ({year}) - watched {date_str}"
+        else:
+            return f"✅ {title} ({year})"
     else:
         return f"❌ {title} ({year})"
 
@@ -201,7 +204,9 @@ def setup(bot):
                 end = start + WATCHLIST_PAGE_SIZE
                 page_movies = self.movies[start:end]
 
-                movie_lines = [format_watchlist_entry(m) for m in page_movies]
+                # Only show dates in "Watched" filter
+                show_date = self.filter_mode == "watched"
+                movie_lines = [format_watchlist_entry(m, show_date=show_date) for m in page_movies]
                 embed.add_field(name="\u200b", value="\n".join(movie_lines), inline=False)
 
                 # Page indicator - only show if more than 1 page
@@ -220,14 +225,22 @@ def setup(bot):
             self.unwatched_btn.style = discord.ButtonStyle.primary if self.filter_mode == "unwatched" else discord.ButtonStyle.secondary
             self.watched_btn.style = discord.ButtonStyle.primary if self.filter_mode == "watched" else discord.ButtonStyle.secondary
 
-            # Pagination buttons
-            self.prev_btn.disabled = self.current_page == 0
-            self.next_btn.disabled = self.current_page >= total_pages - 1
-
-            # Hide pagination if only one page
+            # Hide/show pagination buttons based on page count
             if total_pages <= 1:
-                self.prev_btn.disabled = True
-                self.next_btn.disabled = True
+                # Remove pagination buttons if only one page
+                if self.prev_btn in self.children:
+                    self.remove_item(self.prev_btn)
+                if self.next_btn in self.children:
+                    self.remove_item(self.next_btn)
+            else:
+                # Add pagination buttons back if needed
+                if self.prev_btn not in self.children:
+                    self.add_item(self.prev_btn)
+                if self.next_btn not in self.children:
+                    self.add_item(self.next_btn)
+                # Update disabled state
+                self.prev_btn.disabled = self.current_page == 0
+                self.next_btn.disabled = self.current_page >= total_pages - 1
 
         async def refresh(self, interaction: discord.Interaction):
             """Refresh the view with new data"""

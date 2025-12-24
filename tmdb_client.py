@@ -7,7 +7,9 @@ from config import TMDB_API_KEY
 logger = logging.getLogger(__name__)
 
 # Shared timeout configuration
-TMDB_TIMEOUT = aiohttp.ClientTimeout(total=10, connect=5)
+# Autocomplete has 3s Discord limit, so use shorter timeouts
+TMDB_TIMEOUT = aiohttp.ClientTimeout(total=8, connect=3)
+TMDB_AUTOCOMPLETE_TIMEOUT = aiohttp.ClientTimeout(total=2.5, connect=1.5)  # Must respond within 3s
 
 # Shared session for connection reuse (avoids cold-start latency)
 _session: aiohttp.ClientSession = None
@@ -95,7 +97,8 @@ async def search_movies_autocomplete(query: str, limit: int = 25):
 
     try:
         session = await get_session()
-        async with session.get(url, params=params) as resp:
+        # Use shorter timeout for autocomplete (Discord has 3s limit)
+        async with session.get(url, params=params, timeout=TMDB_AUTOCOMPLETE_TIMEOUT) as resp:
             if resp.status != 200:
                 return []
             res = await resp.json()
@@ -104,11 +107,20 @@ async def search_movies_autocomplete(query: str, limit: int = 25):
 
         movies = []
         for movie in hits[:limit]:  # Limit results for autocomplete
-            title = movie.get("title", "Unknown")
+            title = movie.get("title", "")
+            if not title:
+                continue  # Skip movies with no title
+
             year = movie.get("release_date", "").split("-")[0] if movie.get("release_date") else ""
 
             # Format as "Title (Year)" or just "Title" if no year
             display_name = f"{title} ({year})" if year else title
+
+            # Discord requires name to be 1-100 characters
+            if len(display_name) > 100:
+                display_name = display_name[:97] + "..."
+            if len(display_name) < 1:
+                continue  # Skip empty names
 
             # Use the full display_name as value so each choice is unique
             movies.append({
@@ -121,7 +133,7 @@ async def search_movies_autocomplete(query: str, limit: int = 25):
 
         return movies
     except asyncio.TimeoutError:
-        logger.warning("TMDB autocomplete request timed out")
+        logger.debug("TMDB autocomplete timed out (expected under load)")
         return []
     except Exception as e:
         logger.error(f"Error in autocomplete search: {e}")

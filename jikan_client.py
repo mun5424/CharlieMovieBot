@@ -13,7 +13,8 @@ logger = logging.getLogger(__name__)
 
 # Jikan API configuration
 JIKAN_BASE_URL = "https://api.jikan.moe/v4"
-JIKAN_TIMEOUT = aiohttp.ClientTimeout(total=15, connect=5)
+JIKAN_TIMEOUT = aiohttp.ClientTimeout(total=10, connect=3)
+JIKAN_AUTOCOMPLETE_TIMEOUT = aiohttp.ClientTimeout(total=2.5, connect=1.5)  # Discord has 3s limit
 
 # Rate limiting: 3 requests per second, 60 per minute
 _last_request_time = 0
@@ -170,6 +171,66 @@ async def search_anime_async(query: str) -> Optional[Dict]:
     """
     results = await search_anime(query, limit=1)
     return results[0] if results else None
+
+
+async def search_anime_autocomplete(query: str, limit: int = 10) -> List[Dict]:
+    """
+    Fast anime search for autocomplete (shorter timeout, cache-first).
+    Returns quickly to meet Discord's 3s autocomplete deadline.
+    """
+    if len(query) < 2:
+        return []
+
+    # Normalize query for cache key
+    cache_key = f"{query.lower().strip()}:{limit}"
+
+    # Check cache first - return immediately if cached
+    if cache_key in _search_cache:
+        results, timestamp = _search_cache[cache_key]
+        if time.time() - timestamp < CACHE_TTL:
+            return results
+
+    # Try to fetch with short timeout
+    url = f"{JIKAN_BASE_URL}/anime"
+    params = {"q": query, "limit": limit, "sfw": "true"}
+
+    try:
+        session = await get_session()
+        async with session.get(url, params=params, timeout=JIKAN_AUTOCOMPLETE_TIMEOUT) as resp:
+            if resp.status != 200:
+                return []
+            data = await resp.json()
+
+        if not data or "data" not in data:
+            return []
+
+        results = []
+        for item in data["data"]:
+            title = item.get("title_english") or item.get("title", "Unknown")
+            if not title:
+                continue
+
+            results.append({
+                "mal_id": item.get("mal_id"),
+                "title": title,
+                "title_japanese": item.get("title", ""),
+                "episodes": item.get("episodes"),
+                "status": item.get("status", "Unknown"),
+                "score": item.get("score"),
+                "year": item.get("year"),
+                "type": item.get("type", "TV"),
+            })
+
+        # Cache the results
+        _search_cache[cache_key] = (results, time.time())
+        return results
+
+    except asyncio.TimeoutError:
+        logger.debug("Jikan autocomplete timed out (expected under load)")
+        return []
+    except Exception as e:
+        logger.debug(f"Jikan autocomplete error: {e}")
+        return []
 
 
 async def get_anime_by_id(mal_id: int) -> Optional[Dict]:

@@ -7,7 +7,7 @@ from discord.ext import commands
 from discord import app_commands
 
 import sqlite_store
-from jikan_client import search_anime, search_anime_async
+from jikan_client import search_anime, search_anime_async, search_anime_autocomplete
 
 logger = logging.getLogger(__name__)
 
@@ -17,8 +17,8 @@ ANIME_PAGE_SIZE = 15
 AUTOCOMPLETE_LIMIT = 10
 
 
-def format_anime_entry(anime: Dict) -> str:
-    """Format a single anime entry with watched status and date."""
+def format_anime_entry(anime: Dict, show_date: bool = True) -> str:
+    """Format a single anime entry with watched status and optional date."""
     title = anime.get('title', 'Unknown')
     episodes = anime.get('episodes')
     watched_at = anime.get('watched_at')
@@ -27,9 +27,12 @@ def format_anime_entry(anime: Dict) -> str:
     ep_str = f" ({episodes} eps)" if episodes else ""
 
     if watched_at:
-        watched_date = datetime.fromtimestamp(watched_at)
-        date_str = watched_date.strftime("%b %d")
-        return f"✅ {title}{ep_str} - watched {date_str}"
+        if show_date:
+            watched_date = datetime.fromtimestamp(watched_at)
+            date_str = watched_date.strftime("%b %-d %y")
+            return f"✅ {title}{ep_str} - watched {date_str}"
+        else:
+            return f"✅ {title}{ep_str}"
     else:
         return f"❌ {title}{ep_str}"
 
@@ -37,17 +40,21 @@ def format_anime_entry(anime: Dict) -> str:
 def setup(bot):
     """Setup anime commands"""
 
-    # Autocomplete for anime search (uses Jikan API)
+    # Autocomplete for anime search (uses Jikan API with fast timeout)
     async def anime_search_autocomplete(interaction: discord.Interaction, current: str):
         """Autocomplete for anime search using Jikan API"""
         if len(current) < 2:
             return []
 
         try:
-            results = await search_anime(current, limit=AUTOCOMPLETE_LIMIT)
+            # Use fast autocomplete function (2.5s timeout, cache-first)
+            results = await search_anime_autocomplete(current, limit=AUTOCOMPLETE_LIMIT)
             choices = []
             for anime in results:
-                title = anime.get("title", "Unknown")
+                title = anime.get("title", "")
+                if not title:
+                    continue
+
                 year = anime.get("year", "")
                 eps = anime.get("episodes", "")
 
@@ -58,15 +65,17 @@ def setup(bot):
                 if eps:
                     display += f" - {eps} eps"
 
-                # Truncate if too long
+                # Discord requires name to be 1-100 characters
                 if len(display) > 100:
                     display = display[:97] + "..."
+                if len(display) < 1:
+                    continue
 
                 choices.append(app_commands.Choice(name=display, value=title))
 
             return choices[:AUTOCOMPLETE_LIMIT]
         except Exception as e:
-            logger.error(f"Error in anime autocomplete: {e}")
+            logger.debug(f"Anime autocomplete error: {e}")
             return []
 
     # Autocomplete for user's anime watchlist
@@ -139,7 +148,9 @@ def setup(bot):
                 end = start + ANIME_PAGE_SIZE
                 page_anime = self.anime_list[start:end]
 
-                anime_lines = [format_anime_entry(a) for a in page_anime]
+                # Only show dates in "watched" filter mode
+                show_date = self.filter_mode == "watched"
+                anime_lines = [format_anime_entry(a, show_date=show_date) for a in page_anime]
                 embed.add_field(name="\u200b", value="\n".join(anime_lines), inline=False)
 
                 # Page indicator - only show if more than 1 page
@@ -158,13 +169,22 @@ def setup(bot):
             self.unwatched_btn.style = discord.ButtonStyle.primary if self.filter_mode == "unwatched" else discord.ButtonStyle.secondary
             self.watched_btn.style = discord.ButtonStyle.primary if self.filter_mode == "watched" else discord.ButtonStyle.secondary
 
-            # Pagination buttons
-            self.prev_btn.disabled = self.current_page == 0
-            self.next_btn.disabled = self.current_page >= total_pages - 1
-
+            # Hide/show pagination buttons based on page count
             if total_pages <= 1:
-                self.prev_btn.disabled = True
-                self.next_btn.disabled = True
+                # Remove pagination buttons if only one page
+                if self.prev_btn in self.children:
+                    self.remove_item(self.prev_btn)
+                if self.next_btn in self.children:
+                    self.remove_item(self.next_btn)
+            else:
+                # Add pagination buttons back if needed
+                if self.prev_btn not in self.children:
+                    self.add_item(self.prev_btn)
+                if self.next_btn not in self.children:
+                    self.add_item(self.next_btn)
+                # Update disabled state
+                self.prev_btn.disabled = self.current_page == 0
+                self.next_btn.disabled = self.current_page >= total_pages - 1
 
         async def refresh(self, interaction: discord.Interaction):
             """Refresh the view with new data"""
