@@ -193,14 +193,11 @@ def setup(bot):
             await interaction.response.edit_message(embed=embed, view=self)
 
         async def on_timeout(self):
-            """Disable buttons on timeout"""
-            for item in self.children:
-                item.disabled = True
+            """Remove buttons on timeout"""
+            self.clear_items()
             if self.message:
                 try:
-                    embed = self.create_embed()
-                    embed.set_footer(text="⏰ View expired. Use /anime_watchlist to refresh.")
-                    await self.message.edit(embed=embed, view=self)
+                    await self.message.edit(view=self)
                 except Exception:
                     pass
 

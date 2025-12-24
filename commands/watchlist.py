@@ -249,14 +249,11 @@ def setup(bot):
             await interaction.response.edit_message(embed=embed, view=self)
 
         async def on_timeout(self):
-            """Disable buttons on timeout"""
-            for item in self.children:
-                item.disabled = True
+            """Remove buttons on timeout"""
+            self.clear_items()
             if self.message:
                 try:
-                    embed = self.create_embed()
-                    embed.set_footer(text="⏰ View expired. Use /watchlist to refresh.")
-                    await self.message.edit(embed=embed, view=self)
+                    await self.message.edit(view=self)
                 except Exception:
                     pass
 
@@ -460,16 +457,11 @@ def setup(bot):
             self.message = None  # Store reference to the message for timeout handling
 
         async def on_timeout(self):
-            """Called when the view times out - disable all buttons"""
-            for item in self.children:
-                item.disabled = True
-
+            """Remove buttons on timeout"""
+            self.clear_items()
             if self.message:
                 try:
-                    embed = self.message.embeds[0] if self.message.embeds else None
-                    if embed:
-                        embed.set_footer(text="⏰ This suggestion panel has expired. Use /pending to view suggestions again.")
-                    await self.message.edit(embed=embed, view=self)
+                    await self.message.edit(view=self)
                 except discord.NotFound:
                     pass  # Message was deleted
                 except Exception:
