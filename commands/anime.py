@@ -311,9 +311,25 @@ def setup(bot):
         if result == "already_watched":
             return await interaction.followup.send(f"⚠️ **{anime['title']}** is already marked as watched.")
         elif result == "marked":
-            await interaction.followup.send(f"✅ {interaction.user.display_name} marked **{anime['title']}** as watched!")
+            view = AnimeWatchedReviewView(anime["mal_id"], anime["title"])
+            embed = discord.Embed(
+                title="✅ Marked as Watched",
+                description=f"**{anime['title']}**",
+                color=0x2ecc71
+            )
+            if anime.get("image_url"):
+                embed.set_thumbnail(url=anime["image_url"])
+            await interaction.followup.send(embed=embed, view=view)
         elif result == "added_and_marked":
-            await interaction.followup.send(f"✅ {interaction.user.display_name} added **{anime['title']}** to watchlist and marked it as watched!")
+            view = AnimeWatchedReviewView(anime["mal_id"], anime["title"])
+            embed = discord.Embed(
+                title="✅ Added & Marked as Watched",
+                description=f"**{anime['title']}**",
+                color=0x2ecc71
+            )
+            if anime.get("image_url"):
+                embed.set_thumbnail(url=anime["image_url"])
+            await interaction.followup.send(embed=embed, view=view)
         else:
             await interaction.followup.send("❌ Something went wrong. Please try again.")
 
@@ -381,9 +397,6 @@ def setup(bot):
         if anime.get("year"):
             embed.add_field(name="Year", value=anime["year"], inline=True)
 
-        # Force new row for next fields
-        embed.add_field(name="\u200b", value="\u200b", inline=False)
-
         if anime.get("episodes"):
             embed.add_field(name="Episodes", value=anime["episodes"], inline=True)
         if anime.get("score"):
@@ -416,6 +429,23 @@ def setup(bot):
         await interaction.response.send_message(embed=embed)
 
     # ==================== ANIME REVIEWS ====================
+
+    class AnimeWatchedReviewView(discord.ui.View):
+        """View with a button to leave a review after marking an anime as watched"""
+
+        def __init__(self, mal_id: int, anime_title: str):
+            super().__init__(timeout=120)  # 2 minute timeout
+            self.mal_id = mal_id
+            self.anime_title = anime_title
+
+        @discord.ui.button(label="Leave a Review", style=discord.ButtonStyle.primary)
+        async def review_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+            modal = AnimeReviewModal(self.mal_id, self.anime_title)
+            await interaction.response.send_modal(modal)
+
+        async def on_timeout(self):
+            for item in self.children:
+                item.disabled = True
 
     class AnimeReviewModal(discord.ui.Modal):
         """Modal for entering an anime review"""
