@@ -21,7 +21,7 @@ class QuestionTracker:
         self.user_seen_questions: Dict[str, Dict[str, set]] = {}
 
         # For very active users, we'll use a more memory-efficient approach
-        self.MAX_TRACKED_QUESTIONS = 500  # Reduced from 1000 for Pi memory
+        self.MAX_TRACKED_QUESTIONS = 200  # Reduced from 500 for Pi memory
     
     def create_question_hash(self, question_data: Dict) -> str:
         """Create a compact, unique hash for a question"""

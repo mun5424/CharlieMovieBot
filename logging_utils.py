@@ -134,7 +134,7 @@ class EnhancedLogger:
     def _setup_root_logger(self, handlers: list):
         """Setup root logger with handlers"""
         root_logger = logging.getLogger()
-        root_logger.setLevel(logging.DEBUG)
+        root_logger.setLevel(logging.INFO)  # Reduced from DEBUG for Pi memory
         
         # Clear existing handlers
         root_logger.handlers.clear()

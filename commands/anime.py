@@ -288,11 +288,9 @@ def setup(bot):
 
         embed = view.create_embed()
 
-        if is_self:
-            message = await interaction.followup.send(embed=embed, view=view)
-            view.message = message
-        else:
-            await interaction.followup.send(embed=embed)
+        # Send with view (filter/pagination buttons work for everyone)
+        message = await interaction.followup.send(embed=embed, view=view)
+        view.message = message
 
     @bot.tree.command(name="anime_watched", description="Mark an anime as watched")
     @app_commands.describe(title="Search for an anime to mark as watched")
@@ -371,10 +369,10 @@ def setup(bot):
         else:
             await interaction.followup.send("❌ Anime not found in your watchlist.")
 
-    @bot.tree.command(name="anime_search", description="Search for an anime")
+    @bot.tree.command(name="anime", description="Search for an anime")
     @app_commands.describe(title="Search for an anime")
     @app_commands.autocomplete(title=anime_search_autocomplete)
-    async def anime_search_cmd(interaction: discord.Interaction, title: str):
+    async def anime_cmd(interaction: discord.Interaction, title: str):
         await interaction.response.defer()
 
         anime = await search_anime_async(title)

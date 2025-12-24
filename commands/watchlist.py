@@ -647,13 +647,9 @@ def setup(bot):
 
         embed = view.create_embed()
 
-        # Send with buttons only if viewing own watchlist
-        if is_self:
-            message = await interaction.followup.send(embed=embed, view=view)
-            view.message = message
-        else:
-            # Other users see a static view without buttons
-            await interaction.followup.send(embed=embed)
+        # Send with view (filter/pagination buttons work for everyone)
+        message = await interaction.followup.send(embed=embed, view=view)
+        view.message = message
 
         # Show pending suggestions if user is viewing their own watchlist
         pending_suggestions = await sqlite_store.get_user_pending(target_uid) if is_self else []

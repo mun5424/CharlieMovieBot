@@ -16,8 +16,8 @@ _session: aiohttp.ClientSession = None
 
 # Search cache with TTL (query -> (results, timestamp))
 _search_cache: dict = {}
-CACHE_TTL = 60  # Cache results for 60 seconds
-MAX_CACHE_SIZE = 100  # Maximum cached queries
+CACHE_TTL = 30  # Cache results for 30 seconds (reduced for Pi memory)
+MAX_CACHE_SIZE = 50  # Maximum cached queries (reduced for Pi memory)
 
 
 def _clean_cache():
@@ -41,8 +41,8 @@ async def get_session() -> aiohttp.ClientSession:
     if _session is None or _session.closed:
         # Use a connector with connection pooling
         connector = aiohttp.TCPConnector(
-            limit=10,  # Max connections
-            keepalive_timeout=60,  # Keep connections alive
+            limit=5,  # Max connections
+            keepalive_timeout=30,  # Keep connections alive
             enable_cleanup_closed=True
         )
         _session = aiohttp.ClientSession(
