@@ -2,7 +2,7 @@ import discord
 import logging
 from discord.ext import commands
 from discord import app_commands
-from tmdb_client import search_movie_async, get_movie_details_async
+from clients.tmdb import search_movie_async, get_movie_details_async
 from commands.autocomplete import movie_search_autocomplete
 from commands.watchlist import get_movie_reviews, format_reviewers_text, add_movie_review
 

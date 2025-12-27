@@ -9,7 +9,7 @@ watchlist entry updated with the watched_at timestamp.
 Run this once after updating to the unified watchlist system.
 
 Usage:
-    python migrate_watched_to_watchlist.py
+    python scripts/migrate_watched_to_watchlist.py
 """
 
 import asyncio
@@ -17,11 +17,11 @@ import os
 import sys
 
 # Add parent directory to path for imports
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import aiosqlite
 
-DB_FILE = os.path.join(os.path.dirname(__file__), "movie_data.db")
+DB_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "movie_data.db")
 
 
 async def migrate():

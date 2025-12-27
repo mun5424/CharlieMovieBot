@@ -118,17 +118,17 @@ class BotManager:
         try:
             # Initialize SQLite database
             try:
-                import sqlite_store
-                await sqlite_store.get_db()
+                from db import get_db, close_db
+                await get_db()
                 # Register cleanup on shutdown
-                self.bot.add_shutdown_handler(sqlite_store.close_db)
+                self.bot.add_shutdown_handler(close_db)
                 self.logger.info("✅ SQLite database initialized")
             except Exception as e:
                 self.logger.error(f"❌ Failed to initialize SQLite database: {e}")
 
             # Pre-warm TMDB session to avoid first-request latency
             try:
-                from tmdb_client import warmup_session, close_session
+                from clients.tmdb import warmup_session, close_session
                 await warmup_session()
                 # Register cleanup on shutdown
                 self.bot.add_shutdown_handler(close_session)
@@ -138,7 +138,7 @@ class BotManager:
 
             # Pre-warm Jikan session for anime commands
             try:
-                from jikan_client import warmup_session as jikan_warmup, close_session as jikan_close
+                from clients.jikan import warmup_session as jikan_warmup, close_session as jikan_close
                 await jikan_warmup()
                 # Register cleanup on shutdown
                 self.bot.add_shutdown_handler(jikan_close)
@@ -148,8 +148,8 @@ class BotManager:
 
             # Load tournament reminder if available
             try:
-                import tourney_reminder
-                tourney_reminder.setup_reminder(self.bot)
+                from services.tourney_reminder import setup_reminder
+                setup_reminder(self.bot)
                 self.logger.info("✅ Tournament reminder loaded")
             except ImportError:
                 self.logger.info("ℹ️ Tournament reminder not available")

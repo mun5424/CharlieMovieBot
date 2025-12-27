@@ -6,7 +6,7 @@ Migrates existing movie_data.json to SQLite database.
 Run this once before switching to SQLite-based storage.
 
 Usage:
-    python migrate_to_sqlite.py
+    python scripts/migrate_to_sqlite.py
 """
 
 import asyncio
@@ -17,10 +17,11 @@ import sys
 from datetime import datetime
 
 # Add parent directory to path for imports
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import DATA_FILE
-import sqlite_store
+from db.connection import get_db, close_db, DB_FILE
+from db import movies as sqlite_store
 
 
 async def migrate():
@@ -34,7 +35,7 @@ async def migrate():
     if not os.path.exists(DATA_FILE):
         print(f"No JSON file found at: {DATA_FILE}")
         print("Nothing to migrate. Creating empty database...")
-        await sqlite_store.get_db()
+        await get_db()
         print("Done!")
         return
 
@@ -44,8 +45,8 @@ async def migrate():
         data = json.load(f)
 
     # Initialize SQLite database
-    print(f"Initializing SQLite database: {sqlite_store.DB_FILE}")
-    db = await sqlite_store.get_db()
+    print(f"Initializing SQLite database: {DB_FILE}")
+    db = await get_db()
 
     # Count items to migrate
     user_count = 0
@@ -147,7 +148,7 @@ async def migrate():
     shutil.copy2(DATA_FILE, backup_file)
 
     # Close database
-    await sqlite_store.close_db()
+    await close_db()
 
     # Summary
     print()
@@ -162,7 +163,7 @@ async def migrate():
     print(f"  - Pending suggestions: {pending_count}")
     print(f"  - Reviews: {review_count}")
     print()
-    print(f"SQLite database: {sqlite_store.DB_FILE}")
+    print(f"SQLite database: {DB_FILE}")
     print(f"JSON backup: {backup_file}")
     print()
     print("You can now restart the bot to use SQLite storage.")

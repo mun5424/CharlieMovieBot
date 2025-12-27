@@ -1,7 +1,7 @@
 # commands/autocomplete.py - Shared autocomplete functions
 import logging
 from discord import app_commands
-from tmdb_client import search_movies_autocomplete
+from clients.tmdb import search_movies_autocomplete
 
 logger = logging.getLogger(__name__)
 

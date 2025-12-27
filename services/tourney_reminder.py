@@ -5,7 +5,7 @@ import aiohttp
 import logging
 import discord
 from discord.ext import tasks
-from custom_reminder import CUSTOM_REMINDERS
+from services.custom_reminder import CUSTOM_REMINDERS
 import config
 
 # Use zoneinfo for DST-aware scheduling (Python 3.9+)
@@ -73,13 +73,13 @@ SCHEDULED_TIME_11AM = get_scheduled_time(11, 0)
 # Monday=0, Tuesday=1, Wednesday=2, Thursday=3, Friday=4, Saturday=5, Sunday=6
 TOURNAMENT_SCHEDULE = {
     0: "Motivation Academy",     # Monday
-    1: "Can Opener Series",      # Tuesday  
+    1: "Can Opener Series",      # Tuesday
     2: "TNS Street Fighter 6",   # Wednesday
     # 3: "ONi Arena: Street Fighter" # Thursday
     # 3: "FlyQuest Fight Series",  # Thursday - disabling flyquest as ONi is a guarenteed weekly.
 }
 
-TOURNAMENT_DESCRIPTION = { 
+TOURNAMENT_DESCRIPTION = {
     0: """
 - Starts on **MONDAY at 5PM PACIFIC TIME**
 - All matches will be best 3 out of 5 games (FT3)
@@ -103,7 +103,7 @@ TOURNAMENT_DESCRIPTION = {
     3: """
 - Starts on **THURSDAY at 5PM PACIFIC TIME**
 - All matches will be best 3 out of 5 games (FT3)
-- In the event of a tied Match declared by a “Double K.O.” on the Game screen, the Match will not be scored and both Players will replay the tied Match with the same character selections and stage.
+- In the event of a tied Match declared by a "Double K.O." on the Game screen, the Match will not be scored and both Players will replay the tied Match with the same character selections and stage.
     """
 }
 
@@ -364,14 +364,14 @@ async def check_custom_reminders():
                 color=0x800080,
                 url=reminder["link"]
             )
-            
+
             embed.add_field(name="📅 **Date:** " , value=event_date.strftime("%A, %B %d, %Y"), inline=True)
             embed.add_field(name="🔗 **Sign Up Link:** ", value=reminder["link"], inline=False)
 
-            if days_until == 3: 
+            if days_until == 3:
                 embed.set_footer(text="**TODAY WILL BE THE LAST DAY TO SIGN UP!** ")
 
-            if days_until == 0: 
+            if days_until == 0:
                 embed.set_footer(text="**TOURNAMENT WILL START AT 7PM TODAY. LOCK IN 🔒** ")
 
             for channel_id in config.TOURNEY_CHANNEL_IDS:

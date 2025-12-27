@@ -6,8 +6,21 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 
-import sqlite_store
-from jikan_client import search_anime, search_anime_async, search_anime_autocomplete
+from db import (
+    get_anime_watchlist,
+    get_anime_watchlist_counts,
+    add_to_anime_watchlist,
+    remove_from_anime_watchlist,
+    is_in_anime_watchlist,
+    get_anime_watchlist_entry,
+    mark_anime_as_watched,
+    mark_anime_as_unwatched,
+    get_anime_reviews,
+    add_anime_review,
+    get_random_anime_review,
+    format_anime_reviewers_text,
+)
+from clients.jikan import search_anime, search_anime_async, search_anime_autocomplete
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +96,7 @@ def setup(bot):
         """Autocomplete for user's anime watchlist"""
         try:
             uid = str(interaction.user.id)
-            watchlist = await sqlite_store.get_anime_watchlist(uid)
+            watchlist = await get_anime_watchlist(uid)
 
             matching = []
             for anime in watchlist:
@@ -117,8 +130,8 @@ def setup(bot):
 
         async def load_data(self):
             """Load anime watchlist data from database"""
-            self.anime_list = await sqlite_store.get_anime_watchlist(self.user_id, self.filter_mode)
-            self.counts = await sqlite_store.get_anime_watchlist_counts(self.user_id)
+            self.anime_list = await get_anime_watchlist(self.user_id, self.filter_mode)
+            self.counts = await get_anime_watchlist_counts(self.user_id)
             self.update_buttons()
 
         def get_total_pages(self) -> int:
@@ -249,10 +262,10 @@ def setup(bot):
         if not anime:
             return await interaction.followup.send("❌ Anime not found.")
 
-        if await sqlite_store.is_in_anime_watchlist(uid, anime["mal_id"]):
+        if await is_in_anime_watchlist(uid, anime["mal_id"]):
             return await interaction.followup.send(f"⚠️ **{anime['title']}** is already in your anime watchlist.")
 
-        await sqlite_store.add_to_anime_watchlist(uid, anime)
+        await add_to_anime_watchlist(uid, anime)
 
         # Create embed with anime info
         embed = discord.Embed(
@@ -301,7 +314,7 @@ def setup(bot):
         if not anime:
             return await interaction.followup.send("❌ Anime not found.")
 
-        result = await sqlite_store.mark_anime_as_watched(uid, anime["mal_id"], anime)
+        result = await mark_anime_as_watched(uid, anime["mal_id"], anime)
 
         if result == "already_watched":
             return await interaction.followup.send(f"⚠️ **{anime['title']}** is already marked as watched.")
@@ -338,14 +351,14 @@ def setup(bot):
         if not anime:
             return await interaction.followup.send("❌ Anime not found.")
 
-        entry = await sqlite_store.get_anime_watchlist_entry(uid, anime["mal_id"])
+        entry = await get_anime_watchlist_entry(uid, anime["mal_id"])
         if not entry:
             return await interaction.followup.send("❌ Anime not found in your watchlist.")
 
         if not entry.get("watched_at"):
             return await interaction.followup.send("❌ Anime isn't marked as watched.")
 
-        await sqlite_store.mark_anime_as_unwatched(uid, anime["mal_id"])
+        await mark_anime_as_unwatched(uid, anime["mal_id"])
         await interaction.followup.send(f"↩️ {interaction.user.display_name} unmarked **{anime['title']}** as watched.")
 
     @bot.tree.command(name="anime_remove", description="Remove an anime from your watchlist")
@@ -360,7 +373,7 @@ def setup(bot):
         if not anime:
             return await interaction.followup.send("❌ Anime not found.")
 
-        removed = await sqlite_store.remove_from_anime_watchlist(uid, anime["mal_id"])
+        removed = await remove_from_anime_watchlist(uid, anime["mal_id"])
         if removed:
             await interaction.followup.send(f"🗑️ {interaction.user.display_name} removed **{anime['title']}** from their anime watchlist.")
         else:
@@ -409,7 +422,7 @@ def setup(bot):
     @bot.tree.command(name="anime_stats", description="View your anime watching statistics")
     async def anime_stats_cmd(interaction: discord.Interaction):
         uid = str(interaction.user.id)
-        counts = await sqlite_store.get_anime_watchlist_counts(uid)
+        counts = await get_anime_watchlist_counts(uid)
 
         embed = discord.Embed(
             title="🎌 Your Anime Stats",
@@ -473,7 +486,7 @@ def setup(bot):
             # Defer before doing database work to avoid interaction timeout
             await interaction.response.defer()
 
-            result = await sqlite_store.add_anime_review(
+            result = await add_anime_review(
                 mal_id=self.mal_id,
                 anime_title=self.anime_title,
                 user_id=str(interaction.user.id),
@@ -518,7 +531,7 @@ def setup(bot):
 
         @discord.ui.button(label="📖 View Reviews", style=discord.ButtonStyle.primary)
         async def view_reviews_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-            reviews = await sqlite_store.get_anime_reviews(self.mal_id)
+            reviews = await get_anime_reviews(self.mal_id)
 
             if not reviews:
                 return await interaction.response.send_message(
@@ -554,7 +567,7 @@ def setup(bot):
         if not anime:
             return await interaction.followup.send("❌ Anime not found.", ephemeral=True)
 
-        reviews = await sqlite_store.get_anime_reviews(anime["mal_id"])
+        reviews = await get_anime_reviews(anime["mal_id"])
         user_review = next((r for r in reviews if r["user_id"] == str(interaction.user.id)), None)
 
         if user_review:
@@ -579,7 +592,7 @@ def setup(bot):
     async def anime_review_random_cmd(interaction: discord.Interaction):
         await interaction.response.defer()
 
-        result = await sqlite_store.get_random_anime_review()
+        result = await get_random_anime_review()
 
         if not result:
             return await interaction.followup.send(
