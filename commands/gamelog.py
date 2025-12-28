@@ -18,9 +18,8 @@ from db import (
     get_game_reviews,
     add_game_review,
     get_random_game_review,
-    format_game_reviewers_text,
 )
-from clients.igdb import search_games, search_games_async, search_games_autocomplete, get_game_by_id
+from clients.igdb import search_games_async, search_games_autocomplete, get_game_by_id
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +43,7 @@ def format_game_entry(game: Dict, show_date: bool = True) -> str:
     if played_at:
         if show_date:
             played_date = datetime.fromtimestamp(played_at)
-            date_str = played_date.strftime("%b %-d %y")
+            date_str = played_date.strftime("%b %d, %Y").lstrip("0").replace(" 0", " ")
             return f"✅ {name}{plat_str} - played {date_str}"
         else:
             return f"✅ {name}{plat_str}"
@@ -62,6 +61,25 @@ def format_release_year(release_date: Optional[int]) -> Optional[int]:
 def setup(bot):
     """Setup gamelog commands"""
 
+    def parse_igdb_id(title: str) -> Optional[int]:
+        """Extract IGDB ID from autocomplete value like 'igdb:12345'."""
+        if title.startswith("igdb:"):
+            try:
+                return int(title[5:])
+            except (ValueError, IndexError):
+                pass
+        return None
+
+    # Helper to parse game input (could be ID from autocomplete or search term)
+    async def resolve_game(title: str) -> Optional[Dict]:
+        """Resolve a game from autocomplete ID or search term."""
+        # Check if it's an IGDB ID (from autocomplete selection)
+        igdb_id = parse_igdb_id(title)
+        if igdb_id is not None:
+            return await get_game_by_id(igdb_id)
+        # Otherwise search by name
+        return await search_games_async(title)
+
     # Autocomplete for game search (uses IGDB API with fast timeout)
     async def game_search_autocomplete(interaction: discord.Interaction, current: str):
         """Autocomplete for game search using IGDB API"""
@@ -74,7 +92,8 @@ def setup(bot):
             choices = []
             for game in results:
                 name = game.get("name", "")
-                if not name:
+                game_id = game.get("id")
+                if not name or game_id is None:
                     continue
 
                 year = game.get("year", "")
@@ -93,7 +112,8 @@ def setup(bot):
                 if len(display) < 1:
                     continue
 
-                choices.append(app_commands.Choice(name=display, value=name))
+                # Use IGDB ID as value to ensure correct game is selected
+                choices.append(app_commands.Choice(name=display, value=f"igdb:{game_id}"))
 
             return choices[:AUTOCOMPLETE_LIMIT]
         except Exception as e:
@@ -105,17 +125,19 @@ def setup(bot):
         """Autocomplete for user's gamelog"""
         try:
             uid = str(interaction.user.id)
-            gamelog = await get_gamelog(uid)
+            gamelog_list = await get_gamelog(uid)
 
             matching = []
-            for game in gamelog:
+            for game in gamelog_list:
                 name = game.get('name', '')
+                igdb_id = game.get('igdb_id')
                 if not current or current.lower() in name.lower():
                     platforms = game.get('platforms', [])
                     display = f"{name} ({', '.join(platforms[:2])})" if platforms else name
                     if len(display) > 100:
                         display = display[:97] + "..."
-                    matching.append(app_commands.Choice(name=display, value=name))
+                    # Use IGDB ID as value
+                    matching.append(app_commands.Choice(name=display, value=f"igdb:{igdb_id}"))
 
             return matching[:AUTOCOMPLETE_LIMIT]
         except Exception as e:
@@ -266,7 +288,7 @@ def setup(bot):
         await interaction.response.defer()
 
         uid = str(interaction.user.id)
-        game = await search_games_async(title)
+        game = await resolve_game(title)
 
         if not game:
             return await interaction.followup.send("❌ Game not found.")
@@ -319,7 +341,7 @@ def setup(bot):
         await interaction.response.defer()
 
         uid = str(interaction.user.id)
-        game = await search_games_async(title)
+        game = await resolve_game(title)
 
         if not game:
             return await interaction.followup.send("❌ Game not found.")
@@ -356,20 +378,26 @@ def setup(bot):
         await interaction.response.defer()
 
         uid = str(interaction.user.id)
-        game = await search_games_async(title)
 
-        if not game:
-            return await interaction.followup.send("❌ Game not found.")
+        # Try to get from user's gamelog first (avoids API call)
+        igdb_id = parse_igdb_id(title)
+        if igdb_id is not None:
+            entry = await get_gamelog_entry(uid, igdb_id)
+        else:
+            # Fallback: search API then check gamelog
+            game = await resolve_game(title)
+            if not game:
+                return await interaction.followup.send("❌ Game not found.")
+            entry = await get_gamelog_entry(uid, game["id"])
 
-        entry = await get_gamelog_entry(uid, game["id"])
         if not entry:
             return await interaction.followup.send("❌ Game not found in your game log.")
 
         if not entry.get("played_at"):
             return await interaction.followup.send("❌ Game isn't marked as played.")
 
-        await mark_game_as_unplayed(uid, game["id"])
-        await interaction.followup.send(f"↩️ {interaction.user.display_name} moved **{game['name']}** back to backlog.")
+        await mark_game_as_unplayed(uid, entry["igdb_id"])
+        await interaction.followup.send(f"↩️ {interaction.user.display_name} moved **{entry['name']}** back to backlog.")
 
     @bot.tree.command(name="game_remove", description="Remove a game from your game log")
     @app_commands.describe(title="Select a game from your game log")
@@ -378,8 +406,21 @@ def setup(bot):
         await interaction.response.defer()
 
         uid = str(interaction.user.id)
-        game = await search_games_async(title)
 
+        # Try to get from user's gamelog first (avoids API call)
+        igdb_id = parse_igdb_id(title)
+        if igdb_id is not None:
+            entry = await get_gamelog_entry(uid, igdb_id)
+            if entry:
+                await remove_from_gamelog(uid, igdb_id)
+                return await interaction.followup.send(
+                    f"🗑️ {interaction.user.display_name} removed **{entry['name']}** from their game log."
+                )
+            else:
+                return await interaction.followup.send("❌ Game not found in your game log.")
+
+        # Fallback: search API then remove
+        game = await resolve_game(title)
         if not game:
             return await interaction.followup.send("❌ Game not found.")
 
@@ -395,7 +436,7 @@ def setup(bot):
     async def game_cmd(interaction: discord.Interaction, title: str):
         await interaction.response.defer()
 
-        game = await search_games_async(title)
+        game = await resolve_game(title)
 
         if not game:
             return await interaction.followup.send("❌ Game not found.")
@@ -408,7 +449,8 @@ def setup(bot):
         embed = discord.Embed(
             title=game["name"],
             description=summary,
-            color=0x9146ff  # Twitch purple
+            color=0x9146ff,  # Twitch purple
+            url=game.get("url")  # Link to IGDB page
         )
 
         year = format_release_year(game.get("release_date"))
@@ -576,7 +618,7 @@ def setup(bot):
     async def game_review_cmd(interaction: discord.Interaction, title: str):
         await interaction.response.defer(ephemeral=True)
 
-        game = await search_games_async(title)
+        game = await resolve_game(title)
         if not game:
             return await interaction.followup.send("❌ Game not found.", ephemeral=True)
 

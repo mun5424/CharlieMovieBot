@@ -4,10 +4,24 @@ Game-related database operations for gamelog feature
 
 import aiosqlite
 import json
+import logging
 import time
 from typing import Optional, List, Dict
 
 from db.connection import get_db, get_lock
+
+logger = logging.getLogger(__name__)
+
+
+def _safe_json_loads(value: str, default: list = None) -> list:
+    """Safely parse JSON, returning default on failure."""
+    if not value:
+        return default if default is not None else []
+    try:
+        return json.loads(value)
+    except (json.JSONDecodeError, TypeError):
+        logger.warning(f"Failed to parse JSON: {value[:50]}...")
+        return default if default is not None else []
 
 
 # ============== Gamelog Operations ==============
@@ -53,8 +67,8 @@ async def get_gamelog(user_id: str, filter_mode: str = "all") -> List[Dict]:
                 "name": row["name"],
                 "cover_url": row["cover_url"],
                 "release_date": row["release_date"],
-                "platforms": json.loads(row["platforms"]) if row["platforms"] else [],
-                "genres": json.loads(row["genres"]) if row["genres"] else [],
+                "platforms": _safe_json_loads(row["platforms"]),
+                "genres": _safe_json_loads(row["genres"]),
                 "developer": row["developer"],
                 "summary": row["summary"],
                 "added_at": row["added_at"],
@@ -160,8 +174,8 @@ async def get_gamelog_entry(user_id: str, igdb_id: int) -> Optional[Dict]:
                 "name": row["name"],
                 "cover_url": row["cover_url"],
                 "release_date": row["release_date"],
-                "platforms": json.loads(row["platforms"]) if row["platforms"] else [],
-                "genres": json.loads(row["genres"]) if row["genres"] else [],
+                "platforms": _safe_json_loads(row["platforms"]),
+                "genres": _safe_json_loads(row["genres"]),
                 "developer": row["developer"],
                 "summary": row["summary"],
                 "added_at": row["added_at"],

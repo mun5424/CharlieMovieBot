@@ -96,7 +96,7 @@ async def _get_access_token() -> Optional[str]:
         return None
 
 
-async def _api_request(endpoint: str, body: str, timeout: aiohttp.ClientTimeout = None) -> Optional[dict]:
+async def _api_request(endpoint: str, body: str, timeout: aiohttp.ClientTimeout = None, _retry: bool = False) -> Optional[dict]:
     """Make an authenticated request to IGDB API."""
     global _last_request_time
 
@@ -106,8 +106,8 @@ async def _api_request(endpoint: str, body: str, timeout: aiohttp.ClientTimeout 
 
     client_id = getattr(config, 'TWITCH_API_CLIENT', '')
 
+    # Rate limiting: acquire lock, wait if needed, then release before making request
     async with _request_lock:
-        # Enforce rate limiting
         now = time.time()
         elapsed = now - _last_request_time
         if elapsed < MIN_REQUEST_INTERVAL:
@@ -128,12 +128,12 @@ async def _api_request(endpoint: str, body: str, timeout: aiohttp.ClientTimeout 
         ) as resp:
             if resp.status == 200:
                 return await resp.json()
-            elif resp.status == 401:
-                # Token expired, clear it and retry once
+            elif resp.status == 401 and not _retry:
+                # Token expired, clear it and retry once (prevent infinite recursion)
                 global _access_token
                 _access_token = None
                 logger.warning("IGDB: Token expired, retrying...")
-                return await _api_request(endpoint, body, timeout)
+                return await _api_request(endpoint, body, timeout, _retry=True)
             else:
                 logger.error(f"IGDB API error: {resp.status}")
                 return None
@@ -157,6 +157,45 @@ def _clean_cache():
         sorted_keys = sorted(_search_cache.keys(), key=lambda k: _search_cache[k][1])
         for k in sorted_keys[:len(_search_cache) - MAX_CACHE_SIZE]:
             del _search_cache[k]
+
+
+def _parse_game_response(game: Dict) -> Dict:
+    """Parse IGDB game response into standardized format."""
+    # Build cover URL if available
+    cover_url = None
+    if game.get('cover') and game['cover'].get('image_id'):
+        cover_url = f"https://images.igdb.com/igdb/image/upload/t_cover_big/{game['cover']['image_id']}.jpg"
+
+    # Extract platform names
+    platforms = []
+    if game.get('platforms'):
+        platforms = [p.get('name', '') for p in game['platforms'] if p.get('name')]
+
+    # Extract genre names
+    genres = []
+    if game.get('genres'):
+        genres = [g.get('name', '') for g in game['genres'] if g.get('name')]
+
+    # Extract developer/publisher (first company found)
+    developer = None
+    if game.get('involved_companies'):
+        for company in game['involved_companies']:
+            if company.get('company', {}).get('name'):
+                developer = company['company']['name']
+                break
+
+    return {
+        'id': game.get('id'),
+        'name': game.get('name', 'Unknown'),
+        'cover_url': cover_url,
+        'release_date': game.get('first_release_date'),
+        'platforms': platforms,
+        'genres': genres,
+        'summary': game.get('summary', ''),
+        'rating': game.get('rating'),
+        'developer': developer,
+        'url': game.get('url'),
+    }
 
 
 async def search_games(query: str, limit: int = 10) -> List[Dict]:
@@ -193,43 +232,7 @@ async def search_games(query: str, limit: int = 10) -> List[Dict]:
     if not data:
         return []
 
-    results = []
-    for game in data:
-        # Build cover URL if available
-        cover_url = None
-        if game.get('cover') and game['cover'].get('image_id'):
-            cover_url = f"https://images.igdb.com/igdb/image/upload/t_cover_big/{game['cover']['image_id']}.jpg"
-
-        # Extract platform names
-        platforms = []
-        if game.get('platforms'):
-            platforms = [p.get('name', '') for p in game['platforms'] if p.get('name')]
-
-        # Extract genre names
-        genres = []
-        if game.get('genres'):
-            genres = [g.get('name', '') for g in game['genres'] if g.get('name')]
-
-        # Extract developer/publisher
-        developer = None
-        if game.get('involved_companies'):
-            for company in game['involved_companies']:
-                if company.get('company', {}).get('name'):
-                    developer = company['company']['name']
-                    break
-
-        results.append({
-            'id': game.get('id'),
-            'name': game.get('name', 'Unknown'),
-            'cover_url': cover_url,
-            'release_date': game.get('first_release_date'),
-            'platforms': platforms,
-            'genres': genres,
-            'summary': game.get('summary', ''),
-            'rating': game.get('rating'),
-            'developer': developer,
-        })
-
+    results = [_parse_game_response(game) for game in data]
     _search_cache[cache_key] = (results, time.time())
     return results
 
@@ -295,6 +298,13 @@ async def search_games_autocomplete(query: str, limit: int = 10) -> List[Dict]:
 
 async def get_game_by_id(game_id: int) -> Optional[Dict]:
     """Get game details by IGDB ID."""
+    # Check cache first
+    cache_key = f"id:{game_id}"
+    if cache_key in _search_cache:
+        result, timestamp = _search_cache[cache_key]
+        if time.time() - timestamp < CACHE_TTL:
+            return result
+
     body = f'''
         fields name, cover.image_id, first_release_date, platforms.name,
                summary, rating, genres.name, involved_companies.company.name,
@@ -306,39 +316,9 @@ async def get_game_by_id(game_id: int) -> Optional[Dict]:
     if not data or len(data) == 0:
         return None
 
-    game = data[0]
-
-    cover_url = None
-    if game.get('cover') and game['cover'].get('image_id'):
-        cover_url = f"https://images.igdb.com/igdb/image/upload/t_cover_big/{game['cover']['image_id']}.jpg"
-
-    platforms = []
-    if game.get('platforms'):
-        platforms = [p.get('name', '') for p in game['platforms'] if p.get('name')]
-
-    genres = []
-    if game.get('genres'):
-        genres = [g.get('name', '') for g in game['genres'] if g.get('name')]
-
-    developer = None
-    if game.get('involved_companies'):
-        for company in game['involved_companies']:
-            if company.get('company', {}).get('name'):
-                developer = company['company']['name']
-                break
-
-    return {
-        'id': game.get('id'),
-        'name': game.get('name', 'Unknown'),
-        'cover_url': cover_url,
-        'release_date': game.get('first_release_date'),
-        'platforms': platforms,
-        'genres': genres,
-        'summary': game.get('summary', ''),
-        'rating': game.get('rating'),
-        'developer': developer,
-        'url': game.get('url'),
-    }
+    result = _parse_game_response(data[0])
+    _search_cache[cache_key] = (result, time.time())
+    return result
 
 
 async def warmup_session():
