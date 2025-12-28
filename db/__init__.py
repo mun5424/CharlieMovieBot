@@ -37,3 +37,17 @@ from db.anime import (
     get_random_anime_review,
     format_anime_reviewers_text,
 )
+from db.games import (
+    get_gamelog,
+    get_gamelog_counts,
+    add_to_gamelog,
+    remove_from_gamelog,
+    is_in_gamelog,
+    get_gamelog_entry,
+    mark_game_as_played,
+    mark_game_as_unplayed,
+    get_game_reviews,
+    add_game_review,
+    get_random_game_review,
+    format_game_reviewers_text,
+)

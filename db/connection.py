@@ -131,6 +131,36 @@ async def _init_tables(db: aiosqlite.Connection):
             UNIQUE(mal_id, user_id)
         );
 
+        -- Game log (backlog + played status)
+        CREATE TABLE IF NOT EXISTS gamelog (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL,
+            igdb_id INTEGER NOT NULL,
+            name TEXT,
+            cover_url TEXT,
+            release_date INTEGER,
+            platforms TEXT,
+            genres TEXT,
+            developer TEXT,
+            summary TEXT,
+            added_at REAL,
+            played_at REAL,
+            UNIQUE(user_id, igdb_id)
+        );
+
+        -- Game reviews
+        CREATE TABLE IF NOT EXISTS game_reviews (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            igdb_id INTEGER NOT NULL,
+            game_name TEXT,
+            user_id TEXT NOT NULL,
+            username TEXT,
+            score REAL,
+            review_text TEXT,
+            timestamp REAL,
+            UNIQUE(igdb_id, user_id)
+        );
+
         -- Indexes for fast lookups
         CREATE INDEX IF NOT EXISTS idx_watchlist_user ON watchlist(user_id);
         CREATE INDEX IF NOT EXISTS idx_watchlist_watched ON watchlist(user_id, watched_at);
@@ -140,6 +170,9 @@ async def _init_tables(db: aiosqlite.Connection):
         CREATE INDEX IF NOT EXISTS idx_anime_watchlist_user ON anime_watchlist(user_id);
         CREATE INDEX IF NOT EXISTS idx_anime_watchlist_watched ON anime_watchlist(user_id, watched_at);
         CREATE INDEX IF NOT EXISTS idx_anime_reviews_mal ON anime_reviews(mal_id);
+        CREATE INDEX IF NOT EXISTS idx_gamelog_user ON gamelog(user_id);
+        CREATE INDEX IF NOT EXISTS idx_gamelog_played ON gamelog(user_id, played_at);
+        CREATE INDEX IF NOT EXISTS idx_game_reviews_igdb ON game_reviews(igdb_id);
     """)
 
     # Add watched_at column if it doesn't exist (for existing databases)

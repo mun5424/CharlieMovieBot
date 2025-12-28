@@ -17,3 +17,11 @@ from clients.jikan import (
     warmup_session as warmup_jikan_session,
     close_session as close_jikan_session,
 )
+from clients.igdb import (
+    search_games,
+    search_games_async,
+    search_games_autocomplete,
+    get_game_by_id,
+    warmup_session as warmup_igdb_session,
+    close_session as close_igdb_session,
+)

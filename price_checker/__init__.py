@@ -1,0 +1,35 @@
+# price_checker/ - Price tracking and deal alerts
+from price_checker.db import (
+    get_db,
+    close_db,
+    add_product,
+    get_product,
+    get_product_by_identifier,
+    search_products,
+    add_offer,
+    get_offers_for_product,
+    update_daily_snapshot,
+    compute_baseline,
+    get_baseline,
+    get_deals_for_guild,
+    mark_alert_sent,
+    add_watchlist,
+    get_watchlist,
+    get_all_watchlists,
+    SELLER_TIERS,
+    CONDITIONS,
+)
+from price_checker.scoring import (
+    calculate_deal_score,
+    calculate_trust_multiplier,
+    calculate_z_score,
+    calculate_discount,
+    get_deal_emoji,
+    get_deal_color,
+    format_deal_embed_fields,
+    DEAL_CLASS_GREAT,
+    DEAL_CLASS_INSANE,
+    GREAT_DEAL_SCORE,
+    INSANE_DEAL_SCORE,
+)
+from price_checker.commands import setup

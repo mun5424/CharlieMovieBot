@@ -53,14 +53,15 @@ class BotManager:
         """Load all command modules"""
         try:
             # Import command modules
-            from commands import general, watchlist, anime
+            from commands import general, watchlist, anime, gamelog
             from trivia.trivia import TriviaCog
 
             # Load traditional commands
             general.setup(self.bot)
             watchlist.setup(self.bot)
             anime.setup(self.bot)
-            self.logger.info("✅ Commands loaded (general, watchlist, anime)")
+            gamelog.setup(self.bot)
+            self.logger.info("✅ Commands loaded (general, watchlist, anime, gamelog)")
             
             # Load trivia cog
             trivia_cog = TriviaCog(self.bot)
@@ -145,6 +146,16 @@ class BotManager:
                 self.logger.info("✅ Jikan session pre-warmed")
             except Exception as e:
                 self.logger.warning(f"⚠️ Failed to pre-warm Jikan session: {e}")
+
+            # Pre-warm IGDB session for gamelog commands
+            try:
+                from clients.igdb import warmup_session as igdb_warmup, close_session as igdb_close
+                await igdb_warmup()
+                # Register cleanup on shutdown
+                self.bot.add_shutdown_handler(igdb_close)
+                self.logger.info("✅ IGDB session pre-warmed")
+            except Exception as e:
+                self.logger.warning(f"⚠️ Failed to pre-warm IGDB session: {e}")
 
             # Load tournament reminder if available
             try:
