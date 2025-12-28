@@ -235,6 +235,13 @@ async def search_anime_autocomplete(query: str, limit: int = 10) -> List[Dict]:
 
 async def get_anime_by_id(mal_id: int) -> Optional[Dict]:
     """Get anime details by MAL ID."""
+    # Check cache first
+    cache_key = f"id:{mal_id}"
+    if cache_key in _search_cache:
+        result, timestamp = _search_cache[cache_key]
+        if time.time() - timestamp < CACHE_TTL:
+            return result
+
     url = f"{JIKAN_BASE_URL}/anime/{mal_id}"
 
     data = await _rate_limited_request(url)
@@ -246,7 +253,7 @@ async def get_anime_by_id(mal_id: int) -> Optional[Dict]:
     jpg_images = images.get("jpg", {})
     image_url = jpg_images.get("large_image_url") or jpg_images.get("image_url", "")
 
-    return {
+    result = {
         "mal_id": item.get("mal_id"),
         "title": item.get("title_english") or item.get("title", "Unknown"),
         "title_japanese": item.get("title", ""),
@@ -259,6 +266,10 @@ async def get_anime_by_id(mal_id: int) -> Optional[Dict]:
         "season": item.get("season"),
         "type": item.get("type", "TV"),
     }
+
+    # Cache the result
+    _search_cache[cache_key] = (result, time.time())
+    return result
 
 
 async def warmup_session():

@@ -616,7 +616,12 @@ def setup(bot):
     @app_commands.describe(title="Search for a game to review")
     @app_commands.autocomplete(title=game_search_autocomplete)
     async def game_review_cmd(interaction: discord.Interaction, title: str):
-        await interaction.response.defer(ephemeral=True)
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except discord.NotFound:
+            # Interaction expired before we could respond (slow network/server)
+            logger.warning("game_review: Interaction expired before defer")
+            return
 
         game = await resolve_game(title)
         if not game:

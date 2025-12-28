@@ -20,9 +20,35 @@ from db import (
     get_random_anime_review,
     format_anime_reviewers_text,
 )
-from clients.jikan import search_anime, search_anime_async, search_anime_autocomplete
+from clients.jikan import search_anime_autocomplete, get_anime_by_id
 
 logger = logging.getLogger(__name__)
+
+
+def parse_mal_id(value: str) -> Optional[int]:
+    """Extract MAL ID from autocomplete value like 'mal:12345'."""
+    if value.startswith("mal:"):
+        try:
+            return int(value[4:])
+        except (ValueError, IndexError):
+            pass
+    return None
+
+
+async def resolve_anime(value: str) -> Optional[Dict]:
+    """
+    Resolve an anime from autocomplete value or search query.
+    - If value is 'mal:ID', fetch by ID (fast, exact)
+    - Otherwise, search by title (slower, may get wrong result)
+    """
+    mal_id = parse_mal_id(value)
+    if mal_id is not None:
+        return await get_anime_by_id(mal_id)
+
+    # Fallback to search (for manually typed titles)
+    from clients.jikan import search_anime
+    results = await search_anime(value, limit=1)
+    return results[0] if results else None
 
 # Constants
 ANIME_VIEW_TIMEOUT = 120  # 2 minutes
@@ -42,7 +68,7 @@ def format_anime_entry(anime: Dict, show_date: bool = True) -> str:
     if watched_at:
         if show_date:
             watched_date = datetime.fromtimestamp(watched_at)
-            date_str = watched_date.strftime("%b %-d %y")
+            date_str = watched_date.strftime("%b %d, %Y").replace(" 0", " ")
             return f"✅ {title}{ep_str} - watched {date_str}"
         else:
             return f"✅ {title}{ep_str}"
@@ -65,7 +91,8 @@ def setup(bot):
             choices = []
             for anime in results:
                 title = anime.get("title", "")
-                if not title:
+                mal_id = anime.get("mal_id")
+                if not title or mal_id is None:
                     continue
 
                 year = anime.get("year", "")
@@ -84,7 +111,8 @@ def setup(bot):
                 if len(display) < 1:
                     continue
 
-                choices.append(app_commands.Choice(name=display, value=title))
+                # Use mal:ID as value to avoid 100 char limit and ensure exact match
+                choices.append(app_commands.Choice(name=display, value=f"mal:{mal_id}"))
 
             return choices[:AUTOCOMPLETE_LIMIT]
         except Exception as e:
@@ -101,12 +129,16 @@ def setup(bot):
             matching = []
             for anime in watchlist:
                 title = anime.get('title', '')
+                mal_id = anime.get('mal_id')
+                if mal_id is None:
+                    continue
                 if not current or current.lower() in title.lower():
                     eps = anime.get('episodes', '')
                     display = f"{title} ({eps} eps)" if eps else title
                     if len(display) > 100:
                         display = display[:97] + "..."
-                    matching.append(app_commands.Choice(name=display, value=title))
+                    # Use mal:ID as value to avoid 100 char limit and ensure exact match
+                    matching.append(app_commands.Choice(name=display, value=f"mal:{mal_id}"))
 
             return matching[:AUTOCOMPLETE_LIMIT]
         except Exception as e:
@@ -257,7 +289,7 @@ def setup(bot):
         await interaction.response.defer()
 
         uid = str(interaction.user.id)
-        anime = await search_anime_async(title)
+        anime = await resolve_anime(title)
 
         if not anime:
             return await interaction.followup.send("❌ Anime not found.")
@@ -309,7 +341,7 @@ def setup(bot):
         await interaction.response.defer()
 
         uid = str(interaction.user.id)
-        anime = await search_anime_async(title)
+        anime = await resolve_anime(title)
 
         if not anime:
             return await interaction.followup.send("❌ Anime not found.")
@@ -346,20 +378,30 @@ def setup(bot):
         await interaction.response.defer()
 
         uid = str(interaction.user.id)
-        anime = await search_anime_async(title)
 
-        if not anime:
-            return await interaction.followup.send("❌ Anime not found.")
-
-        entry = await get_anime_watchlist_entry(uid, anime["mal_id"])
-        if not entry:
-            return await interaction.followup.send("❌ Anime not found in your watchlist.")
-
-        if not entry.get("watched_at"):
-            return await interaction.followup.send("❌ Anime isn't marked as watched.")
-
-        await mark_anime_as_unwatched(uid, anime["mal_id"])
-        await interaction.followup.send(f"↩️ {interaction.user.display_name} unmarked **{anime['title']}** as watched.")
+        # Try to get MAL ID from autocomplete value (mal:ID format)
+        mal_id = parse_mal_id(title)
+        if mal_id is not None:
+            # Use DB directly - no API call needed
+            entry = await get_anime_watchlist_entry(uid, mal_id)
+            if not entry:
+                return await interaction.followup.send("❌ Anime not found in your watchlist.")
+            if not entry.get("watched_at"):
+                return await interaction.followup.send("❌ Anime isn't marked as watched.")
+            await mark_anime_as_unwatched(uid, mal_id)
+            await interaction.followup.send(f"↩️ {interaction.user.display_name} unmarked **{entry['title']}** as watched.")
+        else:
+            # Fallback: user typed manually, need to search
+            anime = await resolve_anime(title)
+            if not anime:
+                return await interaction.followup.send("❌ Anime not found.")
+            entry = await get_anime_watchlist_entry(uid, anime["mal_id"])
+            if not entry:
+                return await interaction.followup.send("❌ Anime not found in your watchlist.")
+            if not entry.get("watched_at"):
+                return await interaction.followup.send("❌ Anime isn't marked as watched.")
+            await mark_anime_as_unwatched(uid, anime["mal_id"])
+            await interaction.followup.send(f"↩️ {interaction.user.display_name} unmarked **{anime['title']}** as watched.")
 
     @bot.tree.command(name="anime_remove", description="Remove an anime from your watchlist")
     @app_commands.describe(title="Select an anime from your watchlist")
@@ -368,16 +410,26 @@ def setup(bot):
         await interaction.response.defer()
 
         uid = str(interaction.user.id)
-        anime = await search_anime_async(title)
 
-        if not anime:
-            return await interaction.followup.send("❌ Anime not found.")
-
-        removed = await remove_from_anime_watchlist(uid, anime["mal_id"])
-        if removed:
-            await interaction.followup.send(f"🗑️ {interaction.user.display_name} removed **{anime['title']}** from their anime watchlist.")
+        # Try to get MAL ID from autocomplete value (mal:ID format)
+        mal_id = parse_mal_id(title)
+        if mal_id is not None:
+            # Use DB directly - no API call needed
+            entry = await get_anime_watchlist_entry(uid, mal_id)
+            if not entry:
+                return await interaction.followup.send("❌ Anime not found in your watchlist.")
+            await remove_from_anime_watchlist(uid, mal_id)
+            await interaction.followup.send(f"🗑️ {interaction.user.display_name} removed **{entry['title']}** from their anime watchlist.")
         else:
-            await interaction.followup.send("❌ Anime not found in your watchlist.")
+            # Fallback: user typed manually, need to search
+            anime = await resolve_anime(title)
+            if not anime:
+                return await interaction.followup.send("❌ Anime not found.")
+            removed = await remove_from_anime_watchlist(uid, anime["mal_id"])
+            if removed:
+                await interaction.followup.send(f"🗑️ {interaction.user.display_name} removed **{anime['title']}** from their anime watchlist.")
+            else:
+                await interaction.followup.send("❌ Anime not found in your watchlist.")
 
     @bot.tree.command(name="anime", description="Search for an anime")
     @app_commands.describe(title="Search for an anime")
@@ -385,7 +437,7 @@ def setup(bot):
     async def anime_cmd(interaction: discord.Interaction, title: str):
         await interaction.response.defer()
 
-        anime = await search_anime_async(title)
+        anime = await resolve_anime(title)
 
         if not anime:
             return await interaction.followup.send("❌ Anime not found.")
@@ -563,7 +615,7 @@ def setup(bot):
     async def anime_review_cmd(interaction: discord.Interaction, title: str):
         await interaction.response.defer(ephemeral=True)
 
-        anime = await search_anime_async(title)
+        anime = await resolve_anime(title)
         if not anime:
             return await interaction.followup.send("❌ Anime not found.", ephemeral=True)
 

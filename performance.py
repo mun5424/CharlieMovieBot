@@ -358,21 +358,7 @@ class OptimizedBot(commands.Bot):
         if self.config and hasattr(self.config, key):
             return getattr(self.config, key)
         return default
-    
-    async def setup_hook(self):
-        """Called when the bot is starting up"""
-        self.startup_time = time.time()
-        
-        # Apply performance optimizations
-        await self.performance_optimizer.apply_optimizations()
-        
-        # Start performance monitoring
-        await self.performance_monitor.start_monitoring()
-        
-        # Log optimization info
-        opt_info = self.performance_optimizer.get_optimization_info()
-        self.logger.info(f"🚀 Performance optimizations applied: {opt_info}")
-    
+
     async def on_ready(self):
         """Enhanced ready event with performance metrics"""
         startup_duration = time.time() - self.startup_time
@@ -391,17 +377,48 @@ class OptimizedBot(commands.Bot):
         """Enhanced error handling with performance considerations"""
         if isinstance(error, commands.CommandNotFound):
             return  # Silently ignore unknown commands
-        
+
         # Log error with context
         guild_name = ctx.guild.name if ctx.guild else 'DM'
         self.logger.error(f"Command error in {guild_name}: {error}")
-        
+
         # Don't spam error messages, just log them
         if not isinstance(error, (commands.CheckFailure, commands.DisabledCommand)):
             try:
                 await ctx.send("❌ An error occurred. Please try again later.", delete_after=10)
             except:
                 pass  # Ignore if we can't send the message
+
+    async def setup_hook(self):
+        """Called when the bot is starting up"""
+        self.startup_time = time.time()
+
+        # Apply performance optimizations
+        await self.performance_optimizer.apply_optimizations()
+
+        # Start performance monitoring
+        await self.performance_monitor.start_monitoring()
+
+        # Set up app command error handler
+        self.tree.on_error = self._on_app_command_error
+
+        # Log optimization info
+        opt_info = self.performance_optimizer.get_optimization_info()
+        self.logger.info(f"🚀 Performance optimizations applied: {opt_info}")
+
+    async def _on_app_command_error(self, interaction: discord.Interaction, error: discord.app_commands.AppCommandError):
+        """Handle errors from slash commands"""
+        # Handle "Unknown interaction" errors gracefully (interaction expired)
+        if isinstance(error, discord.app_commands.CommandInvokeError):
+            original = error.original
+            if isinstance(original, discord.NotFound) and original.code == 10062:
+                # Interaction expired - this happens on slow networks/servers
+                self.logger.debug(f"Interaction expired for /{interaction.command.name if interaction.command else 'unknown'}")
+                return
+
+        # Log other errors
+        cmd_name = interaction.command.name if interaction.command else 'unknown'
+        self.logger.error(f"App command error in /{cmd_name}: {error}")
     
     async def close(self):
         """Enhanced cleanup with graceful shutdown"""
