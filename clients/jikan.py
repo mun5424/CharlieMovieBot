@@ -272,6 +272,67 @@ async def get_anime_by_id(mal_id: int) -> Optional[Dict]:
     return result
 
 
+async def get_user_animelist(username: str, status: str = None, limit: int = 300) -> List[Dict]:
+    """
+    Fetch a user's anime list from MyAnimeList via Jikan API.
+
+    Args:
+        username: MAL username
+        status: Filter by status - "watching", "completed", "on_hold", "dropped", "plan_to_watch"
+        limit: Max entries to fetch (default 300)
+
+    Returns:
+        List of anime entries with mal_id, title, episodes, score, status, etc.
+    """
+    all_entries = []
+    offset = 0
+    page_size = 25  # Jikan returns 25 per page by default
+
+    while len(all_entries) < limit:
+        url = f"{JIKAN_BASE_URL}/users/{username}/animelist"
+        params = {"limit": min(page_size, limit - len(all_entries))}
+        if offset > 0:
+            params["page"] = (offset // page_size) + 1
+        if status:
+            params["status"] = status
+
+        data = await _rate_limited_request(url, params)
+        if not data or "data" not in data:
+            break
+
+        entries = data["data"]
+        if not entries:
+            break
+
+        for item in entries:
+            anime = item.get("anime", {})
+            images = anime.get("images", {})
+            jpg_images = images.get("jpg", {})
+            image_url = jpg_images.get("large_image_url") or jpg_images.get("image_url", "")
+
+            all_entries.append({
+                "mal_id": anime.get("mal_id"),
+                "title": anime.get("title", "Unknown"),
+                "episodes": anime.get("episodes"),
+                "image_url": image_url,
+                "score": item.get("score"),  # User's score
+                "status": item.get("status"),  # watching, completed, etc.
+                "episodes_watched": item.get("episodes_watched", 0),
+            })
+
+        offset += len(entries)
+
+        # Check if there's more data
+        pagination = data.get("pagination", {})
+        if not pagination.get("has_next_page", False):
+            break
+
+        # Rate limit between pages
+        await asyncio.sleep(MIN_REQUEST_INTERVAL)
+
+    return all_entries
+
+
 async def warmup_session():
     """Pre-warm the session to reduce first-request latency."""
     try:

@@ -14,6 +14,7 @@ from clients.jikan import (
     search_anime_async,
     search_anime_autocomplete,
     get_anime_by_id,
+    get_user_animelist,
     warmup_session as warmup_jikan_session,
     close_session as close_jikan_session,
 )

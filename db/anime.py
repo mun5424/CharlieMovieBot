@@ -244,6 +244,78 @@ async def mark_anime_as_unwatched(user_id: str, mal_id: int) -> bool:
         return cursor.rowcount > 0
 
 
+async def batch_import_anime(user_id: str, anime_list: List[Dict]) -> Dict[str, int]:
+    """
+    Batch import anime to user's watchlist efficiently.
+
+    Args:
+        user_id: The user's ID
+        anime_list: List of anime dicts with mal_id, title, episodes, etc.
+                   Each dict can have 'mark_watched': True to mark as watched
+
+    Returns:
+        Dict with counts: {"added": X, "skipped": Y, "watched": Z}
+    """
+    db = await get_db()
+    _lock = get_lock()
+
+    added = 0
+    skipped = 0
+    watched = 0
+    now = time.time()
+
+    async with _lock:
+        # Get existing mal_ids for this user in one query
+        cursor = await db.execute(
+            "SELECT mal_id FROM anime_watchlist WHERE user_id = ?",
+            (user_id,)
+        )
+        rows = await cursor.fetchall()
+        existing_ids = {row["mal_id"] for row in rows}
+
+        # Prepare batch inserts
+        for anime in anime_list:
+            mal_id = anime.get("mal_id")
+            if not mal_id or mal_id in existing_ids:
+                skipped += 1
+                continue
+
+            mark_watched = anime.get("mark_watched", False)
+            watched_at = now if mark_watched else None
+
+            try:
+                await db.execute(
+                    """INSERT INTO anime_watchlist
+                       (user_id, mal_id, title, title_japanese, episodes, status,
+                        score, image_url, year, anime_type, added_at, watched_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        user_id,
+                        mal_id,
+                        anime.get("title"),
+                        anime.get("title_japanese"),
+                        anime.get("episodes"),
+                        anime.get("status"),
+                        anime.get("score"),
+                        anime.get("image_url"),
+                        anime.get("year"),
+                        anime.get("type"),
+                        now,
+                        watched_at
+                    )
+                )
+                added += 1
+                if mark_watched:
+                    watched += 1
+            except Exception:
+                skipped += 1
+
+        # Single commit for all inserts
+        await db.commit()
+
+    return {"added": added, "skipped": skipped, "watched": watched}
+
+
 # ============== Anime Review Operations ==============
 
 async def get_anime_reviews(mal_id: int) -> List[Dict]:

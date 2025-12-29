@@ -15,12 +15,13 @@ from db import (
     get_anime_watchlist_entry,
     mark_anime_as_watched,
     mark_anime_as_unwatched,
+    batch_import_anime,
     get_anime_reviews,
     add_anime_review,
     get_random_anime_review,
     format_anime_reviewers_text,
 )
-from clients.jikan import search_anime_autocomplete, get_anime_by_id
+from clients.jikan import search_anime_autocomplete, get_anime_by_id, get_user_animelist
 
 logger = logging.getLogger(__name__)
 
@@ -665,5 +666,92 @@ def setup(bot):
         embed.set_author(name=f"{review['username']} - ⭐ {score_text}/10")
 
         await interaction.followup.send(embed=embed)
+
+    # ==================== ANIME IMPORT ====================
+
+    @bot.tree.command(name="anime_import", description="Import anime list from MyAnimeList")
+    @app_commands.describe(
+        username="Your MyAnimeList username",
+        status="Which list to import (default: all)"
+    )
+    @app_commands.choices(status=[
+        app_commands.Choice(name="All Lists", value="all"),
+        app_commands.Choice(name="Watching", value="watching"),
+        app_commands.Choice(name="Completed", value="completed"),
+        app_commands.Choice(name="Plan to Watch", value="plan_to_watch"),
+        app_commands.Choice(name="On Hold", value="on_hold"),
+        app_commands.Choice(name="Dropped", value="dropped"),
+    ])
+    async def anime_import_cmd(interaction: discord.Interaction, username: str, status: str = "all"):
+        try:
+            await interaction.response.defer()
+        except discord.NotFound:
+            logger.warning("anime_import: Interaction expired before defer")
+            return
+
+        uid = str(interaction.user.id)
+
+        # Send initial status message that we'll update
+        status_msg = await interaction.followup.send(
+            f"📥 Fetching anime list for **{username}** from MyAnimeList...",
+            wait=True
+        )
+
+        try:
+            # Fetch the MAL list
+            status_filter = None if status == "all" else status
+            mal_list = await get_user_animelist(username, status=status_filter, limit=500)
+
+            if not mal_list:
+                return await status_msg.edit(
+                    content=f"❌ Could not fetch anime list for **{username}**. "
+                    "Make sure the username is correct and the list is public."
+                )
+
+            # Update status with count
+            await status_msg.edit(
+                content=f"📥 Found **{len(mal_list)}** anime. Importing to your watchlist..."
+            )
+
+            # Prepare anime list for batch import
+            import_list = []
+            for entry in mal_list:
+                mal_id = entry.get("mal_id")
+                if not mal_id:
+                    continue
+
+                import_list.append({
+                    "mal_id": mal_id,
+                    "title": entry.get("title", "Unknown"),
+                    "episodes": entry.get("episodes"),
+                    "image_url": entry.get("image_url"),
+                    "score": None,
+                    "status": "Unknown",
+                    "mark_watched": entry.get("status") == "completed",
+                })
+
+            # Batch import (single transaction, much faster)
+            results = await batch_import_anime(uid, import_list)
+
+            # Build result message
+            result_parts = []
+            if results["added"] > 0:
+                result_parts.append(f"**{results['added']}** anime added")
+            if results["watched"] > 0:
+                result_parts.append(f"**{results['watched']}** marked as watched")
+            if results["skipped"] > 0:
+                result_parts.append(f"**{results['skipped']}** already in list")
+
+            if result_parts:
+                result_msg = ", ".join(result_parts)
+                await status_msg.edit(content=f"✅ Import complete! {result_msg}.")
+            else:
+                await status_msg.edit(content="ℹ️ No new anime to import.")
+
+        except Exception as e:
+            logger.error(f"Error importing MAL list: {e}")
+            await status_msg.edit(
+                content=f"❌ Error importing anime list. Make sure **{username}** exists and their list is public."
+            )
 
     logger.info("✅ Anime commands loaded")

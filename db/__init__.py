@@ -32,6 +32,7 @@ from db.anime import (
     get_anime_watchlist_entry,
     mark_anime_as_watched,
     mark_anime_as_unwatched,
+    batch_import_anime,
     get_anime_reviews,
     add_anime_review,
     get_random_anime_review,
