@@ -272,6 +272,93 @@ async def get_anime_by_id(mal_id: int) -> Optional[Dict]:
     return result
 
 
+async def get_user_animelist_direct(username: str, status: str = None, limit: int = 500) -> List[Dict]:
+    """
+    Fetch a user's anime list directly from MyAnimeList.
+
+    Args:
+        username: MAL username
+        status: Filter by status - "watching", "completed", "on_hold", "dropped", "plan_to_watch"
+        limit: Max entries to fetch (default 500)
+
+    Returns:
+        List of anime entries with mal_id, title, episodes, score, status, etc.
+    """
+    # Map status names to MAL status codes
+    # 1=watching, 2=completed, 3=on_hold, 4=dropped, 6=plan_to_watch, 7=all
+    status_map = {
+        "watching": 1,
+        "completed": 2,
+        "on_hold": 3,
+        "dropped": 4,
+        "plan_to_watch": 6,
+        None: 7,  # all
+    }
+    status_code = status_map.get(status, 7)
+
+    all_entries = []
+    offset = 0
+    page_size = 300  # MAL returns up to 300 per request
+
+    try:
+        session = await get_session()
+
+        while len(all_entries) < limit:
+            url = f"https://myanimelist.net/animelist/{username}/load.json"
+            params = {"status": status_code, "offset": offset}
+
+            async with session.get(url, params=params, timeout=JIKAN_TIMEOUT) as resp:
+                if resp.status == 400:
+                    # User not found or list private
+                    logger.warning(f"MAL list not accessible for {username}")
+                    return []
+                if resp.status != 200:
+                    logger.error(f"MAL list fetch error: {resp.status}")
+                    return all_entries
+
+                data = await resp.json()
+
+                if not data:
+                    break
+
+                for item in data:
+                    # Get title - prefer English, fall back to Japanese
+                    title = item.get("anime_title_eng") or item.get("anime_title", "Unknown")
+                    if isinstance(title, int):
+                        # Sometimes anime_title is an int (like 86), use it as string
+                        title = str(title)
+
+                    # Map MAL status code to string
+                    mal_status = item.get("status")
+                    status_names = {1: "watching", 2: "completed", 3: "on_hold", 4: "dropped", 6: "plan_to_watch"}
+
+                    all_entries.append({
+                        "mal_id": item.get("anime_id"),
+                        "title": title,
+                        "episodes": item.get("anime_num_episodes"),
+                        "image_url": item.get("anime_image_path"),
+                        "score": item.get("score") if item.get("score") else None,
+                        "status": status_names.get(mal_status, "unknown"),
+                        "episodes_watched": item.get("num_watched_episodes", 0),
+                    })
+
+                offset += len(data)
+
+                # If we got less than page_size, we're done
+                if len(data) < page_size:
+                    break
+
+                # Rate limit
+                await asyncio.sleep(MIN_REQUEST_INTERVAL)
+
+    except asyncio.TimeoutError:
+        logger.error(f"MAL list fetch timeout for {username}")
+    except Exception as e:
+        logger.error(f"MAL list fetch error for {username}: {e}")
+
+    return all_entries
+
+
 async def get_user_animelist(username: str, status: str = None, limit: int = 300) -> List[Dict]:
     """
     Fetch a user's anime list from MyAnimeList via Jikan API.
@@ -283,6 +370,7 @@ async def get_user_animelist(username: str, status: str = None, limit: int = 300
 
     Returns:
         List of anime entries with mal_id, title, episodes, score, status, etc.
+        Returns empty list if MAL is down or user not found.
     """
     all_entries = []
     offset = 0
@@ -297,7 +385,18 @@ async def get_user_animelist(username: str, status: str = None, limit: int = 300
             params["status"] = status
 
         data = await _rate_limited_request(url, params)
-        if not data or "data" not in data:
+
+        # Check for 404 or missing data
+        if not data:
+            # API error - could be MAL down or user not found
+            if len(all_entries) == 0:
+                logger.warning(f"Failed to fetch animelist for {username} - MAL may be down")
+            break
+
+        if "data" not in data:
+            # Could be error response like {"status": 404, ...}
+            if data.get("status") == 404:
+                logger.warning(f"Animelist not found for {username} - user may not exist or MAL is down")
             break
 
         entries = data["data"]

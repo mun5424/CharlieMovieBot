@@ -21,7 +21,7 @@ from db import (
     get_random_anime_review,
     format_anime_reviewers_text,
 )
-from clients.jikan import search_anime_autocomplete, get_anime_by_id, get_user_animelist
+from clients.jikan import search_anime_autocomplete, get_anime_by_id, get_user_animelist_direct
 
 logger = logging.getLogger(__name__)
 
@@ -698,14 +698,17 @@ def setup(bot):
         )
 
         try:
-            # Fetch the MAL list
+            # Fetch the MAL list directly from MyAnimeList
             status_filter = None if status == "all" else status
-            mal_list = await get_user_animelist(username, status=status_filter, limit=500)
+            mal_list = await get_user_animelist_direct(username, status=status_filter, limit=500)
 
             if not mal_list:
                 return await status_msg.edit(
-                    content=f"❌ Could not fetch anime list for **{username}**. "
-                    "Make sure the username is correct and the list is public."
+                    content=f"❌ Could not fetch anime list for **{username}**.\n"
+                    "Possible reasons:\n"
+                    "• Username doesn't exist on MAL\n"
+                    "• Anime list is set to private\n"
+                    "• MyAnimeList is temporarily unavailable"
                 )
 
             # Update status with count
