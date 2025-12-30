@@ -424,9 +424,9 @@ def format_anime_reviewers_text(reviews: List[Dict]) -> str:
     usernames = [r["username"] for r in reviews]
 
     if len(usernames) == 1:
-        return f"**{usernames[0]}** has reviewed this anime"
+        return f"📝 **{usernames[0]}** has reviewed and rated this anime"
     elif len(usernames) == 2:
-        return f"**{usernames[0]}** and **{usernames[1]}** have reviewed this anime"
+        return f"📝 **{usernames[0]}** and **{usernames[1]}** have reviewed and rated this anime"
     else:
         all_but_last = ", ".join(f"**{name}**" for name in usernames[:-1])
-        return f"{all_but_last}, and **{usernames[-1]}** have reviewed this anime"
+        return f"📝 {all_but_last}, and **{usernames[-1]}** have reviewed and rated this anime"

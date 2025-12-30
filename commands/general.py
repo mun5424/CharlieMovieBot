@@ -205,13 +205,9 @@ class SearchReviewView(discord.ui.View):
 def setup(bot):
     logger.info("Setting up general commands...")
 
-    # ALL COMMANDS MUST BE INSIDE setup(bot) FUNCTION
-    @bot.tree.command(name="search", description="Search for a movie")
-    @app_commands.describe(title="Start typing a movie title to see suggestions")
-    @app_commands.autocomplete(title=movie_search_autocomplete)
-    async def search_cmd(interaction: discord.Interaction, title: str):
-        await interaction.response.defer()
-
+    # Shared movie search logic
+    async def do_movie_search(interaction: discord.Interaction, title: str):
+        """Shared logic for /search and /film commands"""
         movie = await search_movie_async(title)
         if movie:
             # Get detailed info for genres, runtime, etc.
@@ -275,7 +271,7 @@ def setup(bot):
             if reviews:
                 # Add reviewer names to embed
                 reviewers_text = format_reviewers_text(reviews)
-                embed.add_field(name="📝 Reviews", value=reviewers_text, inline=False)
+                embed.add_field(name="\u200b", value=reviewers_text, inline=False)
 
             # Create view with review buttons
             view = SearchReviewView(movie_id, movie_title, str(movie_year))
@@ -284,7 +280,21 @@ def setup(bot):
         else:
             await interaction.followup.send("❌ Movie not found. Try a different search term.")
 
-            
+    # ALL COMMANDS MUST BE INSIDE setup(bot) FUNCTION
+    @bot.tree.command(name="search", description="Search for a movie")
+    @app_commands.describe(title="Start typing a movie title to see suggestions")
+    @app_commands.autocomplete(title=movie_search_autocomplete)
+    async def search_cmd(interaction: discord.Interaction, title: str):
+        await interaction.response.defer()
+        await do_movie_search(interaction, title)
+
+    @bot.tree.command(name="film", description="Search for a movie")
+    @app_commands.describe(title="Start typing a movie title to see suggestions")
+    @app_commands.autocomplete(title=movie_search_autocomplete)
+    async def film_cmd(interaction: discord.Interaction, title: str):
+        await interaction.response.defer()
+        await do_movie_search(interaction, title)
+
     @bot.tree.command(name="reminder_tournament", description="Run the daily tournament reminder check manually")
     async def reminder_tournament(interaction: discord.Interaction):
 

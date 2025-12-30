@@ -432,66 +432,7 @@ def setup(bot):
             else:
                 await interaction.followup.send("❌ Anime not found in your watchlist.")
 
-    @bot.tree.command(name="anime", description="Search for an anime")
-    @app_commands.describe(title="Search for an anime")
-    @app_commands.autocomplete(title=anime_search_autocomplete)
-    async def anime_cmd(interaction: discord.Interaction, title: str):
-        await interaction.response.defer()
-
-        anime = await resolve_anime(title)
-
-        if not anime:
-            return await interaction.followup.send("❌ Anime not found.")
-
-        # Create detailed embed
-        synopsis = anime.get("synopsis", "No synopsis available.")
-        # Remove MAL attribution text
-        synopsis = synopsis.replace("[Written by MAL Rewrite]", "").strip()
-
-        embed = discord.Embed(
-            title=anime["title"],
-            description=synopsis,
-            color=0xe91e63,
-            url=f"https://myanimelist.net/anime/{anime['mal_id']}"
-        )
-
-        if anime.get("title_japanese") and anime["title_japanese"] != anime["title"]:
-            embed.add_field(name="Japanese Title", value=anime["title_japanese"], inline=True)
-        if anime.get("year"):
-            embed.add_field(name="Year", value=anime["year"], inline=True)
-
-        if anime.get("episodes"):
-            embed.add_field(name="Episodes", value=anime["episodes"], inline=True)
-        if anime.get("score"):
-            embed.add_field(name="MAL Score", value=f"⭐ {anime['score']}", inline=True)
-        if anime.get("status"):
-            embed.add_field(name="Status", value=anime["status"], inline=True)
-
-        if anime.get("image_url"):
-            embed.set_image(url=anime["image_url"])
-
-        await interaction.followup.send(embed=embed)
-
-    @bot.tree.command(name="anime_stats", description="View your anime watching statistics")
-    async def anime_stats_cmd(interaction: discord.Interaction):
-        uid = str(interaction.user.id)
-        counts = await get_anime_watchlist_counts(uid)
-
-        embed = discord.Embed(
-            title="🎌 Your Anime Stats",
-            color=0xe91e63
-        )
-        embed.add_field(name="📺 Total in Watchlist", value=counts["total"], inline=True)
-        embed.add_field(name="✅ Anime Watched", value=counts["watched"], inline=True)
-        embed.add_field(name="❌ Still to Watch", value=counts["unwatched"], inline=True)
-
-        if counts["total"] > 0:
-            pct = round(counts["watched"] / counts["total"] * 100)
-            embed.add_field(name="📈 Completion", value=f"{pct}%", inline=True)
-
-        await interaction.response.send_message(embed=embed)
-
-    # ==================== ANIME REVIEWS ====================
+    # ==================== ANIME REVIEW CLASSES ====================
 
     class AnimeReviewModal(discord.ui.Modal):
         """Modal for entering an anime review"""
@@ -609,6 +550,78 @@ def setup(bot):
         async def write_review_button(self, interaction: discord.Interaction, button: discord.ui.Button):
             modal = AnimeReviewModal(self.mal_id, self.anime_title)
             await interaction.response.send_modal(modal)
+
+    # ==================== ANIME SEARCH COMMAND ====================
+
+    @bot.tree.command(name="anime", description="Search for an anime")
+    @app_commands.describe(title="Search for an anime")
+    @app_commands.autocomplete(title=anime_search_autocomplete)
+    async def anime_cmd(interaction: discord.Interaction, title: str):
+        await interaction.response.defer()
+
+        anime = await resolve_anime(title)
+
+        if not anime:
+            return await interaction.followup.send("❌ Anime not found.")
+
+        # Create detailed embed
+        synopsis = anime.get("synopsis", "No synopsis available.")
+        # Remove MAL attribution text
+        synopsis = synopsis.replace("[Written by MAL Rewrite]", "").strip()
+
+        embed = discord.Embed(
+            title=anime["title"],
+            description=synopsis,
+            color=0xe91e63,
+            url=f"https://myanimelist.net/anime/{anime['mal_id']}"
+        )
+
+        if anime.get("title_japanese") and anime["title_japanese"] != anime["title"]:
+            embed.add_field(name="Japanese Title", value=anime["title_japanese"], inline=True)
+        if anime.get("year"):
+            embed.add_field(name="Year", value=anime["year"], inline=True)
+
+        if anime.get("episodes"):
+            embed.add_field(name="Episodes", value=anime["episodes"], inline=True)
+        if anime.get("score"):
+            embed.add_field(name="MAL Score", value=f"⭐ {anime['score']}", inline=True)
+        if anime.get("status"):
+            embed.add_field(name="Status", value=anime["status"], inline=True)
+
+        # Check for reviews
+        reviews = await get_anime_reviews(anime["mal_id"])
+        if reviews:
+            reviewers_text = format_anime_reviewers_text(reviews)
+            embed.add_field(name="\u200b", value=reviewers_text, inline=False)
+
+        if anime.get("image_url"):
+            embed.set_image(url=anime["image_url"])
+
+        # Add review buttons
+        view = AnimeReviewView(anime["mal_id"], anime["title"])
+        message = await interaction.followup.send(embed=embed, view=view)
+        view.message = message
+
+    @bot.tree.command(name="anime_stats", description="View your anime watching statistics")
+    async def anime_stats_cmd(interaction: discord.Interaction):
+        uid = str(interaction.user.id)
+        counts = await get_anime_watchlist_counts(uid)
+
+        embed = discord.Embed(
+            title="🎌 Your Anime Stats",
+            color=0xe91e63
+        )
+        embed.add_field(name="📺 Total in Watchlist", value=counts["total"], inline=True)
+        embed.add_field(name="✅ Anime Watched", value=counts["watched"], inline=True)
+        embed.add_field(name="❌ Still to Watch", value=counts["unwatched"], inline=True)
+
+        if counts["total"] > 0:
+            pct = round(counts["watched"] / counts["total"] * 100)
+            embed.add_field(name="📈 Completion", value=f"{pct}%", inline=True)
+
+        await interaction.response.send_message(embed=embed)
+
+    # ==================== ANIME REVIEW COMMANDS ====================
 
     @bot.tree.command(name="anime_review", description="Write a review for an anime")
     @app_commands.describe(title="Search for an anime to review")
