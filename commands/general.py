@@ -6,8 +6,8 @@ from clients.tmdb import search_movie_async, get_movie_details_async
 from commands.autocomplete import movie_search_autocomplete
 from commands.watchlist import get_movie_reviews, format_reviewers_text, add_movie_review
 
-# Constants - reduced for Pi Zero 2 W memory efficiency
-REVIEW_VIEW_TIMEOUT = 120  # 2 minutes (reduced from 5)
+# Constants - balanced for Pi 5 (4GB RAM)
+REVIEW_VIEW_TIMEOUT = 300  # 5 minutes
 
 
 logger = logging.getLogger(__name__)

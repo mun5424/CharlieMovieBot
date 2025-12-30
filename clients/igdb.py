@@ -31,8 +31,8 @@ _token_expires_at: float = 0
 
 # Search cache with TTL
 _search_cache: Dict[str, tuple] = {}
-CACHE_TTL = 60  # Cache results for 60 seconds
-MAX_CACHE_SIZE = 50
+CACHE_TTL = 120  # Cache results for 2 minutes
+MAX_CACHE_SIZE = 200
 
 
 async def get_session() -> aiohttp.ClientSession:

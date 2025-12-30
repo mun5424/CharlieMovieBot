@@ -238,10 +238,10 @@ class PerformanceOptimizer:
     async def _apply_pi_optimizations(self):
         """Apply Raspberry Pi specific optimizations"""
         self.logger.info("🥧 Raspberry Pi detected - applying optimizations")
-        
-        # More aggressive garbage collection for limited memory
-        gc.set_threshold(500, 8, 8)
-        self.logger.info("🗑️ Set aggressive garbage collection thresholds")
+
+        # Balanced garbage collection for Pi 5 (4GB RAM)
+        gc.set_threshold(700, 10, 10)
+        self.logger.info("🗑️ Set balanced garbage collection thresholds")
         
         # Try to use uvloop for better performance on ARM
         try:
@@ -317,8 +317,8 @@ class OptimizedBot(commands.Bot):
         self.config = config_module
         self.logger = logging.getLogger(__name__)
 
-        # Get performance settings - reduced for Pi Zero 2 W (512MB RAM)
-        max_messages = self._get_config_value('MAX_MESSAGES', 100)  # Reduced from 500
+        # Get performance settings - balanced for Pi 5 (4GB RAM)
+        max_messages = self._get_config_value('MAX_MESSAGES', 500)
         chunk_guilds = self._get_config_value('CHUNK_GUILDS_AT_STARTUP', False)
 
         # Minimal Discord intents for memory efficiency

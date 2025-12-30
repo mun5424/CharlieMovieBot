@@ -24,7 +24,7 @@ from clients.igdb import search_games_async, search_games_autocomplete, get_game
 logger = logging.getLogger(__name__)
 
 # Constants
-GAMELOG_VIEW_TIMEOUT = 120  # 2 minutes
+GAMELOG_VIEW_TIMEOUT = 300  # 5 minutes
 GAMELOG_PAGE_SIZE = 15
 AUTOCOMPLETE_LIMIT = 10
 

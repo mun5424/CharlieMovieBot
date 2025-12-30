@@ -26,8 +26,8 @@ _session: Optional[aiohttp.ClientSession] = None
 
 # Search cache with TTL (query -> (results, timestamp))
 _search_cache: Dict[str, tuple] = {}
-CACHE_TTL = 30  # Cache results for 30 seconds (reduced for Pi memory)
-MAX_CACHE_SIZE = 50  # Maximum cached queries (reduced for Pi memory)
+CACHE_TTL = 120  # Cache results for 2 minutes
+MAX_CACHE_SIZE = 200  # Maximum cached queries
 
 
 async def get_session() -> aiohttp.ClientSession:

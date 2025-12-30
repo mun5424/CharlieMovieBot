@@ -52,7 +52,7 @@ async def resolve_anime(value: str) -> Optional[Dict]:
     return results[0] if results else None
 
 # Constants
-ANIME_VIEW_TIMEOUT = 120  # 2 minutes
+ANIME_VIEW_TIMEOUT = 300  # 5 minutes
 ANIME_PAGE_SIZE = 15
 AUTOCOMPLETE_LIMIT = 10
 

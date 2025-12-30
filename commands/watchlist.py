@@ -31,10 +31,10 @@ from db import (
 
 logger = logging.getLogger(__name__)
 
-# Constants - reduced for Pi Zero 2 W memory efficiency
-SUGGESTION_VIEW_TIMEOUT = 120  # 2 minutes (reduced from 5)
+# Constants - balanced for Pi 5 (4GB RAM)
+SUGGESTION_VIEW_TIMEOUT = 300  # 5 minutes
 WATCHLIST_PAGE_SIZE = 15  # Movies per page in watchlist
-REVIEW_VIEW_TIMEOUT = 120  # 2 minutes (reduced from 5)
+REVIEW_VIEW_TIMEOUT = 300  # 5 minutes
 
 
 # Re-export from db for compatibility with general.py imports
