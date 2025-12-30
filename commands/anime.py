@@ -736,20 +736,53 @@ def setup(bot):
             # Batch import (single transaction, much faster)
             results = await batch_import_anime(uid, import_list)
 
-            # Build result message
-            result_parts = []
-            if results["added"] > 0:
-                result_parts.append(f"**{results['added']}** anime added")
-            if results["watched"] > 0:
-                result_parts.append(f"**{results['watched']}** marked as watched")
-            if results["skipped"] > 0:
-                result_parts.append(f"**{results['skipped']}** already in list")
-
-            if result_parts:
-                result_msg = ", ".join(result_parts)
-                await status_msg.edit(content=f"✅ Import complete! {result_msg}.")
-            else:
+            # Build result embed with title lists
+            if results["added"] == 0 and results["skipped"] == 0:
                 await status_msg.edit(content="ℹ️ No new anime to import.")
+            else:
+                # Build summary line
+                summary_parts = []
+                if results["added"] > 0:
+                    summary_parts.append(f"**{results['added']}** added")
+                if results["watched"] > 0:
+                    summary_parts.append(f"**{results['watched']}** marked as watched")
+                if results["skipped"] > 0:
+                    summary_parts.append(f"**{results['skipped']}** already in list")
+                summary = ", ".join(summary_parts)
+
+                embed = discord.Embed(
+                    title=f"📥 MAL Import Complete",
+                    description=f"Imported from **{username}**'s list\n{summary}",
+                    color=0x2e51a2  # MAL blue
+                )
+
+                # Add titles (truncate if too many)
+                if results["added_titles"]:
+                    added_list = results["added_titles"]
+                    if len(added_list) > 20:
+                        display_titles = added_list[:20]
+                        added_text = "\n".join(f"• {t}" for t in display_titles)
+                        added_text += f"\n... and {len(added_list) - 20} more"
+                    else:
+                        added_text = "\n".join(f"• {t}" for t in added_list)
+                    # Embed field value max is 1024 chars
+                    if len(added_text) > 1024:
+                        added_text = added_text[:1020] + "..."
+                    embed.add_field(name="✅ Added", value=added_text, inline=False)
+
+                if results["skipped_titles"]:
+                    skipped_list = results["skipped_titles"]
+                    if len(skipped_list) > 15:
+                        display_titles = skipped_list[:15]
+                        skipped_text = "\n".join(f"• {t}" for t in display_titles)
+                        skipped_text += f"\n... and {len(skipped_list) - 15} more"
+                    else:
+                        skipped_text = "\n".join(f"• {t}" for t in skipped_list)
+                    if len(skipped_text) > 1024:
+                        skipped_text = skipped_text[:1020] + "..."
+                    embed.add_field(name="⏭️ Already in list", value=skipped_text, inline=False)
+
+                await status_msg.edit(content=None, embed=embed)
 
         except Exception as e:
             logger.error(f"Error importing MAL list: {e}")

@@ -244,7 +244,7 @@ async def mark_anime_as_unwatched(user_id: str, mal_id: int) -> bool:
         return cursor.rowcount > 0
 
 
-async def batch_import_anime(user_id: str, anime_list: List[Dict]) -> Dict[str, int]:
+async def batch_import_anime(user_id: str, anime_list: List[Dict]) -> Dict:
     """
     Batch import anime to user's watchlist efficiently.
 
@@ -254,7 +254,11 @@ async def batch_import_anime(user_id: str, anime_list: List[Dict]) -> Dict[str, 
                    Each dict can have 'mark_watched': True to mark as watched
 
     Returns:
-        Dict with counts: {"added": X, "skipped": Y, "watched": Z}
+        Dict with counts and title lists:
+        {
+            "added": int, "skipped": int, "watched": int,
+            "added_titles": List[str], "skipped_titles": List[str]
+        }
     """
     db = await get_db()
     _lock = get_lock()
@@ -262,6 +266,8 @@ async def batch_import_anime(user_id: str, anime_list: List[Dict]) -> Dict[str, 
     added = 0
     skipped = 0
     watched = 0
+    added_titles = []
+    skipped_titles = []
     now = time.time()
 
     async with _lock:
@@ -276,8 +282,11 @@ async def batch_import_anime(user_id: str, anime_list: List[Dict]) -> Dict[str, 
         # Prepare batch inserts
         for anime in anime_list:
             mal_id = anime.get("mal_id")
+            title = anime.get("title", "Unknown")
+
             if not mal_id or mal_id in existing_ids:
                 skipped += 1
+                skipped_titles.append(title)
                 continue
 
             mark_watched = anime.get("mark_watched", False)
@@ -292,7 +301,7 @@ async def batch_import_anime(user_id: str, anime_list: List[Dict]) -> Dict[str, 
                     (
                         user_id,
                         mal_id,
-                        anime.get("title"),
+                        title,
                         anime.get("title_japanese"),
                         anime.get("episodes"),
                         anime.get("status"),
@@ -305,15 +314,23 @@ async def batch_import_anime(user_id: str, anime_list: List[Dict]) -> Dict[str, 
                     )
                 )
                 added += 1
+                added_titles.append(title)
                 if mark_watched:
                     watched += 1
             except Exception:
                 skipped += 1
+                skipped_titles.append(title)
 
         # Single commit for all inserts
         await db.commit()
 
-    return {"added": added, "skipped": skipped, "watched": watched}
+    return {
+        "added": added,
+        "skipped": skipped,
+        "watched": watched,
+        "added_titles": added_titles,
+        "skipped_titles": skipped_titles
+    }
 
 
 # ============== Anime Review Operations ==============
