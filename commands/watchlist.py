@@ -215,7 +215,7 @@ def setup(bot):
                 elif self.filter_mode == "watched":
                     embed.add_field(name="\u200b", value="📭 No movies watched yet.", inline=False)
                 else:
-                    embed.add_field(name="\u200b", value="📭 Watchlist is empty. Use `/add` to add movies!", inline=False)
+                    embed.add_field(name="\u200b", value="📭 Watchlist is empty. Use `/movie_add` to add movies!", inline=False)
             else:
                 # Paginate
                 start = self.current_page * WATCHLIST_PAGE_SIZE
@@ -309,7 +309,7 @@ def setup(bot):
                 embed = self.create_embed()
                 await interaction.response.edit_message(embed=embed, view=self)
 
-    @bot.tree.command(name="add", description="Add a movie to your watchlist")
+    @bot.tree.command(name="movie_add", description="Add a movie to your watchlist")
     @app_commands.describe(title="Start typing a movie title to see suggestions")
     @app_commands.autocomplete(title=movie_search_autocomplete)
     async def add_cmd(interaction: discord.Interaction, title: str):
@@ -336,7 +336,7 @@ def setup(bot):
 
         await interaction.followup.send(embed=embed)
 
-    @bot.tree.command(name="suggest", description="Suggest a movie to another user's watchlist")
+    @bot.tree.command(name="movie_suggest", description="Suggest a movie to another user's watchlist")
     @app_commands.describe(
         user="The user to suggest the movie to",
         title="Start typing a movie title to see suggestions"
@@ -375,7 +375,7 @@ def setup(bot):
         # Send confirmation to suggester
         await interaction.followup.send(f"📬 Suggested **{mov['title']} ({mov['year']})** to {user.display_name}!")
 
-    @bot.tree.command(name="pending", description="View your pending movie suggestions")
+    @bot.tree.command(name="movie_pending", description="View your pending movie suggestions")
     async def pending_cmd(interaction: discord.Interaction):
         suggestions = await get_user_pending(str(interaction.user.id))
 
@@ -402,13 +402,13 @@ def setup(bot):
 
         embed.add_field(
             name="💡 Next Steps",
-            value="Use `/approve <movie>` to add to watchlist\nUse `/decline <movie>` to reject suggestion",
+            value="Use `/movie_approve <movie>` to add to watchlist\nUse `/movie_decline <movie>` to reject suggestion",
             inline=False
         )
 
         await interaction.response.send_message(embed=embed)
 
-    @bot.tree.command(name="approve", description="Approve a pending movie suggestion")
+    @bot.tree.command(name="movie_approve", description="Approve a pending movie suggestion")
     @app_commands.describe(title="Select a movie from your pending suggestions")
     @app_commands.autocomplete(title=user_pending_autocomplete)
     async def approve_cmd(interaction: discord.Interaction, title: str):
@@ -440,7 +440,7 @@ def setup(bot):
 
         await interaction.followup.send(f"✅ {interaction.user.display_name} approved **{mov['title']} ({mov['year']})** from {from_user} and added it to their watchlist!")
 
-    @bot.tree.command(name="decline", description="Decline a pending movie suggestion")
+    @bot.tree.command(name="movie_decline", description="Decline a pending movie suggestion")
     @app_commands.describe(title="Select a movie from your pending suggestions")
     @app_commands.autocomplete(title=user_pending_autocomplete)
     async def decline_cmd(interaction: discord.Interaction, title: str):
@@ -641,7 +641,7 @@ def setup(bot):
             embed = self.create_embed()
             await interaction.response.edit_message(embed=embed, view=self)
 
-    @bot.tree.command(name="watchlist", description="View a user's watchlist")
+    @bot.tree.command(name="movie_watchlist", description="View a user's watchlist")
     @app_commands.describe(user="Whose watchlist do you want to view?")
     async def watchlist_cmd(interaction: discord.Interaction, user: Optional[discord.User] = None):
         await interaction.response.defer()
@@ -672,7 +672,7 @@ def setup(bot):
             sugg_message = await interaction.followup.send(embed=sugg_embed, view=sugg_view, ephemeral=True)
             sugg_view.message = sugg_message
 
-    @bot.tree.command(name="watched", description="Mark any movie as watched (searches TMDB)")
+    @bot.tree.command(name="movie_watched", description="Mark any movie as watched (searches TMDB)")
     @app_commands.describe(title="Search for a movie to mark as watched")
     @app_commands.autocomplete(title=movie_search_autocomplete)
     async def watched_cmd(interaction: discord.Interaction, title: str):
@@ -710,7 +710,7 @@ def setup(bot):
         else:
             await interaction.followup.send("❌ Something went wrong. Please try again.")
 
-    @bot.tree.command(name="unwatch", description="Mark a movie as unwatched (keeps it in watchlist)")
+    @bot.tree.command(name="movie_unwatch", description="Mark a movie as unwatched (keeps it in watchlist)")
     @app_commands.describe(title="Select a movie from your watchlist")
     @app_commands.autocomplete(title=user_watchlist_autocomplete)
     async def unwatch_cmd(interaction: discord.Interaction, title: str):
@@ -734,7 +734,7 @@ def setup(bot):
         await mark_as_unwatched(uid, mov["id"])
         await interaction.followup.send(f"↩️ {interaction.user.display_name} unmarked **{mov['title']} ({mov['year']})** as watched. It's still in your watchlist.")
 
-    @bot.tree.command(name="remove", description="Remove a movie from your watchlist")
+    @bot.tree.command(name="movie_remove", description="Remove a movie from your watchlist")
     @app_commands.describe(title="Select a movie from your watchlist")
     @app_commands.autocomplete(title=user_watchlist_autocomplete)
     async def remove_cmd(interaction: discord.Interaction, title: str):
@@ -753,7 +753,7 @@ def setup(bot):
             await interaction.followup.send("❌ Movie not found in your watchlist.")
 
 
-    @bot.tree.command(name="stats", description="View your movie watching statistics")
+    @bot.tree.command(name="movie_stats", description="View your movie watching statistics")
     async def stats_cmd(interaction: discord.Interaction):
         uid = str(interaction.user.id)
         counts = await get_watchlist_counts(uid)

@@ -1,0 +1,192 @@
+{
+    "version": "1.0",
+    "generated_target_count": 500,
+    "categories": {
+      "cpu": {
+        "count_target": 60,
+        "vendors": {
+          "AMD": {
+            "families": [
+              { "model": "Ryzen 5 5600", "socket": "AM4" },
+              { "model": "Ryzen 7 5700X", "socket": "AM4" },
+              { "model": "Ryzen 7 5800X3D", "socket": "AM4" },
+              { "model": "Ryzen 5 7600", "socket": "AM5" },
+              { "model": "Ryzen 7 7700", "socket": "AM5" },
+              { "model": "Ryzen 7 7800X3D", "socket": "AM5" },
+              { "model": "Ryzen 9 7900X", "socket": "AM5" },
+              { "model": "Ryzen 9 7950X", "socket": "AM5" }
+            ]
+          },
+          "Intel": {
+            "families": [
+              { "model": "i5-12400", "socket": "LGA1700" },
+              { "model": "i5-12600K", "socket": "LGA1700" },
+              { "model": "i5-13400", "socket": "LGA1700" },
+              { "model": "i5-13600K", "socket": "LGA1700" },
+              { "model": "i5-14600K", "socket": "LGA1700" },
+              { "model": "i7-13700K", "socket": "LGA1700" },
+              { "model": "i7-14700K", "socket": "LGA1700" },
+              { "model": "i9-13900K", "socket": "LGA1700" }
+            ]
+          }
+        },
+        "rules": {
+          "condition": ["new"],
+          "must_not_include": ["bundle", "combo", "for parts"]
+        }
+      },
+  
+      "gpu": {
+        "count_target": 120,
+        "mode": "chip_sku",
+        "vendors": {
+          "NVIDIA": {
+            "chips": [
+              "RTX 3060 12GB",
+              "RTX 3060 Ti",
+              "RTX 3070",
+              "RTX 3070 Ti",
+              "RTX 3080",
+              "RTX 4060",
+              "RTX 4060 Ti 16GB",
+              "RTX 4070",
+              "RTX 4070 SUPER",
+              "RTX 4070 Ti",
+              "RTX 4080"
+            ]
+          },
+          "AMD": {
+            "chips": [
+              "RX 6600",
+              "RX 6650 XT",
+              "RX 6700 XT",
+              "RX 6750 XT",
+              "RX 6800",
+              "RX 6800 XT",
+              "RX 7600",
+              "RX 7700 XT",
+              "RX 7800 XT",
+              "RX 7900 XT",
+              "RX 7900 XTX"
+            ]
+          }
+        },
+        "rules": {
+          "condition": ["new"],
+          "require_vram_match": true,
+          "seller_trust_required": true,
+          "must_not_include": ["laptop", "bare pcb", "mining", "for parts"]
+        }
+      },
+  
+      "ssd": {
+        "count_target": 80,
+        "interfaces": ["NVMe"],
+        "capacities_tb": [1, 2, 4],
+        "models": [
+          "Samsung 980 PRO",
+          "Samsung 990 PRO",
+          "WD Black SN850X",
+          "Crucial P5 Plus",
+          "Kingston KC3000",
+          "Sabrent Rocket 4 Plus",
+          "Solidigm P44 Pro",
+          "TeamGroup MP44"
+        ],
+        "rules": {
+          "condition": ["new"],
+          "must_not_include": ["enclosure", "external"]
+        }
+      },
+  
+      "ram": {
+        "count_target": 60,
+        "standards": {
+          "DDR5": {
+            "kits_gb": [32, 64],
+            "speeds": [5600, 6000],
+            "latency_max": 36
+          },
+          "DDR4": {
+            "kits_gb": [32],
+            "speeds": [3200, 3600],
+            "latency_max": 18
+          }
+        },
+        "brands": [
+          "G.Skill",
+          "Corsair",
+          "Kingston",
+          "TeamGroup",
+          "Crucial"
+        ],
+        "rules": {
+          "condition": ["new"],
+          "must_include": ["kit"],
+          "must_not_include": ["single stick", "laptop"]
+        }
+      },
+  
+      "motherboard": {
+        "count_target": 70,
+        "platforms": {
+          "AM5": ["B650", "X670"],
+          "AM4": ["B550"],
+          "Intel": ["B760", "Z790"]
+        },
+        "brands": ["ASUS", "MSI", "Gigabyte", "ASRock"],
+        "rules": {
+          "condition": ["new"],
+          "must_not_include": ["bundle"]
+        }
+      },
+  
+      "psu": {
+        "count_target": 45,
+        "wattages": [650, 750, 850, 1000],
+        "certifications": ["Gold", "Platinum"],
+        "standards": ["ATX 3.0", "ATX 3.1"],
+        "brands": [
+          "Corsair RMx",
+          "Seasonic Focus",
+          "EVGA SuperNOVA",
+          "be quiet! Straight Power",
+          "MSI MPG"
+        ],
+        "rules": {
+          "condition": ["new"],
+          "must_not_include": ["used", "refurb"]
+        }
+      },
+  
+      "cooler": {
+        "count_target": 35,
+        "types": ["Air", "AIO"],
+        "brands": [
+          "Noctua",
+          "be quiet!",
+          "DeepCool",
+          "Arctic",
+          "Corsair"
+        ],
+        "rules": {
+          "condition": ["new"]
+        }
+      },
+  
+      "case": {
+        "count_target": 30,
+        "brands": [
+          "Lian Li",
+          "Fractal Design",
+          "NZXT",
+          "Corsair",
+          "Phanteks"
+        ],
+        "rules": {
+          "condition": ["new"],
+          "must_not_include": ["bare chassis"]
+        }
+      }
+    }
+  }
