@@ -354,8 +354,8 @@ def setup(bot):
                 "`/movie_pending` - View suggestions\n"
                 "`/movie_approve` `/movie_decline` - Handle suggestions\n"
                 "`/movie_stats` - View your stats\n"
-                "`/review_movie` - Write a review\n"
-                "`/review_random` - Random review"
+                "`/movie_review` - Write a review\n"
+                "`/movie_review_random` - Random review"
             ),
             inline=True
         )
@@ -402,4 +402,4 @@ def setup(bot):
 
         embed.set_footer(text="💡 Tip: Commands have autocomplete - just start typing!")
 
-        await interaction.response.send_message(embed=embed)
+        await interaction.response.send_message(embed=embed, ephemeral=True)

@@ -965,7 +965,7 @@ def setup(bot):
             modal = ReviewModal(self.movie_id, self.movie_title, self.movie_year)
             await interaction.response.send_modal(modal)
 
-    @bot.tree.command(name="review_movie", description="Write a review for a movie")
+    @bot.tree.command(name="movie_review", description="Write a review for a movie")
     @app_commands.describe(title="Start typing a movie title to see suggestions")
     @app_commands.autocomplete(title=movie_search_autocomplete)
     async def review_movie_cmd(interaction: discord.Interaction, title: str):
@@ -997,7 +997,7 @@ def setup(bot):
         message = await interaction.followup.send(embed=embed, view=view, ephemeral=True)
         view.message = message
 
-    @bot.tree.command(name="review_random", description="Get a random movie review for inspiration")
+    @bot.tree.command(name="movie_review_random", description="Get a random movie review for inspiration")
     async def review_random_cmd(interaction: discord.Interaction):
         await interaction.response.defer()
 
@@ -1005,7 +1005,7 @@ def setup(bot):
 
         if not result:
             return await interaction.followup.send(
-                "📭 No reviews have been written yet. Be the first to write one with `/review_movie`!"
+                "📭 No reviews have been written yet. Be the first to write one with `/movie_review`!"
             )
 
         review = result["review"]
