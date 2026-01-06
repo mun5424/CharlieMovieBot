@@ -375,95 +375,20 @@ def setup(bot):
         # Send confirmation to suggester
         await interaction.followup.send(f"📬 Suggested **{mov['title']} ({mov['year']})** to {user.display_name}!")
 
-    @bot.tree.command(name="movie_pending", description="View your pending movie suggestions")
+    @bot.tree.command(name="movie_pending", description="View and manage your pending movie suggestions")
     async def pending_cmd(interaction: discord.Interaction):
         suggestions = await get_user_pending(str(interaction.user.id))
 
         if not suggestions:
             return await interaction.response.send_message("📭 You have no pending movie suggestions.")
 
-        embed = discord.Embed(
-            title=f"📬 {interaction.user.display_name}'s Pending Suggestions",
-            description=f"You have {len(suggestions)} pending suggestion{'s' if len(suggestions) != 1 else ''}",
-            color=0xf39c12
-        )
+        # Use interactive SuggestionView with buttons
+        view = SuggestionView(str(interaction.user.id), suggestions.copy())
+        view.update_buttons()
+        embed = view.create_embed()
 
-        suggestion_list = []
-        for i, suggestion in enumerate(suggestions, 1):
-            movie = suggestion["movie"]
-            from_user = suggestion.get("from_username", "Unknown")
-            suggestion_list.append(f"{i}. **{movie['title']} ({movie['year']})** - from {from_user}")
-
-        embed.add_field(
-            name="🎬 Movies",
-            value="\n".join(suggestion_list),
-            inline=False
-        )
-
-        embed.add_field(
-            name="💡 Next Steps",
-            value="Use `/movie_approve <movie>` to add to watchlist\nUse `/movie_decline <movie>` to reject suggestion",
-            inline=False
-        )
-
-        await interaction.response.send_message(embed=embed)
-
-    @bot.tree.command(name="movie_approve", description="Approve a pending movie suggestion")
-    @app_commands.describe(title="Select a movie from your pending suggestions")
-    @app_commands.autocomplete(title=user_pending_autocomplete)
-    async def approve_cmd(interaction: discord.Interaction, title: str):
-        await interaction.response.defer()
-
-        uid = str(interaction.user.id)
-        mov = await search_movie_async(title)
-
-        if not mov:
-            return await interaction.followup.send("❌ Movie not found.")
-
-        # Find the suggestion in pending list by ID
-        pending_suggestion = await get_pending_by_movie_id(uid, mov["id"])
-
-        if not pending_suggestion:
-            return await interaction.followup.send("❌ No pending suggestion found for this movie.")
-
-        from_user = pending_suggestion.get("from_username", "Unknown")
-
-        # Check if already in watchlist
-        if await is_in_watchlist(uid, mov["id"]):
-            # Remove from pending but don't add duplicate
-            await remove_pending_by_movie_id(uid, mov["id"])
-            return await interaction.followup.send(f"⚠️ **{mov['title']} ({mov['year']})** is already in your watchlist. Removed from pending.")
-
-        # Remove from pending and add to watchlist
-        await remove_pending_by_movie_id(uid, mov["id"])
-        await add_to_watchlist(uid, mov)
-
-        await interaction.followup.send(f"✅ {interaction.user.display_name} approved **{mov['title']} ({mov['year']})** from {from_user} and added it to their watchlist!")
-
-    @bot.tree.command(name="movie_decline", description="Decline a pending movie suggestion")
-    @app_commands.describe(title="Select a movie from your pending suggestions")
-    @app_commands.autocomplete(title=user_pending_autocomplete)
-    async def decline_cmd(interaction: discord.Interaction, title: str):
-        await interaction.response.defer()
-
-        uid = str(interaction.user.id)
-        mov = await search_movie_async(title)
-
-        if not mov:
-            return await interaction.followup.send("❌ Movie not found.")
-
-        # Find the suggestion in pending list by ID
-        pending_suggestion = await get_pending_by_movie_id(uid, mov["id"])
-
-        if not pending_suggestion:
-            return await interaction.followup.send("❌ No pending suggestion found for this movie.")
-
-        from_user = pending_suggestion.get("from_username", "Unknown")
-
-        # Remove from pending
-        await remove_pending_by_movie_id(uid, mov["id"])
-
-        await interaction.followup.send(f"❌ {interaction.user.display_name} Declined **{mov['title']} ({mov['year']})** from {from_user}!")
+        await interaction.response.send_message(embed=embed, view=view)
+        view.message = await interaction.original_response()
 
     # View class for handling suggestion buttons
     class SuggestionView(discord.ui.View):

@@ -336,70 +336,53 @@ def setup(bot):
     async def help_cmd(interaction: discord.Interaction):
         embed = discord.Embed(
             title="📚 Charlie Bot Commands",
-            description="Your personal tracker for movies, anime, and games!",
+            description="Your personal tracker for movies, anime, games backlog!",
             color=0x5865F2  # Discord blurple
         )
 
-        # Movies section
+        # Left column: Movies & Anime
         embed.add_field(
             name="🎬 MOVIES",
             value=(
-                "`/movie` `/film` - Search for a movie\n"
-                "`/movie_add` - Add to watchlist\n"
-                "`/movie_remove` - Remove from watchlist\n"
-                "`/movie_watchlist` - View watchlist\n"
-                "`/movie_watched` - Mark as watched\n"
-                "`/movie_unwatch` - Mark as unwatched\n"
-                "`/movie_suggest` - Suggest to a friend\n"
-                "`/movie_pending` - View suggestions\n"
-                "`/movie_approve` `/movie_decline` - Handle suggestions\n"
-                "`/movie_stats` - View your stats\n"
-                "`/movie_review` - Write a review\n"
-                "`/movie_review_random` - Random review"
+                "`/movie <title>` `/film <title>`\n"
+                "`/movie_add <title>` `/movie_remove <title>`\n"
+                "`/movie_watchlist` `/movie_stats`\n"
+                "`/movie_watched <title>` `/movie_unwatch <title>`\n"
+                "`/movie_suggest <user> <title>`\n"
+                "`/movie_pending` - Review suggestions\n"
+                "`/movie_review <title>` `/movie_review_random`\n"
+                "\n"
+                "**📺 ANIME**\n"
+                "`/anime <title>` `/anime_import <user>`\n"
+                "`/anime_add <title>` `/anime_remove <title>`\n"
+                "`/anime_watchlist` `/anime_stats`\n"
+                "`/anime_watched <title>` `/anime_unwatch <title>`\n"
+                "`/anime_review <title>` `/anime_review_random`"
             ),
             inline=True
         )
 
-        # Anime section
-        embed.add_field(
-            name="📺 ANIME",
-            value=(
-                "`/anime` - Search for an anime\n"
-                "`/anime_add` - Add to watchlist\n"
-                "`/anime_remove` - Remove from watchlist\n"
-                "`/anime_watchlist` - View watchlist\n"
-                "`/anime_watched` - Mark as watched\n"
-                "`/anime_unwatch` - Mark as unwatched\n"
-                "`/anime_import` - Import from MAL\n"
-                "`/anime_stats` - View your stats\n"
-                "`/anime_review` - Write a review\n"
-                "`/anime_review_random` - Random review\n"
-                "\u200b\n"
-                "\u200b"
-            ),
-            inline=True
-        )
-
-        # Games section
+        # Right column: Games, Food & Trivia
         embed.add_field(
             name="🎮 GAMES",
             value=(
-                "`/game` - Search for a game\n"
-                "`/game_add` - Add to backlog\n"
-                "`/game_remove` - Remove from log\n"
-                "`/gamelog` - View game log\n"
-                "`/game_played` - Mark as played\n"
-                "`/game_unplay` - Mark as unplayed\n"
-                "`/game_stats` - View your stats\n"
-                "`/game_review` - Write a review\n"
-                "`/game_review_random` - Random review\n"
-                "\u200b\n"
-                "\u200b\n"
-                "\u200b"
+                "`/game <title>`\n"
+                "`/game_add <title>` `/game_remove <title>`\n"
+                "`/gamelog` `/game_stats`\n"
+                "`/game_played <title>` `/game_unplay <title>`\n"
+                "`/game_review <title>` `/game_review_random`\n"
+                "\n"
+                "**🍔 FOOD**\n"
+                "`/food` `/food <name>`\n"
+                "\n"
+                "**🧠 TRIVIA**\n"
+                "`/trivia` - Start a question\n"
+                "`/trivia_leaderboard` `/trivia_stats`\n"
+                "`/trivia_scoring` `/hall_of_fame`"
             ),
             inline=True
         )
 
-        embed.set_footer(text="💡 Tip: Commands have autocomplete - just start typing!")
+        embed.set_footer(text="💡 Commands have autocomplete - just start typing!")
 
         await interaction.response.send_message(embed=embed, ephemeral=True)

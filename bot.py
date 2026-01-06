@@ -54,6 +54,7 @@ class BotManager:
         try:
             # Import command modules
             from commands import general, watchlist, anime, gamelog
+            from food import commands as food_commands
             from trivia.trivia import TriviaCog
 
             # Load traditional commands
@@ -61,7 +62,8 @@ class BotManager:
             watchlist.setup(self.bot)
             anime.setup(self.bot)
             gamelog.setup(self.bot)
-            self.logger.info("✅ Commands loaded (general, watchlist, anime, gamelog)")
+            food_commands.setup(self.bot)
+            self.logger.info("✅ Commands loaded (general, watchlist, anime, gamelog, food)")
             
             # Load trivia cog
             trivia_cog = TriviaCog(self.bot)
@@ -126,6 +128,15 @@ class BotManager:
                 self.logger.info("✅ SQLite database initialized")
             except Exception as e:
                 self.logger.error(f"❌ Failed to initialize SQLite database: {e}")
+
+            # Initialize food database
+            try:
+                from food.db import get_food_db, close_food_db
+                await get_food_db()
+                self.bot.add_shutdown_handler(close_food_db)
+                self.logger.info("✅ Food database initialized")
+            except Exception as e:
+                self.logger.warning(f"⚠️ Food database not available: {e}")
 
             # Pre-warm TMDB session to avoid first-request latency
             try:
