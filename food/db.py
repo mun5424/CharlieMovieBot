@@ -117,7 +117,7 @@ async def get_random_food() -> Optional[Dict[str, Any]]:
             json_extract(fn.raw_json, '$.food_category') as food_category
         FROM food_items fi
         LEFT JOIN food_nutrition fn ON fi.id = fn.food_item_id
-        WHERE fn.calories IS NOT NULL
+        WHERE fn.calories > 300
         ORDER BY RANDOM()
         LIMIT 1
     """)

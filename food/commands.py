@@ -64,10 +64,17 @@ def create_food_embed(food: dict) -> discord.Embed:
     name = food.get("name", "Unknown Item")
     calories = food.get("calories")
     serving = food.get("serving_size") or "1 serving"
+    category = food.get("food_category")
+
+    # Build description with optional category above
+    desc_parts = []
+    if category:
+        desc_parts.append(f"*{category}*")
+    desc_parts.append(f"**{vendor}** • {serving}")
 
     embed = discord.Embed(
         title=f"{name}",
-        description=f"**{vendor}** • {serving}",
+        description="\n".join(desc_parts),
         color=get_calorie_color(calories)
     )
 
@@ -126,15 +133,6 @@ def create_food_embed(food: dict) -> discord.Embed:
         value=format_nutrient(food.get("sodium_mg"), "mg", "sodium_mg"),
         inline=True
     )
-
-    # Add food category if available
-    category = food.get("food_category")
-    if category:
-        embed.add_field(
-            name="\u200b",
-            value=f"📁 *{category}*",
-            inline=False
-        )
 
     # Add logo if available
     logo_url = food.get("logo_url")

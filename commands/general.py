@@ -340,47 +340,81 @@ def setup(bot):
             color=0x5865F2  # Discord blurple
         )
 
-        # Left column: Movies & Anime
+        # Movies section
         embed.add_field(
             name="🎬 MOVIES",
             value=(
-                "`/movie <title>` `/film <title>`\n"
-                "`/movie_add <title>` `/movie_remove <title>`\n"
-                "`/movie_watchlist` `/movie_stats`\n"
-                "`/movie_watched <title>` `/movie_unwatch <title>`\n"
-                "`/movie_suggest <user> <title>`\n"
-                "`/movie_pending` - Review suggestions\n"
-                "`/movie_review <title>` `/movie_review_random`\n"
-                "\n"
-                "**📺 ANIME**\n"
-                "`/anime <title>` `/anime_import <user>`\n"
-                "`/anime_add <title>` `/anime_remove <title>`\n"
-                "`/anime_watchlist` `/anime_stats`\n"
-                "`/anime_watched <title>` `/anime_unwatch <title>`\n"
-                "`/anime_review <title>` `/anime_review_random`"
+                "`/movie` or `/film <title>` - look up movie info\n"
+                "`/movie_add <title>` - add to your watchlist\n"
+                "`/movie_remove <title>` - remove from watchlist\n"
+                "`/movie_watchlist` - view your watchlist\n"
+                "`/movie_watched <title>` - mark as watched\n"
+                "`/movie_unwatch <title>` - mark as unwatched\n"
+                "`/movie_suggest <user> <title>` - suggest to a friend\n"
+                "`/movie_pending` - view/manage suggestions\n"
+                "`/movie_review <title>` - write a review\n"
+                "`/movie_review_random` - see a random review\n"
+                "`/movie_stats` - view stats"
             ),
-            inline=True
+            inline=False
         )
 
-        # Right column: Games, Food & Trivia
+        # Anime section
+        embed.add_field(
+            name="📺 ANIME",
+            value=(
+                "`/anime <title>` - look up anime info\n"
+                "`/anime_add <title>` - add to your watchlist\n"
+                "`/anime_remove <title>` - remove from watchlist\n"
+                "`/anime_watchlist` - view your watchlist\n"
+                "`/anime_watched <title>` - mark as watched\n"
+                "`/anime_unwatch <title>` - mark as unwatched\n"
+                "`/anime_import <mal_user>` - import from MAL\n"
+                "`/anime_review <title>` - write a review\n"
+                "`/anime_review_random` - see a random review\n"
+                "`/anime_stats` - view stats"
+            ),
+            inline=False
+        )
+
+        # Games section
         embed.add_field(
             name="🎮 GAMES",
             value=(
-                "`/game <title>`\n"
-                "`/game_add <title>` `/game_remove <title>`\n"
-                "`/gamelog` `/game_stats`\n"
-                "`/game_played <title>` `/game_unplay <title>`\n"
-                "`/game_review <title>` `/game_review_random`\n"
-                "\n"
-                "**🍔 FOOD**\n"
-                "`/food` `/food <name>`\n"
-                "\n"
-                "**🧠 TRIVIA**\n"
-                "`/trivia` - Start a question\n"
-                "`/trivia_leaderboard` `/trivia_stats`\n"
-                "`/trivia_scoring` `/hall_of_fame`"
+                "`/game <title>` - look up game info\n"
+                "`/game_add <title>` - add to your backlog\n"
+                "`/game_remove <title>` - remove from backlog\n"
+                "`/gamelog` - view your backlog\n"
+                "`/game_played <title>` - mark as played\n"
+                "`/game_unplay <title>` - mark as unplayed\n"
+                "`/game_review <title>` - write a review\n"
+                "`/game_review_random` - see a random review\n"
+                "`/game_stats` - view stats"
             ),
-            inline=True
+            inline=False
+        )
+
+        # Food section
+        embed.add_field(
+            name="🍔 FOOD",
+            value=(
+                "`/food` - random food nutrition info\n"
+                "`/food <name>` - look up specific item"
+            ),
+            inline=False
+        )
+
+        # Trivia section
+        embed.add_field(
+            name="🧠 TRIVIA",
+            value=(
+                "`/trivia` - start a trivia question\n"
+                "`/trivia_leaderboard` - view top players\n"
+                "`/trivia_stats` - view your stats\n"
+                "`/trivia_scoring` - how scoring works\n"
+                "`/hall_of_fame` - best performances"
+            ),
+            inline=False
         )
 
         embed.set_footer(text="💡 Commands have autocomplete - just start typing!")
