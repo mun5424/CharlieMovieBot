@@ -399,7 +399,8 @@ def setup(bot):
             name="🍔 FOOD",
             value=(
                 "`/food` - random food nutrition info\n"
-                "`/food <name>` - look up specific item"
+                "`/food <name>` - look up specific item\n"
+                "`/food restaurant:<name>` - random from restaurant"
             ),
             inline=False
         )

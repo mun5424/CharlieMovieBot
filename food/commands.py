@@ -5,7 +5,7 @@ from typing import Optional
 import discord
 from discord import app_commands
 
-from food.db import search_food, get_random_food, get_food_by_id
+from food.db import search_food, get_random_food, get_food_by_id, get_vendors
 
 logger = logging.getLogger(__name__)
 
@@ -145,14 +145,50 @@ def create_food_embed(food: dict) -> discord.Embed:
 def setup(bot):
     logger.info("Setting up food commands...")
 
+    # Cache for restaurant list
+    _vendor_cache = []
+
+    async def get_vendor_list():
+        nonlocal _vendor_cache
+        if not _vendor_cache:
+            _vendor_cache = await get_vendors()
+        return _vendor_cache
+
+    # Autocomplete for restaurant/vendor
+    async def restaurant_autocomplete(interaction: discord.Interaction, current: str):
+        try:
+            vendors = await get_vendor_list()
+            current_lower = current.lower()
+
+            # Filter and sort by match quality
+            matches = []
+            for v in vendors:
+                if current_lower in v.lower():
+                    # Prioritize starts-with matches
+                    priority = 0 if v.lower().startswith(current_lower) else 1
+                    matches.append((priority, v))
+
+            matches.sort()
+            return [
+                app_commands.Choice(name=v, value=v)
+                for _, v in matches[:AUTOCOMPLETE_LIMIT]
+            ]
+        except Exception as e:
+            logger.error(f"Restaurant autocomplete error: {e}")
+            return []
+
     # Autocomplete for food search
     async def food_autocomplete(interaction: discord.Interaction, current: str):
         if not current or len(current) < 2:
-            # Return some popular items if no query
             return []
 
         try:
-            results = await search_food(current, limit=AUTOCOMPLETE_LIMIT)
+            # Check if restaurant is already selected
+            restaurant = None
+            if hasattr(interaction, 'namespace') and hasattr(interaction.namespace, 'restaurant'):
+                restaurant = interaction.namespace.restaurant
+
+            results = await search_food(current, limit=AUTOCOMPLETE_LIMIT, vendor=restaurant)
 
             choices = []
             for item in results:
@@ -165,7 +201,6 @@ def setup(bot):
                 if len(display) > 100:
                     display = display[:97] + "..."
 
-                # Value stores the ID for lookup
                 choices.append(
                     app_commands.Choice(name=display, value=str(food_id))
                 )
@@ -177,21 +212,31 @@ def setup(bot):
             return []
 
     @bot.tree.command(name="food", description="Look up nutrition info for restaurant foods")
-    @app_commands.describe(name="Search for a food item (leave empty for random)")
-    @app_commands.autocomplete(name=food_autocomplete)
-    async def food_cmd(interaction: discord.Interaction, name: Optional[str] = None):
+    @app_commands.describe(
+        name="Search for a food item (leave empty for random)",
+        restaurant="Filter by restaurant (leave empty for all)"
+    )
+    @app_commands.autocomplete(name=food_autocomplete, restaurant=restaurant_autocomplete)
+    async def food_cmd(interaction: discord.Interaction, name: Optional[str] = None, restaurant: Optional[str] = None):
         await interaction.response.defer()
 
         try:
             if name is None:
-                # Random food
-                food = await get_random_food()
+                # Random food (optionally from specific restaurant)
+                food = await get_random_food(vendor=restaurant)
                 if not food:
+                    if restaurant:
+                        return await interaction.followup.send(
+                            f"❌ No food items found for **{restaurant}** with >300 calories."
+                        )
                     return await interaction.followup.send(
                         "❌ No food data available. Run the food loader first!"
                     )
                 embed = create_food_embed(food)
-                embed.title = f"🎲 Random: {food.get('name', 'Unknown')}"
+                if restaurant:
+                    embed.title = f"🎲 Random from {restaurant}: {food.get('name', 'Unknown')}"
+                else:
+                    embed.title = f"🎲 Random: {food.get('name', 'Unknown')}"
                 await interaction.followup.send(embed=embed)
 
             elif name.isdigit():
@@ -203,9 +248,13 @@ def setup(bot):
                 await interaction.followup.send(embed=embed)
 
             else:
-                # Search by text
-                results = await search_food(name, limit=1)
+                # Search by text (optionally filtered by restaurant)
+                results = await search_food(name, limit=1, vendor=restaurant)
                 if not results:
+                    if restaurant:
+                        return await interaction.followup.send(
+                            f"❌ No results for **{name}** at **{restaurant}**."
+                        )
                     return await interaction.followup.send(
                         f"❌ No results found for **{name}**. Try a different search!"
                     )

@@ -30,35 +30,61 @@ async def close_food_db() -> None:
         _db = None
 
 
-async def search_food(query: str, limit: int = 25) -> List[Dict[str, Any]]:
+async def search_food(query: str, limit: int = 25, vendor: str = None) -> List[Dict[str, Any]]:
     """Search for food items by name, returns list of matches"""
     db = await get_food_db()
 
     # Search by item name, include vendor for context
-    cursor = await db.execute("""
-        SELECT
-            fi.id,
-            fi.vendor,
-            fi.name,
-            fi.image_url,
-            fi.logo_url,
-            fn.calories,
-            fn.total_fat_g,
-            fn.sat_fat_g,
-            fn.cholesterol_mg,
-            fn.carbs_g,
-            fn.protein_g,
-            fn.sodium_mg,
-            fn.serving_size,
-            json_extract(fn.raw_json, '$.food_category') as food_category
-        FROM food_items fi
-        LEFT JOIN food_nutrition fn ON fi.id = fn.food_item_id
-        WHERE fi.name LIKE ? OR fi.vendor LIKE ?
-        ORDER BY
-            CASE WHEN fi.name LIKE ? THEN 0 ELSE 1 END,
-            fi.name
-        LIMIT ?
-    """, (f"%{query}%", f"%{query}%", f"{query}%", limit))
+    if vendor:
+        cursor = await db.execute("""
+            SELECT
+                fi.id,
+                fi.vendor,
+                fi.name,
+                fi.image_url,
+                fi.logo_url,
+                fn.calories,
+                fn.total_fat_g,
+                fn.sat_fat_g,
+                fn.cholesterol_mg,
+                fn.carbs_g,
+                fn.protein_g,
+                fn.sodium_mg,
+                fn.serving_size,
+                json_extract(fn.raw_json, '$.food_category') as food_category
+            FROM food_items fi
+            LEFT JOIN food_nutrition fn ON fi.id = fn.food_item_id
+            WHERE fi.vendor = ? AND fi.name LIKE ?
+            ORDER BY
+                CASE WHEN fi.name LIKE ? THEN 0 ELSE 1 END,
+                fi.name
+            LIMIT ?
+        """, (vendor, f"%{query}%", f"{query}%", limit))
+    else:
+        cursor = await db.execute("""
+            SELECT
+                fi.id,
+                fi.vendor,
+                fi.name,
+                fi.image_url,
+                fi.logo_url,
+                fn.calories,
+                fn.total_fat_g,
+                fn.sat_fat_g,
+                fn.cholesterol_mg,
+                fn.carbs_g,
+                fn.protein_g,
+                fn.sodium_mg,
+                fn.serving_size,
+                json_extract(fn.raw_json, '$.food_category') as food_category
+            FROM food_items fi
+            LEFT JOIN food_nutrition fn ON fi.id = fn.food_item_id
+            WHERE fi.name LIKE ? OR fi.vendor LIKE ?
+            ORDER BY
+                CASE WHEN fi.name LIKE ? THEN 0 ELSE 1 END,
+                fi.name
+            LIMIT ?
+        """, (f"%{query}%", f"%{query}%", f"{query}%", limit))
 
     rows = await cursor.fetchall()
     return [dict(row) for row in rows]
@@ -94,33 +120,58 @@ async def get_food_by_id(food_id: int) -> Optional[Dict[str, Any]]:
     return dict(row) if row else None
 
 
-async def get_random_food() -> Optional[Dict[str, Any]]:
+async def get_random_food(vendor: str = None) -> Optional[Dict[str, Any]]:
     """Get a random food item with nutrition info"""
     db = await get_food_db()
 
-    cursor = await db.execute("""
-        SELECT
-            fi.id,
-            fi.vendor,
-            fi.name,
-            fi.image_url,
-            fi.logo_url,
-            fn.calories,
-            fn.total_fat_g,
-            fn.sat_fat_g,
-            fn.cholesterol_mg,
-            fn.carbs_g,
-            fn.protein_g,
-            fn.sodium_mg,
-            fn.serving_size,
-            fn.year,
-            json_extract(fn.raw_json, '$.food_category') as food_category
-        FROM food_items fi
-        LEFT JOIN food_nutrition fn ON fi.id = fn.food_item_id
-        WHERE fn.calories > 300
-        ORDER BY RANDOM()
-        LIMIT 1
-    """)
+    if vendor:
+        cursor = await db.execute("""
+            SELECT
+                fi.id,
+                fi.vendor,
+                fi.name,
+                fi.image_url,
+                fi.logo_url,
+                fn.calories,
+                fn.total_fat_g,
+                fn.sat_fat_g,
+                fn.cholesterol_mg,
+                fn.carbs_g,
+                fn.protein_g,
+                fn.sodium_mg,
+                fn.serving_size,
+                fn.year,
+                json_extract(fn.raw_json, '$.food_category') as food_category
+            FROM food_items fi
+            LEFT JOIN food_nutrition fn ON fi.id = fn.food_item_id
+            WHERE fi.vendor = ? AND fn.calories > 300
+            ORDER BY RANDOM()
+            LIMIT 1
+        """, (vendor,))
+    else:
+        cursor = await db.execute("""
+            SELECT
+                fi.id,
+                fi.vendor,
+                fi.name,
+                fi.image_url,
+                fi.logo_url,
+                fn.calories,
+                fn.total_fat_g,
+                fn.sat_fat_g,
+                fn.cholesterol_mg,
+                fn.carbs_g,
+                fn.protein_g,
+                fn.sodium_mg,
+                fn.serving_size,
+                fn.year,
+                json_extract(fn.raw_json, '$.food_category') as food_category
+            FROM food_items fi
+            LEFT JOIN food_nutrition fn ON fi.id = fn.food_item_id
+            WHERE fn.calories > 300
+            ORDER BY RANDOM()
+            LIMIT 1
+        """)
 
     row = await cursor.fetchone()
     return dict(row) if row else None
