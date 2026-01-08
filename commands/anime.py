@@ -523,7 +523,7 @@ def setup(bot):
                 except Exception:
                     pass
 
-        @discord.ui.button(label="📖 View Reviews", style=discord.ButtonStyle.primary)
+        @discord.ui.button(label="View Reviews", style=discord.ButtonStyle.primary)
         async def view_reviews_button(self, interaction: discord.Interaction, button: discord.ui.Button):
             reviews = await get_anime_reviews(self.mal_id)
 
@@ -546,7 +546,7 @@ def setup(bot):
 
             await interaction.response.send_message(embeds=embeds)
 
-        @discord.ui.button(label="✍️ Write Review", style=discord.ButtonStyle.success)
+        @discord.ui.button(label="Write Review", style=discord.ButtonStyle.success)
         async def write_review_button(self, interaction: discord.Interaction, button: discord.ui.Button):
             modal = AnimeReviewModal(self.mal_id, self.anime_title)
             await interaction.response.send_modal(modal)

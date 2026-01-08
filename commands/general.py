@@ -168,7 +168,7 @@ class SearchReviewView(discord.ui.View):
             except Exception:
                 pass
 
-    @discord.ui.button(label="📖 View Reviews", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="View Reviews", style=discord.ButtonStyle.primary)
     async def view_reviews_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         reviews = await get_movie_reviews(self.movie_id)
 
@@ -196,7 +196,7 @@ class SearchReviewView(discord.ui.View):
             view = ReviewPaginationView(reviews, self.movie_title, self.movie_year)
             await interaction.response.send_message(embeds=view.get_page_embeds(), view=view)
 
-    @discord.ui.button(label="✍️ Write Review", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="Write Review", style=discord.ButtonStyle.success)
     async def write_review_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         modal = SearchReviewModal(self.movie_id, self.movie_title, self.movie_year)
         await interaction.response.send_modal(modal)

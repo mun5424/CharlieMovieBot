@@ -82,9 +82,13 @@ def create_food_embed(food: dict) -> discord.Embed:
     cal_dv = calc_dv(calories, "calories")
     cal_val = int(calories) if calories and calories == int(calories) else calories
 
+    # Zero-width space for invisible spacer fields
+    SPACER = "\u200b"
+
     # Row 1: Calories | Protein
     embed.add_field(name="Calories 🔥", value=f"**{cal_val or '—'}** {cal_dv}".strip(), inline=True)
     embed.add_field(name="Protein 🥩", value=format_nutrient(food.get('protein_g'), 'g', 'protein_g'), inline=True)
+    embed.add_field(name=SPACER, value=SPACER, inline=True)  # Force row break
 
     # Row 2: Carbs | Fat
     embed.add_field(name="Carbs 🍞", value=format_nutrient(food.get('carbs_g'), 'g', 'carbs_g'), inline=True)
@@ -104,6 +108,7 @@ def create_food_embed(food: dict) -> discord.Embed:
         fat_display = "—"
 
     embed.add_field(name="Fat/Sat 🧈", value=fat_display, inline=True)
+    embed.add_field(name=SPACER, value=SPACER, inline=True)  # Force row break
 
     # Row 3: Cholesterol | Sodium
     embed.add_field(name="Cholesterol 💊", value=format_nutrient(food.get('cholesterol_mg'), 'mg', 'cholesterol_mg'), inline=True)

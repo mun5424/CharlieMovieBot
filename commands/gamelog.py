@@ -472,7 +472,10 @@ def setup(bot):
         if game.get("cover_url"):
             embed.set_image(url=game["cover_url"])
 
-        await interaction.followup.send(embed=embed)
+        # Add review buttons
+        view = GameReviewView(game["id"], game["name"])
+        message = await interaction.followup.send(embed=embed, view=view)
+        view.message = message
 
     @bot.tree.command(name="game_stats", description="View your gaming statistics")
     async def game_stats_cmd(interaction: discord.Interaction):
@@ -584,7 +587,7 @@ def setup(bot):
                 except Exception:
                     pass
 
-        @discord.ui.button(label="📖 View Reviews", style=discord.ButtonStyle.primary)
+        @discord.ui.button(label="View Reviews", style=discord.ButtonStyle.primary)
         async def view_reviews_button(self, interaction: discord.Interaction, button: discord.ui.Button):
             reviews = await get_game_reviews(self.igdb_id)
 
@@ -607,7 +610,7 @@ def setup(bot):
 
             await interaction.response.send_message(embeds=embeds)
 
-        @discord.ui.button(label="✍️ Write Review", style=discord.ButtonStyle.success)
+        @discord.ui.button(label="Write Review", style=discord.ButtonStyle.success)
         async def write_review_button(self, interaction: discord.Interaction, button: discord.ui.Button):
             modal = GameReviewModal(self.igdb_id, self.game_name)
             await interaction.response.send_modal(modal)
