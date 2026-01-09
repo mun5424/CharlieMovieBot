@@ -58,7 +58,7 @@ def get_calorie_color(calories: Optional[float]) -> int:
 
 
 def create_food_embed(food: dict) -> discord.Embed:
-    """Create a compact embed for food nutrition info with DV%"""
+    """Create a minimal embed for food nutrition info with DV%"""
 
     vendor = food.get("vendor", "Unknown")
     name = food.get("name", "Unknown Item")
@@ -66,7 +66,7 @@ def create_food_embed(food: dict) -> discord.Embed:
     serving = food.get("serving_size") or "1 serving"
     category = food.get("food_category")
 
-    # Build description with category, vendor, serving, and all nutrition
+    # Build description with optional category above
     desc_parts = []
     if category:
         desc_parts.append(f"*{category}*")
@@ -78,41 +78,61 @@ def create_food_embed(food: dict) -> discord.Embed:
         color=get_calorie_color(calories)
     )
 
-    # Build 2-column layout with inline fields
+    # Build compact nutrition info
     cal_dv = calc_dv(calories, "calories")
     cal_val = int(calories) if calories and calories == int(calories) else calories
 
-    # Zero-width space for invisible spacer fields
-    SPACER = "\u200b"
+    embed.add_field(
+        name="Calories 🔥",
+        value=f"**{cal_val or '—'}** {cal_dv}",
+        inline=True
+    )
 
-    # Row 1: Calories | Protein
-    embed.add_field(name="Calories 🔥", value=f"**{cal_val or '—'}** {cal_dv}".strip(), inline=True)
-    embed.add_field(name="Protein 🥩", value=format_nutrient(food.get('protein_g'), 'g', 'protein_g'), inline=True)
-    embed.add_field(name=SPACER, value=SPACER, inline=True)  # Force row break
+    embed.add_field(
+        name="Protein 🥩",
+        value=format_nutrient(food.get("protein_g"), "g", "protein_g"),
+        inline=True
+    )
 
-    # Row 2: Carbs | Fat
-    embed.add_field(name="Carbs 🍞", value=format_nutrient(food.get('carbs_g'), 'g', 'carbs_g'), inline=True)
+    embed.add_field(
+        name="Carbs 🍞",
+        value=format_nutrient(food.get("carbs_g"), "g", "carbs_g"),
+        inline=True
+    )
 
+    # Combined fat field with sat fat
     total_fat = food.get("total_fat_g")
     sat_fat = food.get("sat_fat_g")
     fat_dv = calc_dv(total_fat, "total_fat_g")
+    sat_dv = calc_dv(sat_fat, "sat_fat_g")
 
-    if total_fat is not None:
+    if total_fat is not None and sat_fat is not None:
         fat_val = int(total_fat) if total_fat == int(total_fat) else f"{total_fat:.1f}"
-        if sat_fat is not None:
-            sat_val = int(sat_fat) if sat_fat == int(sat_fat) else f"{sat_fat:.1f}"
-            fat_display = f"{fat_val}g/{sat_val}g {fat_dv}".strip()
-        else:
-            fat_display = f"{fat_val}g {fat_dv}".strip()
+        sat_val = int(sat_fat) if sat_fat == int(sat_fat) else f"{sat_fat:.1f}"
+        fat_display = f"{fat_val}g {fat_dv} / {sat_val}g {sat_dv}"
+    elif total_fat is not None:
+        fat_val = int(total_fat) if total_fat == int(total_fat) else f"{total_fat:.1f}"
+        fat_display = f"{fat_val}g {fat_dv}"
     else:
         fat_display = "—"
 
-    embed.add_field(name="Fat/Sat 🧈", value=fat_display, inline=True)
-    embed.add_field(name=SPACER, value=SPACER, inline=True)  # Force row break
+    embed.add_field(
+        name="Fat / SF 🧈",
+        value=fat_display,
+        inline=True
+    )
 
-    # Row 3: Cholesterol | Sodium
-    embed.add_field(name="Cholesterol 💊", value=format_nutrient(food.get('cholesterol_mg'), 'mg', 'cholesterol_mg'), inline=True)
-    embed.add_field(name="Sodium 🧂", value=format_nutrient(food.get('sodium_mg'), 'mg', 'sodium_mg'), inline=True)
+    embed.add_field(
+        name="Cholesterol 💊",
+        value=format_nutrient(food.get("cholesterol_mg"), "mg", "cholesterol_mg"),
+        inline=True
+    )
+
+    embed.add_field(
+        name="Sodium 🧂",
+        value=format_nutrient(food.get("sodium_mg"), "mg", "sodium_mg"),
+        inline=True
+    )
 
     # Add logo if available
     logo_url = food.get("logo_url")

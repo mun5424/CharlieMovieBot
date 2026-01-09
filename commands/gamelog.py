@@ -18,6 +18,7 @@ from db import (
     get_game_reviews,
     add_game_review,
     get_random_game_review,
+    format_game_reviewers_text,
 )
 from clients.igdb import search_games_async, search_games_autocomplete, get_game_by_id
 
@@ -471,6 +472,12 @@ def setup(bot):
 
         if game.get("cover_url"):
             embed.set_image(url=game["cover_url"])
+
+        # Add reviewer info if any reviews exist
+        reviews = await get_game_reviews(game["id"])
+        if reviews:
+            reviewers_text = format_game_reviewers_text(reviews)
+            embed.add_field(name="\u200b", value=reviewers_text, inline=False)
 
         # Add review buttons
         view = GameReviewView(game["id"], game["name"])
