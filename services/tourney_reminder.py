@@ -25,8 +25,8 @@ logger = logging.getLogger(__name__)
 STARTGG_TIMEOUT = aiohttp.ClientTimeout(total=20, connect=10)
 
 # Retry configuration
-MAX_RETRIES = 2
-RETRY_DELAY = 3  # seconds
+MAX_RETRIES = 3
+RETRY_DELAY = 2  # base seconds (exponential backoff: 2, 4, 6)
 
 # Module-level session (will be created on first use)
 _session: aiohttp.ClientSession = None
@@ -71,12 +71,15 @@ SCHEDULED_TIME_11AM = get_scheduled_time(11, 0)
 
 # Tournament schedule by day of week
 # Monday=0, Tuesday=1, Wednesday=2, Thursday=3, Friday=4, Saturday=5, Sunday=6
+# Value can be just a name (searches for tournament on same day)
+# or a tuple of (name, days_ahead) to search for tournament starting N days later
 TOURNAMENT_SCHEDULE = {
     0: "Motivation Academy",     # Monday
     1: "Can Opener Series",      # Tuesday
     2: "TNS Street Fighter 6",   # Wednesday
     # 3: "ONi Arena: Street Fighter" # Thursday
     # 3: "FlyQuest Fight Series",  # Thursday - disabling flyquest as ONi is a guarenteed weekly.
+    4: ("The Gauntlet", 1),      # Friday for Gauntlet (signups close 9am Sat)
 }
 
 TOURNAMENT_DESCRIPTION = {
@@ -104,6 +107,13 @@ TOURNAMENT_DESCRIPTION = {
 - Starts on **THURSDAY at 5PM PACIFIC TIME**
 - All matches will be best 3 out of 5 games (FT3)
 - In the event of a tied Match declared by a "Double K.O." on the Game screen, the Match will not be scored and both Players will replay the tied Match with the same character selections and stage.
+    """,
+    4: """
+- **SIGNUPS CLOSE BEFORE 9AM SATURDAY** - Register now!
+- Starts on **SATURDAY at 9AM PACIFIC TIME **
+- All matches will be FT5
+- **SINGLE ELIMINATION**
+- See tournament page for full rules and schedule
     """
 }
 
@@ -138,6 +148,8 @@ def _matches_tournament_series(node_name: str, series_name: str) -> bool:
         return "flyquest" in node_lower
     elif "oni" in series_lower:
         return "oni" in node_lower
+    elif "gauntlet" in series_lower:
+        return "gauntlet" in node_lower
 
     # Fallback: check if first two words match
     keywords = series_lower.split()[:2]
@@ -145,32 +157,72 @@ def _matches_tournament_series(node_name: str, series_name: str) -> bool:
 
 
 async def _search_tournaments_with_retry(session, headers: dict, query: dict) -> list:
-    """Execute tournament search with retry logic."""
+    """Execute tournament search with retry logic, proper HTTP handling, and exponential backoff."""
     last_error = None
 
-    for attempt in range(MAX_RETRIES):
+    for attempt in range(1, MAX_RETRIES + 1):
         try:
             async with session.post(STARTGG_API_URL, headers=headers, json=query) as resp:
-                data = await resp.json()
-                return data.get("data", {}).get("tournaments", {}).get("nodes", [])
+                text = await resp.text()
+
+                # Retry on throttling / transient server failures
+                if resp.status == 429 or 500 <= resp.status <= 599:
+                    last_error = f"HTTP {resp.status}"
+                    logger.warning(f"Attempt {attempt}/{MAX_RETRIES}: start.gg {last_error}")
+                    if attempt < MAX_RETRIES:
+                        await asyncio.sleep(RETRY_DELAY * attempt)
+                        continue
+                    return []
+
+                if resp.status != 200:
+                    logger.error(f"start.gg unexpected HTTP {resp.status}: {text[:500]}")
+                    return []
+
+                data = await resp.json(content_type=None)
+
+                if "errors" in data:
+                    logger.warning(f"start.gg GraphQL errors: {data['errors']}")
+                    # Retry on GraphQL errors (may be transient)
+                    if attempt < MAX_RETRIES:
+                        await asyncio.sleep(RETRY_DELAY * attempt)
+                        continue
+
+                return data.get("data", {}).get("tournaments", {}).get("nodes", []) or []
 
         except asyncio.TimeoutError:
             last_error = "timeout"
-            logger.warning(f"Attempt {attempt + 1}/{MAX_RETRIES}: start.gg timeout")
+            logger.warning(f"Attempt {attempt}/{MAX_RETRIES}: start.gg timeout")
         except aiohttp.ClientError as e:
             last_error = str(e)
-            logger.warning(f"Attempt {attempt + 1}/{MAX_RETRIES}: network error - {e}")
+            logger.warning(f"Attempt {attempt}/{MAX_RETRIES}: network error - {e}")
+        except Exception as e:
+            last_error = f"{type(e).__name__}: {e}"
+            logger.exception(f"Attempt {attempt}/{MAX_RETRIES}: unexpected error")
 
-        if attempt < MAX_RETRIES - 1:
-            await asyncio.sleep(RETRY_DELAY)
+        if attempt < MAX_RETRIES:
+            await asyncio.sleep(RETRY_DELAY * attempt)
 
     logger.error(f"All {MAX_RETRIES} attempts failed. Last error: {last_error}")
     return []
 
 
+def _get_today_time_window(today: datetime.date) -> tuple:
+    """
+    Get Unix timestamps for today's time window in Pacific time.
+    Returns (start_of_day, end_of_day) as Unix timestamps.
+    """
+    # Start of today (midnight PT)
+    start_dt = PACIFIC_TZ.localize(datetime.datetime.combine(today, datetime.time.min))
+    # End of today (11:59:59 PM PT)
+    end_dt = PACIFIC_TZ.localize(datetime.datetime.combine(today, datetime.time.max))
+
+    return int(start_dt.timestamp()), int(end_dt.timestamp())
+
+
 async def find_todays_tournament(tournament_name: str, today: datetime.date = None):
     """
     Find today's tournament for the given tournament series.
+    Uses time-windowed query to reduce API load.
     Returns (slug, name) tuple or (None, None) if not found.
     """
     if today is None:
@@ -183,14 +235,19 @@ async def find_todays_tournament(tournament_name: str, today: datetime.date = No
         "Content-Type": "application/json"
     }
 
-    # Query all upcoming SF6 tournaments
+    # Get today's time window for efficient querying
+    start_ts, end_ts = _get_today_time_window(today)
+
+    # Time-windowed query: only fetch SF6 tournaments starting TODAY
     query = {
         "query": """
-        query FindTournaments($perPage: Int!) {
+        query FindTournaments($perPage: Int!, $afterDate: Timestamp!, $beforeDate: Timestamp!) {
           tournaments(query: {
             perPage: $perPage,
             filter: {
               past: false,
+              afterDate: $afterDate,
+              beforeDate: $beforeDate,
               videogameIds: [43868]
             }
           }) {
@@ -202,7 +259,11 @@ async def find_todays_tournament(tournament_name: str, today: datetime.date = No
           }
         }
         """,
-        "variables": {"perPage": 50}
+        "variables": {
+            "perPage": 50,
+            "afterDate": start_ts,
+            "beforeDate": end_ts
+        }
     }
 
     try:
@@ -210,41 +271,29 @@ async def find_todays_tournament(tournament_name: str, today: datetime.date = No
         nodes = await _search_tournaments_with_retry(session, headers, query)
 
         if not nodes:
-            logger.warning("No tournaments returned from start.gg")
-            return None, None
+            logger.info(f"No SF6 tournaments starting today ({today})")
+        else:
+            logger.debug(f"Retrieved {len(nodes)} SF6 tournaments for today")
 
-        logger.debug(f"Retrieved {len(nodes)} SF6 tournaments")
+            # Find matching tournaments for our series
+            matching = [n for n in nodes if _matches_tournament_series(n["name"], tournament_name)]
+            logger.debug(f"Found {len(matching)} matching '{tournament_name}' tournaments")
 
-        # Find matching tournaments for our series
-        matching = [n for n in nodes if _matches_tournament_series(n["name"], tournament_name)]
-        logger.debug(f"Found {len(matching)} matching '{tournament_name}' tournaments")
-
-        # Look for today's tournament
-        for node in matching:
-            event_date = datetime.datetime.fromtimestamp(node["startAt"], tz=PACIFIC_TZ).date()
-            if event_date == today:
+            for node in matching:
                 logger.info(f"Found today's tournament: {node['name']}")
                 return node["slug"], node["name"]
 
-        # Log next upcoming if no match today
-        if matching:
-            future = sorted(
-                [n for n in matching if datetime.datetime.fromtimestamp(n["startAt"], tz=PACIFIC_TZ).date() >= today],
-                key=lambda x: x["startAt"]
-            )
-            if future:
-                next_date = datetime.datetime.fromtimestamp(future[0]["startAt"], tz=PACIFIC_TZ).date()
-                logger.info(f"No tournament today. Next: {future[0]['name']} on {next_date}")
-
-        # Fallback: name-based search (single attempt, not multiple terms)
+        # Fallback: name-based search with time window
         logger.debug("Trying name-based search fallback")
         fallback_query = {
             "query": """
-            query FindTournaments($perPage: Int!, $query: String!) {
+            query FindTournaments($perPage: Int!, $query: String!, $afterDate: Timestamp!, $beforeDate: Timestamp!) {
               tournaments(query: {
                 perPage: $perPage,
                 filter: {
                   past: false,
+                  afterDate: $afterDate,
+                  beforeDate: $beforeDate,
                   name: $query,
                   videogameIds: [43868]
                 }
@@ -257,15 +306,18 @@ async def find_todays_tournament(tournament_name: str, today: datetime.date = No
               }
             }
             """,
-            "variables": {"perPage": 15, "query": tournament_name}
+            "variables": {
+                "perPage": 15,
+                "query": tournament_name,
+                "afterDate": start_ts,
+                "beforeDate": end_ts
+            }
         }
 
         fallback_nodes = await _search_tournaments_with_retry(session, headers, fallback_query)
         for node in fallback_nodes:
-            event_date = datetime.datetime.fromtimestamp(node["startAt"], tz=PACIFIC_TZ).date()
-            if event_date == today:
-                logger.info(f"Found via fallback: {node['name']}")
-                return node["slug"], node["name"]
+            logger.info(f"Found via fallback: {node['name']}")
+            return node["slug"], node["name"]
 
     except Exception as e:
         logger.error(f"Error searching for '{tournament_name}': {e}")
@@ -289,18 +341,34 @@ async def check_todays_tournament(manual=False):
         logger.debug(f"No tournament scheduled for day {day}")
         return
 
-    tournament_name = TOURNAMENT_SCHEDULE[day]
+    schedule_entry = TOURNAMENT_SCHEDULE[day]
 
-    # Find today's specific tournament (already verified it's today)
-    slug, name = await find_todays_tournament(tournament_name, today)
+    # Handle tuple format: (name, days_ahead) for look-ahead tournaments
+    if isinstance(schedule_entry, tuple):
+        tournament_name, days_ahead = schedule_entry
+        search_date = today + datetime.timedelta(days=days_ahead)
+        is_look_ahead = True
+    else:
+        tournament_name = schedule_entry
+        search_date = today
+        is_look_ahead = False
+
+    # Find the tournament for the search date
+    slug, name = await find_todays_tournament(tournament_name, search_date)
 
     if not slug or not name:
-        logger.warning(f"No tournament found for {tournament_name} on {today}")
+        logger.warning(f"No tournament found for {tournament_name} on {search_date}")
         return
 
     # Build the registration URL
     url = f"https://start.gg/{slug}"
     logger.info(f"Sending reminder for: {name}")
+
+    # Customize message based on whether it's look-ahead or same-day
+    if is_look_ahead:
+        description = f"Alright you gooners, **{name}** is happening TOMORROW! Signups close early - GO SIGN UP NOW."
+    else:
+        description = f"Alright you gooners, **{name}** is happening TODAY! GO SIGN UP."
 
     # Send to all configured channels
     for channel_id in config.TOURNEY_CHANNEL_IDS:
@@ -312,7 +380,7 @@ async def check_todays_tournament(manual=False):
         try:
             embed = discord.Embed(
                 title=f"🥊 Tournament of the Day - **{name}**",
-                description=f"Alright you gooners, **{name}** is happening TODAY! GO SIGN UP.",
+                description=description,
                 color=0xFF6B35,
                 url=url
             )
