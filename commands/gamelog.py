@@ -630,14 +630,12 @@ def setup(bot):
             # Check if already in gamelog
             existing = await get_gamelog_entry(uid, self.igdb_id)
             if existing:
-                if existing.get("played_at"):
-                    return await interaction.response.send_message(
-                        f"**{self.game_name}** is already in your gamelog and marked as played."
-                    )
-                else:
-                    return await interaction.response.send_message(
-                        f"**{self.game_name}** is already in your gamelog."
-                    )
+                # Already in gamelog - remove it
+                await remove_from_gamelog(uid, self.igdb_id)
+                await interaction.response.send_message(
+                    f"**{interaction.user.display_name}** removed **{self.game_name}** from their gamelog."
+                )
+                return
 
             # Add to gamelog
             if self.game_data:

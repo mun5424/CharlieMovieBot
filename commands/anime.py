@@ -559,14 +559,12 @@ def setup(bot):
             # Check if already in animelist
             existing = await get_anime_watchlist_entry(uid, self.mal_id)
             if existing:
-                if existing.get("watched_at"):
-                    return await interaction.response.send_message(
-                        f"**{self.anime_title}** is already in your animelist and marked as watched."
-                    )
-                else:
-                    return await interaction.response.send_message(
-                        f"**{self.anime_title}** is already in your animelist."
-                    )
+                # Already in animelist - remove it
+                await remove_from_anime_watchlist(uid, self.mal_id)
+                await interaction.response.send_message(
+                    f"**{interaction.user.display_name}** removed **{self.anime_title}** from their animelist."
+                )
+                return
 
             # Add to animelist
             if self.anime_data:

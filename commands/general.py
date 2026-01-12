@@ -210,14 +210,13 @@ class SearchReviewView(discord.ui.View):
         # Check if already in watchlist
         existing = await get_watchlist_movie(uid, self.movie_id)
         if existing:
-            if existing.get("watched_at"):
-                return await interaction.response.send_message(
-                    f"**{self.movie_title} ({self.movie_year})** is already in your watchlist and marked as watched."
-                )
-            else:
-                return await interaction.response.send_message(
-                    f"**{self.movie_title} ({self.movie_year})** is already in your watchlist."
-                )
+            # Already in watchlist - remove it
+            from db import remove_from_watchlist
+            await remove_from_watchlist(uid, self.movie_id)
+            await interaction.response.send_message(
+                f"**{interaction.user.display_name}** removed **{self.movie_title} ({self.movie_year})** from their watchlist."
+            )
+            return
 
         # Add to watchlist
         if self.movie_data:
