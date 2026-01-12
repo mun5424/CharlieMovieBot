@@ -170,7 +170,40 @@ class SearchReviewView(discord.ui.View):
             except Exception:
                 pass
 
-    @discord.ui.button(label="⭐", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="View Reviews", style=discord.ButtonStyle.primary)
+    async def view_reviews_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        reviews = await get_movie_reviews(self.movie_id)
+
+        if not reviews:
+            return await interaction.response.send_message(
+                f"📭 No reviews yet for **{self.movie_title} ({self.movie_year})**"
+            )
+
+        # If 5 or fewer reviews, just show them without pagination buttons
+        if len(reviews) <= ReviewPaginationView.REVIEWS_PER_PAGE:
+            embeds = []
+            for review in reviews:
+                score = review['score']
+                score_text = int(score) if score == int(score) else score
+                embed = discord.Embed(
+                    title=f"📝 {self.movie_title} ({self.movie_year})",
+                    description=review['review_text'],
+                    color=0x9b59b6
+                )
+                embed.set_author(name=f"{review['username']} - ⭐ {score_text}/10")
+                embeds.append(embed)
+            await interaction.response.send_message(embeds=embeds)
+        else:
+            # Use pagination view for more reviews
+            view = ReviewPaginationView(reviews, self.movie_title, self.movie_year)
+            await interaction.response.send_message(embeds=view.get_page_embeds(), view=view)
+
+    @discord.ui.button(label="Write Review", style=discord.ButtonStyle.success)
+    async def write_review_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        modal = SearchReviewModal(self.movie_id, self.movie_title, self.movie_year)
+        await interaction.response.send_modal(modal)
+
+    @discord.ui.button(label="⭐", style=discord.ButtonStyle.danger)
     async def add_to_watchlist_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         uid = str(interaction.user.id)
 
@@ -204,39 +237,6 @@ class SearchReviewView(discord.ui.View):
             await interaction.response.send_message(
                 "Could not add to watchlist. Please try using `/watchlist_add` instead."
             )
-
-    @discord.ui.button(label="View Reviews", style=discord.ButtonStyle.primary)
-    async def view_reviews_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        reviews = await get_movie_reviews(self.movie_id)
-
-        if not reviews:
-            return await interaction.response.send_message(
-                f"📭 No reviews yet for **{self.movie_title} ({self.movie_year})**"
-            )
-
-        # If 5 or fewer reviews, just show them without pagination buttons
-        if len(reviews) <= ReviewPaginationView.REVIEWS_PER_PAGE:
-            embeds = []
-            for review in reviews:
-                score = review['score']
-                score_text = int(score) if score == int(score) else score
-                embed = discord.Embed(
-                    title=f"📝 {self.movie_title} ({self.movie_year})",
-                    description=review['review_text'],
-                    color=0x9b59b6
-                )
-                embed.set_author(name=f"{review['username']} - ⭐ {score_text}/10")
-                embeds.append(embed)
-            await interaction.response.send_message(embeds=embeds)
-        else:
-            # Use pagination view for more reviews
-            view = ReviewPaginationView(reviews, self.movie_title, self.movie_year)
-            await interaction.response.send_message(embeds=view.get_page_embeds(), view=view)
-
-    @discord.ui.button(label="Write Review", style=discord.ButtonStyle.success)
-    async def write_review_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        modal = SearchReviewModal(self.movie_id, self.movie_title, self.movie_year)
-        await interaction.response.send_modal(modal)
 
 
 def setup(bot):

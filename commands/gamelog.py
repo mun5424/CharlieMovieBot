@@ -595,33 +595,6 @@ def setup(bot):
                 except Exception:
                     pass
 
-        @discord.ui.button(label="⭐", style=discord.ButtonStyle.secondary)
-        async def add_to_gamelog_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-            uid = str(interaction.user.id)
-
-            # Check if already in gamelog
-            existing = await get_gamelog_entry(uid, self.igdb_id)
-            if existing:
-                if existing.get("played_at"):
-                    return await interaction.response.send_message(
-                        f"**{self.game_name}** is already in your gamelog and marked as played."
-                    )
-                else:
-                    return await interaction.response.send_message(
-                        f"**{self.game_name}** is already in your gamelog."
-                    )
-
-            # Add to gamelog
-            if self.game_data:
-                await add_to_gamelog(uid, self.game_data)
-                await interaction.response.send_message(
-                    f"**{interaction.user.display_name}** added **{self.game_name}** to their gamelog."
-                )
-            else:
-                await interaction.response.send_message(
-                    "Could not add to gamelog. Please try using `/game_add` instead."
-                )
-
         @discord.ui.button(label="View Reviews", style=discord.ButtonStyle.primary)
         async def view_reviews_button(self, interaction: discord.Interaction, button: discord.ui.Button):
             reviews = await get_game_reviews(self.igdb_id)
@@ -649,6 +622,33 @@ def setup(bot):
         async def write_review_button(self, interaction: discord.Interaction, button: discord.ui.Button):
             modal = GameReviewModal(self.igdb_id, self.game_name)
             await interaction.response.send_modal(modal)
+
+        @discord.ui.button(label="⭐", style=discord.ButtonStyle.danger)
+        async def add_to_gamelog_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+            uid = str(interaction.user.id)
+
+            # Check if already in gamelog
+            existing = await get_gamelog_entry(uid, self.igdb_id)
+            if existing:
+                if existing.get("played_at"):
+                    return await interaction.response.send_message(
+                        f"**{self.game_name}** is already in your gamelog and marked as played."
+                    )
+                else:
+                    return await interaction.response.send_message(
+                        f"**{self.game_name}** is already in your gamelog."
+                    )
+
+            # Add to gamelog
+            if self.game_data:
+                await add_to_gamelog(uid, self.game_data)
+                await interaction.response.send_message(
+                    f"**{interaction.user.display_name}** added **{self.game_name}** to their gamelog."
+                )
+            else:
+                await interaction.response.send_message(
+                    "Could not add to gamelog. Please try using `/game_add` instead."
+                )
 
     @bot.tree.command(name="game_review", description="Write a review for a game")
     @app_commands.describe(title="Search for a game to review")
