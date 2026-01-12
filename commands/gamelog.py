@@ -479,8 +479,8 @@ def setup(bot):
             reviewers_text = format_game_reviewers_text(reviews)
             embed.add_field(name="\u200b", value=reviewers_text, inline=False)
 
-        # Add review buttons
-        view = GameReviewView(game["id"], game["name"])
+        # Add review buttons and add to gamelog
+        view = GameReviewView(game["id"], game["name"], game)
         message = await interaction.followup.send(embed=embed, view=view)
         view.message = message
 
@@ -581,10 +581,11 @@ def setup(bot):
     class GameReviewView(discord.ui.View):
         """View with buttons for viewing and writing game reviews"""
 
-        def __init__(self, igdb_id: int, game_name: str):
+        def __init__(self, igdb_id: int, game_name: str, game_data: dict = None):
             super().__init__(timeout=GAMELOG_VIEW_TIMEOUT)
             self.igdb_id = igdb_id
             self.game_name = game_name
+            self.game_data = game_data
             self.message = None
 
         async def on_timeout(self):
@@ -593,6 +594,33 @@ def setup(bot):
                     await self.message.edit(view=None)
                 except Exception:
                     pass
+
+        @discord.ui.button(label="⭐", style=discord.ButtonStyle.secondary)
+        async def add_to_gamelog_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+            uid = str(interaction.user.id)
+
+            # Check if already in gamelog
+            existing = await get_gamelog_entry(uid, self.igdb_id)
+            if existing:
+                if existing.get("played_at"):
+                    return await interaction.response.send_message(
+                        f"**{self.game_name}** is already in your gamelog and marked as played."
+                    )
+                else:
+                    return await interaction.response.send_message(
+                        f"**{self.game_name}** is already in your gamelog."
+                    )
+
+            # Add to gamelog
+            if self.game_data:
+                await add_to_gamelog(uid, self.game_data)
+                await interaction.response.send_message(
+                    f"**{interaction.user.display_name}** added **{self.game_name}** to their gamelog."
+                )
+            else:
+                await interaction.response.send_message(
+                    "Could not add to gamelog. Please try using `/game_add` instead."
+                )
 
         @discord.ui.button(label="View Reviews", style=discord.ButtonStyle.primary)
         async def view_reviews_button(self, interaction: discord.Interaction, button: discord.ui.Button):

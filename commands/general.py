@@ -5,6 +5,7 @@ from discord import app_commands
 from clients.tmdb import search_movie_async, get_movie_details_async
 from commands.autocomplete import movie_search_autocomplete
 from commands.watchlist import get_movie_reviews, format_reviewers_text, add_movie_review
+from db import add_to_watchlist, is_in_watchlist, get_watchlist_movie
 
 # Constants - balanced for Pi 5 (4GB RAM)
 REVIEW_VIEW_TIMEOUT = 300  # 5 minutes
@@ -151,11 +152,12 @@ class ReviewPaginationView(discord.ui.View):
 class SearchReviewView(discord.ui.View):
     """View with review buttons for search results"""
 
-    def __init__(self, movie_id: int, movie_title: str, movie_year: str):
+    def __init__(self, movie_id: int, movie_title: str, movie_year: str, movie_data: dict = None):
         super().__init__(timeout=REVIEW_VIEW_TIMEOUT)
         self.movie_id = movie_id
         self.movie_title = movie_title
         self.movie_year = movie_year
+        self.movie_data = movie_data
         self.message = None
 
     async def on_timeout(self):
@@ -167,6 +169,41 @@ class SearchReviewView(discord.ui.View):
                 pass
             except Exception:
                 pass
+
+    @discord.ui.button(label="⭐", style=discord.ButtonStyle.secondary)
+    async def add_to_watchlist_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        uid = str(interaction.user.id)
+
+        # Check if already in watchlist
+        existing = await get_watchlist_movie(uid, self.movie_id)
+        if existing:
+            if existing.get("watched_at"):
+                return await interaction.response.send_message(
+                    f"**{self.movie_title} ({self.movie_year})** is already in your watchlist and marked as watched."
+                )
+            else:
+                return await interaction.response.send_message(
+                    f"**{self.movie_title} ({self.movie_year})** is already in your watchlist."
+                )
+
+        # Add to watchlist
+        if self.movie_data:
+            movie_to_add = {
+                "id": self.movie_id,
+                "title": self.movie_title,
+                "year": self.movie_year,
+                "overview": self.movie_data.get("overview"),
+                "rating": self.movie_data.get("rating"),
+                "poster_path": self.movie_data.get("poster_path"),
+            }
+            await add_to_watchlist(uid, movie_to_add)
+            await interaction.response.send_message(
+                f"**{interaction.user.display_name}** added **{self.movie_title} ({self.movie_year})** to their watchlist."
+            )
+        else:
+            await interaction.response.send_message(
+                "Could not add to watchlist. Please try using `/watchlist_add` instead."
+            )
 
     @discord.ui.button(label="View Reviews", style=discord.ButtonStyle.primary)
     async def view_reviews_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -273,8 +310,8 @@ def setup(bot):
                 reviewers_text = format_reviewers_text(reviews)
                 embed.add_field(name="\u200b", value=reviewers_text, inline=False)
 
-            # Create view with review buttons
-            view = SearchReviewView(movie_id, movie_title, str(movie_year))
+            # Create view with review buttons and add to watchlist
+            view = SearchReviewView(movie_id, movie_title, str(movie_year), detailed_movie)
             message = await interaction.followup.send(embed=embed, view=view)
             view.message = message
         else:

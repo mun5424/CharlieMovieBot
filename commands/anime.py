@@ -510,10 +510,11 @@ def setup(bot):
     class AnimeReviewView(discord.ui.View):
         """View with buttons for viewing and writing anime reviews"""
 
-        def __init__(self, mal_id: int, anime_title: str):
+        def __init__(self, mal_id: int, anime_title: str, anime_data: dict = None):
             super().__init__(timeout=ANIME_VIEW_TIMEOUT)
             self.mal_id = mal_id
             self.anime_title = anime_title
+            self.anime_data = anime_data
             self.message = None
 
         async def on_timeout(self):
@@ -522,6 +523,33 @@ def setup(bot):
                     await self.message.edit(view=None)
                 except Exception:
                     pass
+
+        @discord.ui.button(label="⭐", style=discord.ButtonStyle.secondary)
+        async def add_to_animelist_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+            uid = str(interaction.user.id)
+
+            # Check if already in animelist
+            existing = await get_anime_watchlist_entry(uid, self.mal_id)
+            if existing:
+                if existing.get("watched_at"):
+                    return await interaction.response.send_message(
+                        f"**{self.anime_title}** is already in your animelist and marked as watched."
+                    )
+                else:
+                    return await interaction.response.send_message(
+                        f"**{self.anime_title}** is already in your animelist."
+                    )
+
+            # Add to animelist
+            if self.anime_data:
+                await add_to_anime_watchlist(uid, self.anime_data)
+                await interaction.response.send_message(
+                    f"**{interaction.user.display_name}** added **{self.anime_title}** to their animelist."
+                )
+            else:
+                await interaction.response.send_message(
+                    "Could not add to animelist. Please try using `/anime_add` instead."
+                )
 
         @discord.ui.button(label="View Reviews", style=discord.ButtonStyle.primary)
         async def view_reviews_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -597,8 +625,8 @@ def setup(bot):
         if anime.get("image_url"):
             embed.set_image(url=anime["image_url"])
 
-        # Add review buttons
-        view = AnimeReviewView(anime["mal_id"], anime["title"])
+        # Add review buttons and add to animelist
+        view = AnimeReviewView(anime["mal_id"], anime["title"], anime)
         message = await interaction.followup.send(embed=embed, view=view)
         view.message = message
 
