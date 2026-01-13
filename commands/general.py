@@ -337,7 +337,7 @@ def setup(bot):
         await interaction.response.defer(ephemeral=True)  # Acknowledge immediately
 
         try:
-            from tourney_reminder import check_todays_tournament
+            from services.tourney_reminder import check_todays_tournament
 
             await check_todays_tournament(manual=True)
 
