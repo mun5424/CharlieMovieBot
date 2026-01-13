@@ -208,23 +208,35 @@ async def _search_tournaments_with_retry(session, headers: dict, query: dict) ->
     return []
 
 
-def _get_today_time_window(today: datetime.date) -> tuple:
+def _get_search_keywords(tournament_name: str) -> list:
     """
-    Get Unix timestamps for today's time window in Pacific time.
-    Returns (start_of_day, end_of_day) as Unix timestamps.
+    Get search keywords for a tournament series.
+    Returns a list of search terms to try (most specific first).
     """
-    # Start of today (midnight PT)
-    start_dt = PACIFIC_TZ.localize(datetime.datetime.combine(today, datetime.time.min))
-    # End of today (11:59:59 PM PT)
-    end_dt = PACIFIC_TZ.localize(datetime.datetime.combine(today, datetime.time.max))
+    name_lower = tournament_name.lower()
 
-    return int(start_dt.timestamp()), int(end_dt.timestamp())
+    # Map series names to effective search keywords
+    if "motivation academy" in name_lower:
+        return ["Motivation Academy"]
+    elif "can opener" in name_lower:
+        return ["Can Opener"]
+    elif "tns" in name_lower:
+        return ["TNS"]
+    elif "gauntlet" in name_lower:
+        return ["Gauntlet"]
+    elif "flyquest" in name_lower:
+        return ["FlyQuest"]
+    elif "oni" in name_lower:
+        return ["ONi Arena"]
+
+    # Default: use the tournament name as-is
+    return [tournament_name]
 
 
 async def find_todays_tournament(tournament_name: str, today: datetime.date = None):
     """
     Find today's tournament for the given tournament series.
-    Uses time-windowed query to reduce API load.
+    Uses name-based search for efficiency (fewer API results).
     Returns (slug, name) tuple or (None, None) if not found.
     """
     if today is None:
@@ -237,66 +249,67 @@ async def find_todays_tournament(tournament_name: str, today: datetime.date = No
         "Content-Type": "application/json"
     }
 
-    # Get today's time window for efficient querying
-    start_ts, end_ts = _get_today_time_window(today)
-
-    # Time-windowed query: only fetch SF6 tournaments starting TODAY
-    query = {
-        "query": """
-        query FindTournaments($perPage: Int!, $afterDate: Timestamp!, $beforeDate: Timestamp!) {
-          tournaments(query: {
-            perPage: $perPage,
-            filter: {
-              past: false,
-              afterDate: $afterDate,
-              beforeDate: $beforeDate,
-              videogameIds: [43868]
-            }
-          }) {
-            nodes {
-              name
-              slug
-              startAt
-            }
-          }
-        }
-        """,
-        "variables": {
-            "perPage": 50,
-            "afterDate": start_ts,
-            "beforeDate": end_ts
-        }
-    }
+    session = await get_session()
+    search_keywords = _get_search_keywords(tournament_name)
 
     try:
-        session = await get_session()
-        nodes = await _search_tournaments_with_retry(session, headers, query)
+        # Primary: Search by tournament name (much more efficient than fetching all)
+        for keyword in search_keywords:
+            query = {
+                "query": """
+                query FindTournaments($perPage: Int!, $name: String!) {
+                  tournaments(query: {
+                    perPage: $perPage,
+                    filter: {
+                      past: false,
+                      name: $name,
+                      videogameIds: [43868]
+                    }
+                  }) {
+                    nodes {
+                      name
+                      slug
+                      startAt
+                    }
+                  }
+                }
+                """,
+                "variables": {"perPage": 25, "name": keyword}
+            }
 
-        if not nodes:
-            logger.info(f"No SF6 tournaments starting today ({today})")
-        else:
-            logger.debug(f"Retrieved {len(nodes)} SF6 tournaments for today")
+            nodes = await _search_tournaments_with_retry(session, headers, query)
 
-            # Find matching tournaments for our series
-            matching = [n for n in nodes if _matches_tournament_series(n["name"], tournament_name)]
-            logger.debug(f"Found {len(matching)} matching '{tournament_name}' tournaments")
+            if nodes:
+                logger.debug(f"Retrieved {len(nodes)} tournaments for keyword '{keyword}'")
 
-            for node in matching:
-                logger.info(f"Found today's tournament: {node['name']}")
-                return node["slug"], node["name"]
+                # Find matching tournaments for today
+                for node in nodes:
+                    if _matches_tournament_series(node["name"], tournament_name):
+                        event_date = datetime.datetime.fromtimestamp(node["startAt"], tz=PACIFIC_TZ).date()
+                        if event_date == today:
+                            logger.info(f"Found today's tournament: {node['name']}")
+                            return node["slug"], node["name"]
 
-        # Fallback: name-based search with time window
-        logger.debug("Trying name-based search fallback")
+                # Log next upcoming if we found matches but none for today
+                matching = [n for n in nodes if _matches_tournament_series(n["name"], tournament_name)]
+                if matching:
+                    future = sorted(
+                        [n for n in matching if datetime.datetime.fromtimestamp(n["startAt"], tz=PACIFIC_TZ).date() >= today],
+                        key=lambda x: x["startAt"]
+                    )
+                    if future:
+                        next_date = datetime.datetime.fromtimestamp(future[0]["startAt"], tz=PACIFIC_TZ).date()
+                        logger.info(f"No tournament today. Next: {future[0]['name']} on {next_date}")
+
+        # Fallback: Fetch all upcoming SF6 tournaments if name search fails
+        logger.debug("Name search failed, trying broad SF6 query")
         fallback_query = {
             "query": """
-            query FindTournaments($perPage: Int!, $query: String!, $afterDate: Timestamp!, $beforeDate: Timestamp!) {
+            query FindTournaments($perPage: Int!) {
               tournaments(query: {
                 perPage: $perPage,
                 filter: {
                   past: false,
-                  afterDate: $afterDate,
-                  beforeDate: $beforeDate,
-                  name: $query,
                   videogameIds: [43868]
                 }
               }) {
@@ -308,18 +321,16 @@ async def find_todays_tournament(tournament_name: str, today: datetime.date = No
               }
             }
             """,
-            "variables": {
-                "perPage": 15,
-                "query": tournament_name,
-                "afterDate": start_ts,
-                "beforeDate": end_ts
-            }
+            "variables": {"perPage": 50}
         }
 
         fallback_nodes = await _search_tournaments_with_retry(session, headers, fallback_query)
         for node in fallback_nodes:
-            logger.info(f"Found via fallback: {node['name']}")
-            return node["slug"], node["name"]
+            if _matches_tournament_series(node["name"], tournament_name):
+                event_date = datetime.datetime.fromtimestamp(node["startAt"], tz=PACIFIC_TZ).date()
+                if event_date == today:
+                    logger.info(f"Found via fallback: {node['name']}")
+                    return node["slug"], node["name"]
 
     except Exception as e:
         logger.error(f"Error searching for '{tournament_name}': {e}")
