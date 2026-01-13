@@ -158,6 +158,7 @@ def _matches_tournament_series(node_name: str, series_name: str) -> bool:
 
 async def _search_tournaments_with_retry(session, headers: dict, query: dict) -> list:
     """Execute tournament search with retry logic, proper HTTP handling, and exponential backoff."""
+    import json as json_module  # Local import to avoid shadowing
     last_error = None
 
     for attempt in range(1, MAX_RETRIES + 1):
@@ -178,7 +179,8 @@ async def _search_tournaments_with_retry(session, headers: dict, query: dict) ->
                     logger.error(f"start.gg unexpected HTTP {resp.status}: {text[:500]}")
                     return []
 
-                data = await resp.json(content_type=None)
+                # Parse the text we already read (can't call resp.json() after resp.text())
+                data = json_module.loads(text)
 
                 if "errors" in data:
                     logger.warning(f"start.gg GraphQL errors: {data['errors']}")
