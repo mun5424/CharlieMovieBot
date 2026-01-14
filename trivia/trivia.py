@@ -1,6 +1,5 @@
-# trivia/trivia.py - Multi-server trivia system with improved scoring and SF6 integration
+# trivia/trivia.py - Multi-server trivia system with 2-player limit and provider pattern
 
-import aiohttp
 import discord
 from discord.ext import commands
 from discord import app_commands
@@ -10,17 +9,26 @@ import asyncio
 import time
 import logging
 from typing import Dict, Optional, Tuple, Any, List
-from dataclasses import dataclass, asdict
-from enum import Enum
+from dataclasses import dataclass
+
 from trivia.multi_server_data_manager import MultiServerDataManager
-from trivia.question_cache import QuestionCache
-from trivia.models import Difficulty, UserStats, SeasonSnapshot
-from trivia.sf6_trivia import SF6TriviaManager  # Import your SF6 system
+from trivia.models import Difficulty, UserStats
+from trivia.categories import (
+    UnifiedCategory,
+    get_unified_categories,
+    get_category_emoji,
+    CATEGORY_EMOJIS,
+)
+from trivia.providers import (
+    TriviaProvider, StandardQuestion,
+    OpenTDBProvider, SF6Provider, TriviaAPIProvider, QuizAPIProvider
+)
 
 logger = logging.getLogger(__name__)
 
 # Configuration
 QUESTION_TIMEOUT = 30
+MAX_CONCURRENT_PLAYERS = 2  # Maximum players per server at once
 
 # Import config for scoring configuration
 try:
@@ -30,59 +38,74 @@ try:
     AUTHORIZED_RESET_USER_ID = config.TRIVIA_CONFIG.get("authorized_reset_user_id", "YOUR_USER_ID_HERE")
 except (ImportError, KeyError) as e:
     logger.warning(f"Could not load config, using fallback scoring: {e}")
-    # IMPROVED Fallback scoring configuration
+    SCORING_CONFIG = {
+        "base_points": {"easy": 10, "medium": 20, "hard": 30},
+        "speed_bonuses": [
+            {"max_time": 3, "bonus": 15},
+            {"max_time": 6, "bonus": 10},
+            {"max_time": 10, "bonus": 7},
+            {"max_time": 15, "bonus": 5},
+            {"max_time": 20, "bonus": 3},
+            {"max_time": 25, "bonus": 1},
+        ],
+        "streak_multipliers": [
+            {"min_streak": 3, "multiplier": 1.25},
+            {"min_streak": 5, "multiplier": 1.5},
+            {"min_streak": 10, "multiplier": 2.0},
+        ],
+        "penalties": {
+            "wrong_answer_random": {"easy": -5, "medium": -10, "hard": -15},
+            "wrong_answer_intentional": {"easy": -5, "medium": -12, "hard": -20},
+            # Diminishing rush penalties - faster wrong answers penalized more (max -5)
+            "rush_penalties": [
+                {"max_time": 2, "penalty": -5, "tier": "Instant Guess"},
+                {"max_time": 4, "penalty": -4, "tier": "Rush Guess"},
+                {"max_time": 6, "penalty": -3, "tier": "Quick Guess"},
+                {"max_time": 8, "penalty": -2, "tier": "Hasty"},
+                {"max_time": 10, "penalty": -1, "tier": "Slightly Rushed"},
+            ],
+            "timeout": -10,
+        }
+    }
+    AUTHORIZED_RESET_USER_ID = "YOUR_USER_ID_HERE"
 
-# EXPANDED TRIVIA CATEGORIES - Now includes SF6!
-TRIVIA_CATEGORIES = {
-    "General Knowledge": 9,
-    "Books": 10,
-    "Film": 11,
-    "Music": 12,
-    "Television": 14,
-    "Video Games": 15,
-    "Science": 17,
-    "Computers": 18,
-    "Math": 19,
-    "Mythology": 20,
-    "Sports": 21,
-    "Geography": 22,
-    "History": 23,
-    "Politics": 24,
-    "Art": 25,
-    "Celebrities": 26,
-    "Animals": 27,
-    "Vehicles": 28,
-    "Comics": 29,
-    "Gadgets": 30,
-    "Anime & Manga": 31,
-    "Cartoons": 32,
-    "Street Fighter 6": "sf6"  # Special category for SF6
-}
+
+@dataclass
+class ActiveQuestion:
+    """Tracks an active trivia question for a user"""
+    user_id: int
+    channel_id: int
+    message_id: int
+    correct_letter: str
+    correct_answer: str
+    start_time: float
+    difficulty: Difficulty
+    was_intentional: bool
+    question_data: StandardQuestion
+    timeout_task: Optional[asyncio.Task] = None
+
 
 class ScoreCalculator:
     @staticmethod
     def calculate_speed_bonus(response_time: float) -> Tuple[int, str]:
-        """Calculate speed bonus based on response time with diminishing returns"""
+        """Calculate speed bonus based on response time"""
         for bonus_config in SCORING_CONFIG["speed_bonuses"]:
             if response_time <= bonus_config["max_time"]:
-                # Determine speed tier for display
                 if response_time <= 3:
-                    tier = "⚡ Lightning Fast!"
+                    tier = "Lightning Fast!"
                 elif response_time <= 6:
-                    tier = "🔥 Very Fast!"
+                    tier = "Very Fast!"
                 elif response_time <= 10:
-                    tier = "⭐ Fast!"
+                    tier = "Fast!"
                 elif response_time <= 15:
-                    tier = "👍 Good Speed"
+                    tier = "Good Speed"
                 elif response_time <= 20:
-                    tier = "👌 Decent"
+                    tier = "Decent"
                 else:
-                    tier = "🐌 Getting Slow..."
-                
+                    tier = "Getting Slow..."
                 return bonus_config["bonus"], tier
-        
-        return 0, "🐢 Too Slow"
-    
+        return 0, "Too Slow"
+
     @staticmethod
     def calculate_streak_multiplier(streak: int) -> float:
         """Calculate streak multiplier based on current streak"""
@@ -91,29 +114,31 @@ class ScoreCalculator:
             if streak >= streak_config["min_streak"]:
                 multiplier = streak_config["multiplier"]
         return multiplier
-    
+
     @staticmethod
-    def calculate_final_score(difficulty: Difficulty, response_time: float, 
-                            is_correct: bool, streak: int, was_intentional: bool = False, 
-                            is_sf6: bool = False) -> Tuple[int, Dict[str, Any]]:
-        """
-        Calculate final score with breakdown
-        
-        Args:
-            difficulty: The difficulty level
-            response_time: How long it took to answer
-            is_correct: Whether the answer was correct
-            streak: Current streak count
-            was_intentional: Whether the user specifically chose this difficulty
-            is_sf6: Whether this is an SF6 question (always uses easy scoring)
-        """
-        # SF6 questions always use easy difficulty for scoring
+    def calculate_rush_penalty(response_time: float) -> Tuple[int, str]:
+        """Calculate diminishing rush penalty - faster wrong answers penalized more"""
+        rush_penalties = SCORING_CONFIG["penalties"].get("rush_penalties", [])
+        for rush_config in rush_penalties:
+            if response_time <= rush_config["max_time"]:
+                return rush_config["penalty"], rush_config["tier"]
+        return 0, "Considered"  # No rush penalty for slower answers
+
+    @staticmethod
+    def calculate_final_score(
+        difficulty: Difficulty,
+        response_time: float,
+        is_correct: bool,
+        streak: int,
+        was_intentional: bool = False,
+        is_sf6: bool = False
+    ) -> Tuple[int, Dict[str, Any]]:
+        """Calculate final score with breakdown"""
         scoring_difficulty = Difficulty.EASY if is_sf6 else difficulty
-        
         base_points = SCORING_CONFIG["base_points"][scoring_difficulty.value]
         speed_bonus, speed_tier = ScoreCalculator.calculate_speed_bonus(response_time)
         streak_multiplier = ScoreCalculator.calculate_streak_multiplier(streak)
-        
+
         breakdown = {
             "base_points": base_points,
             "speed_bonus": speed_bonus,
@@ -121,36 +146,38 @@ class ScoreCalculator:
             "streak_multiplier": streak_multiplier,
             "penalty": 0,
             "penalty_reason": "",
-            "is_sf6": is_sf6  # Track if this was SF6 for display purposes
+            "rush_penalty": 0,
+            "rush_tier": "",
+            "is_sf6": is_sf6
         }
-        
+
         if is_correct:
             final_score = int((base_points + speed_bonus) * streak_multiplier)
         else:
-            # Apply improved penalties based on whether difficulty was intentionally chosen
-            # SF6 questions always use easy penalty regardless of displayed difficulty
+            # Base wrong answer penalty
             if was_intentional:
                 penalty = SCORING_CONFIG["penalties"]["wrong_answer_intentional"][scoring_difficulty.value]
                 penalty_reason = f"Wrong on {difficulty.value.title()} (Intentional)"
-                if is_sf6:
-                    penalty_reason += " • SF6 Easy Penalty"
             else:
                 penalty = SCORING_CONFIG["penalties"]["wrong_answer_random"][scoring_difficulty.value]
                 penalty_reason = f"Wrong on {difficulty.value.title()} (Random)"
-                if is_sf6:
-                    penalty_reason += " • SF6 Easy Penalty"
-            
-            # Additional penalty for being wrong AND fast (shows carelessness)
-            if response_time < 5:
-                penalty += SCORING_CONFIG["penalties"]["wrong_fast_bonus_penalty"]
-                penalty_reason += " + Rush Penalty"
-            
+
+            if is_sf6:
+                penalty_reason += " - SF6 Easy Penalty"
+
+            # Diminishing rush penalty - faster = more penalty
+            rush_penalty, rush_tier = ScoreCalculator.calculate_rush_penalty(response_time)
+            if rush_penalty < 0:
+                penalty += rush_penalty
+                penalty_reason += f" + {rush_tier} ({rush_penalty})"
+                breakdown["rush_penalty"] = rush_penalty
+                breakdown["rush_tier"] = rush_tier
+
             breakdown["penalty"] = penalty
             breakdown["penalty_reason"] = penalty_reason
             final_score = penalty
-        
-        return final_score, breakdown
 
+        return final_score, breakdown
 
 
 class TriviaCog(commands.Cog):
@@ -158,176 +185,236 @@ class TriviaCog(commands.Cog):
         self.bot = bot
         self.data_manager = MultiServerDataManager()
 
-        # Track active questions per server - now includes intentional difficulty flag
-        self.active_questions: Dict[str, Tuple] = {}  # guild_id -> question_data
-        self.timeout_tasks: Dict[str, asyncio.Task] = {}  # guild_id -> timeout_task
+        # Track active questions per server per user
+        # Structure: {guild_id: {user_id: ActiveQuestion}}
+        self.active_questions: Dict[str, Dict[int, ActiveQuestion]] = {}
 
         # Lock to prevent race conditions when processing answers
-        self.answer_locks: Dict[str, asyncio.Lock] = {}  # guild_id -> lock
+        self.answer_locks: Dict[str, asyncio.Lock] = {}
 
-        self.session = None
+        # Initialize providers
+        self.providers: Dict[str, TriviaProvider] = {}
+        self._init_providers()
 
-        self.question_cache = QuestionCache()  # Use the new smart cache
+        logger.info("TriviaCog with 2-player limit and provider pattern initialized")
 
-        # Initialize SF6 Trivia Manager
-        self.sf6_trivia = SF6TriviaManager()
+    def _init_providers(self):
+        """Initialize all trivia providers"""
+        # OpenTDB provider (primary)
+        opentdb = OpenTDBProvider(self.data_manager)
+        self.providers["opentdb"] = opentdb
 
-        logger.info("Multi-server TriviaCog with SF6 support initialized")
+        # SF6 provider (frame data)
+        sf6 = SF6Provider()
+        self.providers["sf6"] = sf6
+
+        # The Trivia API provider (no API key needed)
+        trivia_api = TriviaAPIProvider()
+        self.providers["trivia_api"] = trivia_api
+
+        # QuizAPI provider (tech/programming - requires API key)
+        try:
+            import config
+            quizapi_key = getattr(config, 'QUIZAPI_KEY', None)
+            if quizapi_key:
+                quizapi = QuizAPIProvider(api_key=quizapi_key)
+                self.providers["quizapi"] = quizapi
+                logger.info("QuizAPI provider enabled")
+            else:
+                logger.info("QuizAPI provider disabled - no API key in config")
+        except (ImportError, AttributeError):
+            logger.info("QuizAPI provider disabled - config not available")
+
+        logger.info(f"Initialized {len(self.providers)} trivia providers")
+
+    def _select_random_provider(self, unified_category: Optional[UnifiedCategory] = None) -> TriviaProvider:
+        """
+        Select a random provider with weighted probabilities.
+        Weights: OpenTDB 50%, Trivia API 30%, SF6 10%, QuizAPI 10%
+        """
+        available_providers = []
+        weights = []
+
+        # OpenTDB - primary provider
+        if self.providers.get("opentdb") and self.providers["opentdb"].is_available:
+            available_providers.append(self.providers["opentdb"])
+            weights.append(50)
+
+        # The Trivia API - good variety
+        if self.providers.get("trivia_api") and self.providers["trivia_api"].is_available:
+            # Check if category is supported
+            trivia_api = self.providers["trivia_api"]
+            if unified_category is None or unified_category in trivia_api.get_supported_categories():
+                available_providers.append(trivia_api)
+                weights.append(30)
+
+        # SF6 - only for Gaming or random
+        if self.providers.get("sf6") and self.providers["sf6"].is_available:
+            if unified_category is None or unified_category == UnifiedCategory.GAMING:
+                available_providers.append(self.providers["sf6"])
+                weights.append(10)
+
+        # QuizAPI - only for Science & Tech or random
+        if self.providers.get("quizapi") and self.providers["quizapi"].is_available:
+            if unified_category is None or unified_category == UnifiedCategory.SCIENCE_TECH:
+                available_providers.append(self.providers["quizapi"])
+                weights.append(10)
+
+        if not available_providers:
+            # Fallback to OpenTDB
+            return self.providers.get("opentdb")
+
+        # Weighted random selection
+        return random.choices(available_providers, weights=weights, k=1)[0]
+
+    def _select_provider_for_category(self, unified_category: UnifiedCategory) -> TriviaProvider:
+        """
+        Select a provider that supports the given category.
+        Randomly chooses between available providers with weighting.
+        """
+        available_providers = []
+        weights = []
+
+        # OpenTDB supports all categories
+        if self.providers.get("opentdb") and self.providers["opentdb"].is_available:
+            available_providers.append(self.providers["opentdb"])
+            weights.append(60)
+
+        # The Trivia API - check if it supports this category
+        if self.providers.get("trivia_api") and self.providers["trivia_api"].is_available:
+            trivia_api = self.providers["trivia_api"]
+            if unified_category in trivia_api.get_supported_categories():
+                available_providers.append(trivia_api)
+                weights.append(40)
+
+        # QuizAPI - only for Science & Tech
+        if unified_category == UnifiedCategory.SCIENCE_TECH:
+            if self.providers.get("quizapi") and self.providers["quizapi"].is_available:
+                available_providers.append(self.providers["quizapi"])
+                weights.append(20)
+
+        if not available_providers:
+            return self.providers.get("opentdb")
+
+        return random.choices(available_providers, weights=weights, k=1)[0]
+
+    async def _fetch_question_with_fallback(
+        self,
+        provider: TriviaProvider,
+        unified_category: Optional[UnifiedCategory],
+        difficulty: Optional[str],
+        guild_id: str,
+        user_id: str,
+    ) -> Optional[StandardQuestion]:
+        """
+        Fetch a question from the given provider, falling back to others if it fails.
+        Tries up to 3 providers before giving up.
+        """
+        tried_providers = set()
+        current_provider = provider
+        max_attempts = 3
+
+        for attempt in range(max_attempts):
+            if current_provider is None:
+                break
+
+            tried_providers.add(current_provider.provider_id)
+
+            # Try to fetch from current provider
+            question = await current_provider.get_question(
+                unified_category=unified_category,
+                difficulty=difficulty,
+                guild_id=guild_id,
+                user_id=user_id
+            )
+
+            if question:
+                return question
+
+            logger.info(f"Provider {current_provider.name} failed, attempting fallback ({attempt + 1}/{max_attempts})")
+
+            # Find a fallback provider we haven't tried
+            current_provider = None
+            fallback_order = ["opentdb", "trivia_api", "sf6", "quizapi"]
+
+            for pid in fallback_order:
+                if pid in tried_providers:
+                    continue
+                fallback = self.providers.get(pid)
+                if fallback and fallback.is_available:
+                    # Check if fallback supports the category
+                    if unified_category is None or unified_category in fallback.get_supported_categories():
+                        current_provider = fallback
+                        break
+
+        return None
 
     def _get_answer_lock(self, guild_id: str) -> asyncio.Lock:
         """Get or create a lock for a specific guild"""
         if guild_id not in self.answer_locks:
             self.answer_locks[guild_id] = asyncio.Lock()
         return self.answer_locks[guild_id]
-    
+
     async def cog_load(self):
         """Called when the cog is loaded"""
-        # Create HTTP session for API calls
-        connector = aiohttp.TCPConnector(
-            limit=5,  # Connection pool limit
-            limit_per_host=2,
-            ttl_dns_cache=300,
-            use_dns_cache=True
-        )
-        
-        timeout = aiohttp.ClientTimeout(total=15, connect=5)
-        self.session = aiohttp.ClientSession(
-            connector=connector,
-            timeout=timeout,
-            headers={'User-Agent': 'TriviaBot/2.0'}
-        )
-        logger.info("TriviaCog session created")
-    
+        for provider in self.providers.values():
+            await provider.initialize()
+        logger.info("TriviaCog providers initialized")
+
     async def cog_unload(self):
         """Called when the cog is unloaded"""
         # Cancel all timeout tasks
-        for guild_id, task in list(self.timeout_tasks.items()):
-            if not task.done():
-                task.cancel()
+        for guild_questions in self.active_questions.values():
+            for active_q in guild_questions.values():
+                if active_q.timeout_task and not active_q.timeout_task.done():
+                    active_q.timeout_task.cancel()
 
-        # Clear all active questions
         self.active_questions.clear()
-        self.timeout_tasks.clear()
         self.answer_locks.clear()
 
-        if self.session and not self.session.closed:
-            await self.session.close()
+        # Cleanup providers
+        for provider in self.providers.values():
+            await provider.cleanup()
 
-        # Force save all pending data
         self.data_manager.force_save_all()
-        logger.info("Multi-server TriviaCog cleaned up")
+        logger.info("TriviaCog cleaned up")
 
-    async def cleanup_stale_questions(self):
-        """Periodic cleanup for questions that may have been left behind due to bugs"""
-        current_time = time.time()
-        stale_guilds = []
+    def _get_active_count(self, guild_id: str) -> int:
+        """Get number of active questions in a guild"""
+        return len(self.active_questions.get(guild_id, {}))
 
-        for guild_id, question_data in self.active_questions.items():
-            _, _, _, _, start_time, _, _, _, _ = question_data
-            # If question has been active for more than 2x the timeout, it's stale
-            if current_time - start_time > QUESTION_TIMEOUT * 2:
-                stale_guilds.append(guild_id)
+    def _has_active_question(self, guild_id: str, user_id: int) -> bool:
+        """Check if a user has an active question"""
+        return user_id in self.active_questions.get(guild_id, {})
 
-        for guild_id in stale_guilds:
-            logger.warning(f"Cleaning up stale question in guild {guild_id}")
-            self._cleanup_question(guild_id)
-    
-    async def cleanup_memory(self):
-        """Clean up memory (called by performance monitor)"""
-        self.data_manager.cleanup_memory()
-        await self.cleanup_stale_questions()
-        logger.info("Trivia memory cleanup completed")
-
-    def _cleanup_question(self, guild_id: str):
-        """Safely cleanup question data"""
+    def _cleanup_question(self, guild_id: str, user_id: int):
+        """Safely cleanup a user's question data"""
         if guild_id in self.active_questions:
-            del self.active_questions[guild_id]
-        if guild_id in self.timeout_tasks:
-            if not self.timeout_tasks[guild_id].done():
-                self.timeout_tasks[guild_id].cancel()
-            del self.timeout_tasks[guild_id]
-            
-    
+            if user_id in self.active_questions[guild_id]:
+                active_q = self.active_questions[guild_id][user_id]
+                if active_q.timeout_task and not active_q.timeout_task.done():
+                    active_q.timeout_task.cancel()
+                del self.active_questions[guild_id][user_id]
+
+            # Clean up empty guild dict
+            if not self.active_questions[guild_id]:
+                del self.active_questions[guild_id]
+
     def get_guild_id(self, interaction: discord.Interaction) -> str:
         """Get guild ID as string"""
         return str(interaction.guild.id) if interaction.guild else "DM"
-    
-    async def fetch_trivia_question(self, category_id: Optional[int] = None, 
-                                  difficulty: Optional[Difficulty] = None,
-                                  guild_id: Optional[str] = None,
-                                  user_id: Optional[str] = None,
-                                  category_name: Optional[str] = None) -> Optional[Dict]:
-        """
-        Fetch a trivia question using smart caching OR SF6 system
-        
-        Args:
-            category_id: Category ID for the question (OpenTDB)
-            difficulty: Difficulty level
-            guild_id: Server ID for question tracking
-            user_id: User ID for duplicate checking
-            category_name: Category name (used to detect SF6)
-        """
-        
-        # Check if this is an SF6 question request
-        if category_name == "Street Fighter 6" or category_id == "sf6":
-            return await self.fetch_sf6_question(difficulty, guild_id, user_id)
-        
-        # Regular OpenTDB question
-        question_data = await self.question_cache.get_question(
-            self.session, 
-            category_id, 
-            difficulty, 
-            guild_id, 
-            user_id, 
-            self.data_manager
-        )
-        
-        if question_data:
-            logger.debug("Successfully served question from cache")
-            return question_data
-        else:
-            logger.error("Failed to get question from cache")
-            return None
-    
-    async def fetch_sf6_question(self, difficulty: Optional[Difficulty] = None,
-                            guild_id: Optional[str] = None, 
-                            user_id: Optional[str] = None) -> Optional[Dict]:
-        """Fetch an SF6 trivia question"""
-        if not self.sf6_trivia.available:
-            logger.warning("SF6 trivia database not available")
-            return None
-        
-        try:
-            # Handle random difficulty selection for SF6 questions
-            if difficulty is None:
-                # Randomly choose a difficulty if none specified
-                difficulty = random.choice(list(Difficulty))
-                logger.debug(f"SF6: Randomly selected {difficulty.value} difficulty")
-            
-            # Convert difficulty enum to string for SF6 system
-            diff_str = difficulty.value
-            
-            # Generate SF6 question
-            sf6_question = self.sf6_trivia.generate_question(diff_str)
-            
-            if not sf6_question:
-                return None
-            
-            # Convert SF6Question to standard format
-            return self.sf6_trivia.to_standard_format(sf6_question)
-            
-        except Exception as e:
-            logger.error(f"Error fetching SF6 question: {e}")
-            return None
-    
+
     async def autocomplete_category(self, interaction: discord.Interaction, current: str):
-        """Autocomplete for trivia categories - now includes SF6"""
+        """Autocomplete for unified trivia categories"""
+        categories = get_unified_categories()
+        # Add SF6 as special option under Gaming
+        all_options = categories + ["Street Fighter 6"]
         return [
-            app_commands.Choice(name=cat, value=cat)
-            for cat in TRIVIA_CATEGORIES
+            app_commands.Choice(name=f"{get_category_emoji(UnifiedCategory(cat)) if cat in categories else '🎮'} {cat}", value=cat)
+            for cat in all_options
             if current.lower() in cat.lower()
-        ][:25]  # Increased limit to accommodate SF6
-    
+        ][:25]
+
     async def autocomplete_difficulty(self, interaction: discord.Interaction, current: str):
         """Autocomplete for difficulty levels"""
         difficulties = ["easy", "medium", "hard"]
@@ -336,498 +423,201 @@ class TriviaCog(commands.Cog):
             for diff in difficulties
             if current.lower() in diff.lower()
         ]
-    
-    @app_commands.command(name="trivia", description="Start a trivia question (now with SF6 support!)")
+
+    @app_commands.command(name="trivia", description="Start a trivia question!")
     @app_commands.describe(
-        category="Choose a trivia category (including Street Fighter 6!)",
-        difficulty="Choose your difficulty (optional)"
+        category="Choose a category (or leave blank for random)",
+        difficulty="Choose difficulty (or leave blank for random)"
     )
     @app_commands.autocomplete(category=autocomplete_category)
     @app_commands.autocomplete(difficulty=autocomplete_difficulty)
-    async def trivia(self, interaction: discord.Interaction, 
-                    category: Optional[str] = None, 
-                    difficulty: Optional[str] = None):
-        """Main trivia command - now with SF6 support!"""
+    async def trivia(
+        self,
+        interaction: discord.Interaction,
+        category: Optional[str] = None,
+        difficulty: Optional[str] = None
+    ):
+        """Main trivia command with 2-player limit"""
         await interaction.response.defer()
-        
+
         guild_id = self.get_guild_id(interaction)
-        
-        # Check if there's already an active question in this server
-        if guild_id in self.active_questions:
-            await self._handle_active_question_conflict(interaction, guild_id)
+        user_id = interaction.user.id
+
+        # Check if user already has an active question
+        if self._has_active_question(guild_id, user_id):
+            embed = discord.Embed(
+                title="You Already Have a Question!",
+                description="Finish your current question before starting a new one.",
+                color=discord.Color.orange()
+            )
+            await interaction.followup.send(embed=embed, ephemeral=True)
             return
-        
-        # Parse difficulty and track if it was intentionally chosen
+
+        # Check if server is at max concurrent players
+        active_count = self._get_active_count(guild_id)
+        if active_count >= MAX_CONCURRENT_PLAYERS:
+            # Show who's currently playing
+            current_players = []
+            for uid in self.active_questions.get(guild_id, {}).keys():
+                user = self.bot.get_user(uid)
+                if user:
+                    current_players.append(user.display_name)
+
+            embed = discord.Embed(
+                title=f"Server at Max Capacity ({MAX_CONCURRENT_PLAYERS} players)",
+                description=f"**Currently playing:** {', '.join(current_players)}\n\n"
+                           f"Please wait for someone to finish their question.",
+                color=discord.Color.orange()
+            )
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            return
+
+        # Parse difficulty
         diff_enum = None
         was_intentional = difficulty is not None
-        
         if difficulty:
             try:
                 diff_enum = Difficulty(difficulty.lower())
             except ValueError:
-                await interaction.followup.send("❌ Invalid difficulty. Use: easy, medium, or hard")
+                await interaction.followup.send("Invalid difficulty. Use: easy, medium, or hard", ephemeral=True)
                 return
-        
-        # Get category ID - handle SF6 specially
-        category_id = None
-        if category:
-            if category == "Street Fighter 6":
-                category_id = "sf6"  # Special identifier for SF6
-            else:
-                category_id = TRIVIA_CATEGORIES.get(category.title())
-                if not category_id:
-                    await interaction.followup.send("❌ Invalid category.")
-                    return
-        
-        # Fetch question - handles both OpenTDB and SF6
-        question_data = await self.fetch_trivia_question(
-            category_id, diff_enum, guild_id, str(interaction.user.id), category
-        )
-        
-        if not question_data:
-            # Enhanced error handling for SF6
-            if category == "Street Fighter 6":
-                if not self.sf6_trivia.available:
-                    error_embed = discord.Embed(
-                        title="🎮 SF6 Database Unavailable",
-                        description="The Street Fighter 6 trivia database is not available. Please contact an admin or try regular trivia categories.",
-                        color=discord.Color.red()
-                    )
-                else:
-                    error_embed = discord.Embed(
-                        title="🎮 No SF6 Questions Available", 
-                        description="Could not generate an SF6 question with your criteria. Try a different difficulty or try again.",
-                        color=discord.Color.red()
-                    )
-            else:
-                # Regular trivia error handling
-                cache_stats = self.question_cache.get_cache_stats()
-                if cache_stats['total_questions'] == 0:
-                    error_embed = discord.Embed(
-                        title="❌ API Unavailable",
-                        description="The trivia API is currently unavailable and the question cache is empty. Please try again in a few minutes.",
-                        color=discord.Color.red()
-                    )
-                else:
-                    error_embed = discord.Embed(
-                        title="❌ No Questions Available",
-                        description="Could not find a suitable question. This is unusual - please try again or contact an admin.",
-                        color=discord.Color.red()
-                    )
-            
-            await interaction.followup.send(embed=error_embed)
-            return
-        
-        await self._create_trivia_question(interaction, question_data, guild_id, was_intentional)
-        
-    
-    @staticmethod
-    def is_authorized_user(interaction: discord.Interaction) -> bool:
-        """Check if user is authorized to reset scores"""
-        return str(interaction.user.id) == AUTHORIZED_RESET_USER_ID
 
-    @app_commands.command(name="reset_scores", description="Reset all scores for this server (authorized users only)")
-    @app_commands.describe(season_name="Name for this season (e.g., 'Season 1', 'Winter 2024')")
-    @app_commands.check(is_authorized_user.__func__)
-    async def reset_scores(self, interaction: discord.Interaction, season_name: str):
-        """Reset all trivia scores for the server with hall of fame archival"""
-        await interaction.response.defer()
+        # Determine provider and category
+        provider = None
+        unified_category = None
 
-        guild_id = self.get_guild_id(interaction)
-        server_name = interaction.guild.name if interaction.guild else "DM"
-        
-        # Check if there are any scores to reset
-        leaderboard = self.data_manager.get_server_leaderboard(guild_id)
-        if not leaderboard:
-            embed = discord.Embed(
-                title="📊 No Scores Found",
-                description="There are no scores to reset in this server.",
-                color=discord.Color.orange()
-            )
-            await interaction.followup.send(embed=embed)
-            return
-        
-        # Create confirmation embed
-        top_player = leaderboard[0][1]  # Get top player's stats
-        embed = discord.Embed(
-            title="⚠️ Confirm Score Reset",
-            description=f"**Are you sure you want to reset all scores for {server_name}?**\n\n"
-                       f"This will:\n"
-                       f"• Archive current scores as **'{season_name}'**\n"
-                       f"• Reset all {len(leaderboard)} players' scores to 0\n"
-                       f"• Keep question history (no repeats)\n\n"
-                       f"**Current leader:** {top_player.username} ({top_player.total_score} points)\n"
-                       f"**Total players:** {len(leaderboard)}",
-            color=discord.Color.orange()
-        )
-        
-        embed.set_footer(text="This action cannot be undone! React with ✅ to confirm or ❌ to cancel.")
-        
-        msg = await interaction.followup.send(embed=embed)
-        
-        # Add reactions
-        await msg.add_reaction("✅")
-        await msg.add_reaction("❌")
-        
-        # Wait for reaction
-        def check(reaction, user):
-            return (user.id == interaction.user.id and 
-                   str(reaction.emoji) in ["✅", "❌"] and 
-                   reaction.message.id == msg.id)
-        
-        try:
-            reaction, user = await self.bot.wait_for('reaction_add', timeout=30.0, check=check)
-            
-            if str(reaction.emoji) == "✅":
-                # Create and save snapshot
-                snapshot = self.data_manager.create_season_snapshot(guild_id, season_name, server_name)
-                self.data_manager.save_season_snapshot(guild_id, snapshot)
-                
-                # Reset scores
-                self.data_manager.reset_server_scores(guild_id)
-                
-                # Success message
-                success_embed = discord.Embed(
-                    title="✅ Scores Reset Successfully",
-                    description=f"**Season '{season_name}' archived!**\n\n"
-                               f"• {len(leaderboard)} players archived\n"
-                               f"• All scores reset to 0\n"
-                               f"• Question history preserved\n"
-                               f"• Use `/hall_of_fame` to view archived seasons",
-                    color=discord.Color.green()
-                )
-                
-                await msg.edit(embed=success_embed)
-                await msg.clear_reactions()
-                
-            else:
-                # Cancelled
-                cancel_embed = discord.Embed(
-                    title="❌ Reset Cancelled",
-                    description="Score reset has been cancelled.",
-                    color=discord.Color.red()
-                )
-                await msg.edit(embed=cancel_embed)
-                await msg.clear_reactions()
-                
-        except asyncio.TimeoutError:
-            timeout_embed = discord.Embed(
-                title="⏰ Confirmation Timeout",
-                description="Score reset confirmation timed out.",
-                color=discord.Color.red()
-            )
-            await msg.edit(embed=timeout_embed)
-            await msg.clear_reactions()
-
-    @reset_scores.error
-    async def reset_scores_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
-        """Handle reset_scores command errors"""
-        if isinstance(error, app_commands.CheckFailure):
-            embed = discord.Embed(
-                title="🚫 Access Denied",
-                description="You don't have permission to use this command.",
-                color=discord.Color.red()
-            )
-            if interaction.response.is_done():
-                await interaction.followup.send(embed=embed, ephemeral=True)
-            else:
-                await interaction.response.send_message(embed=embed, ephemeral=True)
-        else:
-            # Handle other potential errors
-            logger.error(f"Reset scores error: {error}")
-            error_embed = discord.Embed(
-                title="❌ Command Error",
-                description="An error occurred while processing the reset command.",
-                color=discord.Color.red()
-            )
-            if interaction.response.is_done():
-                await interaction.followup.send(embed=error_embed, ephemeral=True)
-            else:
-                await interaction.response.send_message(embed=error_embed, ephemeral=True)
-
-        
-    async def autocomplete_season(self, interaction: discord.Interaction, current: str):
-        """Autocomplete for season names in hall of fame"""
-        guild_id = self.get_guild_id(interaction)
-        hall_of_fame = self.data_manager.get_hall_of_fame(guild_id)
-        
-        return [
-            app_commands.Choice(name=season.season_name, value=season.season_name)
-            for season in hall_of_fame
-            if current.lower() in season.season_name.lower()
-        ][:20]
-
-    @app_commands.command(name="hall_of_fame", description="View archived seasons and past champions")
-    @app_commands.describe(season="Specific season to view details")
-    @app_commands.autocomplete(season=autocomplete_season)
-    async def hall_of_fame(self, interaction: discord.Interaction, season: Optional[str] = None):
-        """View the hall of fame with enhanced styling"""
-        await interaction.response.defer()
-        
-        guild_id = self.get_guild_id(interaction)
-        server_name = interaction.guild.name if interaction.guild else "DM"
-        
-        hall_of_fame = self.data_manager.get_hall_of_fame(guild_id)
-        
-        if not hall_of_fame:
-            embed = discord.Embed(
-                title="",
-                description=f"🏛️ **HALL OF FAME** 🏛️\n"
-                        f"### 👑 **{server_name}** 👑\n\n"
-                        f"```diff\n"
-                        f"🌟 The halls echo with silence... 🌟\n"
-                        f"🏺 No legendary seasons yet! 🏺\n"
-                        f"⚔️ History awaits your conquest! ⚔️\n"
-                        f"```\n"
-                        f"📜 **History awaits your greatness!** 📜\n"
-                        f"🎭 Seasons will be immortalized here after using `/reset_scores`\n"
-                        f"✨ Start building your legendary legacy with `/trivia`!\n\n"
-                        f"🎮 **NEW:** Try Street Fighter 6 trivia for hardcore frame data challenges!✨ ",
-                color=discord.Color.gold()
-            )
-            embed.set_thumbnail(url=interaction.guild.icon.url if interaction.guild and interaction.guild.icon else None)
-            await interaction.followup.send(embed=embed)
-            return
-        
-        if season:
-            # Show specific season details with enhanced styling
-            season_data = None
-            for s in hall_of_fame:
-                if s.season_name.lower() == season.lower():
-                    season_data = s
-                    break
-            
-            if not season_data:
-                available_seasons = "`, `".join([s.season_name for s in hall_of_fame])
-                embed = discord.Embed(
-                    title="🔍 Season Not Found",
-                    description=f"### ❌ **'{season}'** does not exist\n\n"
-                            f"**📚 Available Seasons:**\n`{available_seasons}`\n\n"
-                            f"💡 *Try using autocomplete to find the right season!*",
-                    color=discord.Color.red()
-                )
-                await interaction.followup.send(embed=embed)
-                return
-            
-            # Create detailed season view
-            embed = discord.Embed(title="", description="", color=discord.Color.gold())
-            
-            header = f"🏛️ **HALL OF FAME** 🏛️\n\n"
-            header += f"### 👑 **{season_data.season_name}**\n\n"
-            
-            # Season info box
-            season_info = f"```ansi\n"
-            season_info += f"\u001b[1;36m🏰 Server:\u001b[0m \u001b[1;33m{season_data.server_name}\u001b[0m\n"
-            season_info += f"\u001b[1;35m📅 Ended:\u001b[0m \u001b[1;32m{season_data.end_date}\u001b[0m\n"
-            season_info += f"```\n"
-            
-            # Top 3 legendary champions
-            legends_text = ""
-            
-            top_3_legends = season_data.leaderboard[:3]
-            legend_medals = ["👑", "🥈", "🥉"]
-            legend_titles = ["ULTIMATE CHAMPION", "ROYAL RUNNER-UP", "TRIUMPHANT THIRD"]
-            
-            for i, player in enumerate(top_3_legends):
-                legends_text += f"\n{legend_medals[i]} **{legend_titles[i]}** {legend_medals[i]}\n"
-                legends_text += f"```ansi\n"
-                legends_text += f"\u001b[1;36m👤 \u001b[1;33m{player['username']}\u001b[0m\n"
-                legends_text += f"\u001b[1;35m🏆 Final Score:\u001b[0m \u001b[1;32m{player['total_score']:,} points\u001b[0m\n"
-                legends_text += f"\u001b[1;34m🎯 Mastery:\u001b[0m \u001b[1;31m{player['accuracy']}% accuracy\u001b[0m\n"
-                legends_text += f"\u001b[1;33m🔥 Epic Streak:\u001b[0m \u001b[1;36m{player['best_streak']}\u001b[0m\n"
-                legends_text += f"\u001b[1;32m⚔️ Questions:\u001b[0m \u001b[1;37m{player['correct_answers']}/{player['questions_answered']}\u001b[0m\n"
-                legends_text += f"```"
-            
-            # Hall of champions (4-10)
-            hall_text = ""
-            if len(season_data.leaderboard) > 3:
-                hall_text = "\n **HALL OF CHAMPIONS** \n\n"
-                
-                for i, player in enumerate(season_data.leaderboard[3:10], 4):
-                    # Add variety to ranking emojis
-                    if i <= 5:
-                        rank_emojis = "💎"
-                    elif i <= 7:
-                        rank_emojis = "⭐"
-                    else:
-                        rank_emojis = "✨"
-                        
-                    hall_text += f"**#{i}** {rank_emojis} **{player['username']}** {rank_emojis} • "
-                    hall_text += f"💯 **{player['total_score']:,}** pts • "
-                    hall_text += f"🎯 **{player['accuracy']}%** • "
-                    hall_text += f"🔥 **{player['best_streak']}** • "
-                    hall_text += f"❓ **{player['correct_answers']}** \n"
-            
-            embed.description = header + season_info + legends_text + hall_text
-            
-        else:
-            # Show hall of fame overview with enhanced styling
-            embed = discord.Embed(title="", description="", color=discord.Color.gold())
-            
-            header = f"🏛️ **HALL OF FAME** 🏛️\n"
-            header += f"### 🏰 **{server_name}**\n\n"
-            header += f"📜 **{len(hall_of_fame)} Season{'s' if len(hall_of_fame) != 1 else ''}**\n"
-            header += f"💡 *Use `/hall_of_fame season:<name>` for detailed chronicles*\n\n"
-            
-            seasons_text = "🎭 **CHRONICLES OF CHAMPIONS** 🎭\n"
-            
-            for i, season_data in enumerate(reversed(hall_of_fame), 1):  # Most recent first
-                if season_data.leaderboard:
-                    champion = season_data.leaderboard[0]
-                    
-                    # Season header with fancy styling
-                    season_border_emojis = ['🔸', '🔹']
-                    season_emoji = season_border_emojis[i % 2]
-
-                    seasons_text += f"### 👑 **{season_data.season_name}** 👑\n"
-                    
-                    # Champion showcase with colored blocks
-                    seasons_text += f"```ansi\n"
-                    seasons_text += f"\u001b[1;33m👑 \u001b[0m \u001b[1;36m{champion['username']}\u001b[0m\n"
-                    seasons_text += f"\u001b[1;35m🏆 Victory Score:\u001b[0m \u001b[1;32m{champion['total_score']:,} points\u001b[0m\n"
-                    seasons_text += f"\u001b[1;34m👥 Total Warriors:\u001b[0m \u001b[1;31m{season_data.total_players}\u001b[0m\n"
-                    seasons_text += f"\u001b[1;36m📅 Concluded:\u001b[0m \u001b[1;33m{season_data.end_date.split()[0]}\u001b[0m\n"
-                    seasons_text += f"\u001b[1;32m❓ Questions:\u001b[0m \u001b[1;37m{season_data.total_questions_asked:,}\u001b[0m\n"
-                    seasons_text += f"```\n"
-            
-            embed.description = header + seasons_text
-        
-        # Enhanced footer and thumbnail
-        embed.set_thumbnail(url=interaction.guild.icon.url if interaction.guild and interaction.guild.icon else None)
-        
-        await interaction.followup.send(embed=embed)
-    
-    async def _handle_active_question_conflict(self, interaction: discord.Interaction, guild_id: str):
-        """Handle when there's already an active question in this server"""
-        active_user_id, _, _, _, start_time, _, _, _, _ = self.active_questions[guild_id]
-        elapsed_time = time.time() - start_time
-        remaining_time = max(0, QUESTION_TIMEOUT - elapsed_time)
-        
-        active_user = self.bot.get_user(active_user_id)
-        active_username = active_user.name if active_user else "Unknown User"
-        
-        embed = discord.Embed(
-            title="🚫 Trivia In Progress",
-            description=f"**{active_username}** is currently answering a trivia question in this server.\n\n"
-                       f"⏱️ Time remaining: **{remaining_time:.0f}** seconds\n\n"
-                       f"Please wait for them to finish or for the question to timeout.",
-            color=discord.Color.orange()
-        )
-        
-        await interaction.followup.send(embed=embed)
-    
-    async def _create_trivia_question(self, interaction: discord.Interaction, 
-                                    question_data: Dict, guild_id: str, was_intentional: bool):
-        """Create and display a trivia question - enhanced for SF6"""
-        # Parse question data
-        question = html.unescape(question_data["question"])
-        correct = html.unescape(question_data["correct_answer"])
-        incorrect = [html.unescape(i) for i in question_data["incorrect_answers"]]
-        category = html.unescape(question_data["category"])
-        difficulty = Difficulty(question_data["difficulty"])
-
-        # Create options
-        options = incorrect + [correct]
-        random.shuffle(options)
-        correct_letter = chr(65 + options.index(correct))
-        
-        # Create embed with special handling for SF6
         if category == "Street Fighter 6":
-            title = f"🎮⚔️ {category} Frame Data Trivia"
-            # Use SF6 themed colors
-            embed_color = discord.Color.from_rgb(255, 215, 0)  # Gold for SF6
+            provider = self.providers.get("sf6")
+            unified_category = UnifiedCategory.GAMING
+        elif category:
+            try:
+                unified_category = UnifiedCategory(category)
+                # Select provider that supports this category
+                provider = self._select_provider_for_category(unified_category)
+            except ValueError:
+                await interaction.followup.send("Invalid category.", ephemeral=True)
+                return
         else:
-            title = f"🧠 {category} Trivia"
-            embed_color = self._get_difficulty_color(difficulty)
-        
-        embed = discord.Embed(
-            title=title,
-            color=embed_color
+            # Random provider selection with weighted probabilities
+            provider = self._select_random_provider(unified_category)
+
+        if not provider or not provider.is_available:
+            # Fallback to OpenTDB
+            provider = self.providers.get("opentdb")
+            if not provider or not provider.is_available:
+                await interaction.followup.send("No trivia sources are available.", ephemeral=True)
+                return
+
+        # Fetch question with fallback
+        question = await self._fetch_question_with_fallback(
+            provider=provider,
+            unified_category=unified_category,
+            difficulty=diff_enum.value if diff_enum else None,
+            guild_id=guild_id,
+            user_id=str(user_id)
         )
-        
+
+        if not question:
+            embed = discord.Embed(
+                title="No Questions Available",
+                description="Could not fetch a question from any source. Please try again.",
+                color=discord.Color.red()
+            )
+            await interaction.followup.send(embed=embed)
+            return
+
+        await self._create_trivia_question(interaction, question, guild_id, was_intentional)
+
+    async def _create_trivia_question(
+        self,
+        interaction: discord.Interaction,
+        question: StandardQuestion,
+        guild_id: str,
+        was_intentional: bool
+    ):
+        """Create and display a trivia question"""
+        # Create options
+        options = question.incorrect_answers + [question.correct_answer]
+        random.shuffle(options)
+        correct_letter = chr(65 + options.index(question.correct_answer))
+
+        # Get difficulty enum
+        difficulty = Difficulty(question.difficulty)
+        is_sf6 = question.provider == "sf6"
+
+        # Create embed
+        category_emoji = get_category_emoji(question.unified_category)
+        if is_sf6:
+            title = f"🎮 Street Fighter 6 Trivia"
+            embed_color = discord.Color.from_rgb(255, 215, 0)
+        else:
+            title = f"{category_emoji} {question.category} Trivia"
+            embed_color = self._get_difficulty_color(difficulty)
+
+        embed = discord.Embed(title=title, color=embed_color)
+
         option_text = "\n".join([f"**{chr(65+i)}. {opt}**" for i, opt in enumerate(options)])
-        embed.description = f"**{question}**\n\n{option_text}"
-        
-        # Add difficulty indicator with risk warning
+        embed.description = f"**{question.question}**\n\n{option_text}"
+
+        # Difficulty indicator
         diff_emoji = {"easy": "🟢", "medium": "🟡", "hard": "🔴"}
         diff_display = f"{diff_emoji[difficulty.value]} {difficulty.value.title()}"
-        
         if was_intentional:
-            diff_display += " ⚠️ (Higher Penalty Risk!)"
+            diff_display += " (Higher Penalty Risk!)"
         else:
             diff_display += " (Random)"
-            
-        embed.add_field(
-            name="Difficulty",
-            value=diff_display,
-            inline=True
-        )
-        
-        # Show improved scoring info with SF6 adjustment
-        if category == "Street Fighter 6":
-            # SF6 always uses easy scoring
+        embed.add_field(name="Difficulty", value=diff_display, inline=True)
+
+        # Scoring info
+        if is_sf6:
             base_points = SCORING_CONFIG["base_points"]["easy"]
-            scoring_note = f"\n*(SF6 uses Easy scoring)*"
+            scoring_note = "\n*(SF6 uses Easy scoring)*"
         else:
             base_points = SCORING_CONFIG["base_points"][difficulty.value]
             scoring_note = ""
-            
-        max_speed_bonus = SCORING_CONFIG["speed_bonuses"][0]["bonus"]  # Best possible speed bonus
-        
+        max_speed_bonus = SCORING_CONFIG["speed_bonuses"][0]["bonus"]
         embed.add_field(
             name="Scoring",
-            value=f"**Base:** {base_points} pts\n**Max Speed Bonus:** +{max_speed_bonus} pts{scoring_note}",
+            value=f"**Base:** {base_points} pts\n**Max Speed:** +{max_speed_bonus} pts{scoring_note}",
             inline=True
         )
-        
-        # Add penalty warning for intentional difficulty with SF6 adjustment
-        if was_intentional:
-            if category == "Street Fighter 6":
-                wrong_penalty = SCORING_CONFIG["penalties"]["wrong_answer_intentional"]["easy"]
-                penalty_note = "\n*(SF6 uses Easy penalties)*"
-            else:
-                wrong_penalty = SCORING_CONFIG["penalties"]["wrong_answer_intentional"][difficulty.value]
-                penalty_note = "\n(You chose this difficulty)"
-                
-            embed.add_field(
-                name="⚠️ Wrong Penalty",
-                value=f"**{wrong_penalty} points**{penalty_note}",
-                inline=True
-            )
-        
-        # Get user's current streak in this server
+
+        # Show current streak
         user_stats = self.data_manager.get_user_stats(guild_id, str(interaction.user.id), interaction.user.name)
         if user_stats.current_streak > 1:
-            streak_mult = ScoreCalculator.calculate_streak_multiplier(user_stats.current_streak)
-            embed.add_field(
-                name="🔥 Current Streak",
-                value=f"**{user_stats.current_streak}**",
-                inline=True
-            )
-        
-        guild_name = interaction.guild.name if interaction.guild else "DM"
-        
-        # Special footer for SF6
-        if category == "Street Fighter 6":
-            embed.set_footer(text=f"Only {interaction.user.name} can answer! Type A, B, C, or D. ({QUESTION_TIMEOUT}s) • 🎮 Frame data mastery required!")
-        else:
-            embed.set_footer(text=f"Only {interaction.user.name} can answer! Type A, B, C, or D. ({QUESTION_TIMEOUT}s timeout)")
-        
+            embed.add_field(name="Current Streak", value=f"**{user_stats.current_streak}**", inline=True)
+
+        # Show concurrent players info
+        active_count = self._get_active_count(guild_id) + 1
+        embed.set_footer(text=f"Only {interaction.user.name} can answer! Type A, B, C, or D. ({QUESTION_TIMEOUT}s) | Players: {active_count}/{MAX_CONCURRENT_PLAYERS}")
+
         msg = await interaction.followup.send(embed=embed)
-        
-        # Set active question for this server - store question data for tracking
-        start_time = time.time()
-        self.active_questions[guild_id] = (
-            interaction.user.id, correct_letter, correct, msg.id, 
-            start_time, interaction.channel.id, difficulty, was_intentional, question_data
+
+        # Store active question
+        if guild_id not in self.active_questions:
+            self.active_questions[guild_id] = {}
+
+        active_q = ActiveQuestion(
+            user_id=interaction.user.id,
+            channel_id=interaction.channel.id,
+            message_id=msg.id,
+            correct_letter=correct_letter,
+            correct_answer=question.correct_answer,
+            start_time=time.time(),
+            difficulty=difficulty,
+            was_intentional=was_intentional,
+            question_data=question
         )
-        
-        # Start timeout task for this server
-        self.timeout_tasks[guild_id] = asyncio.create_task(self._timeout_question(guild_id))
-        intent_str = "intentional" if was_intentional else "random"
-        category_str = "SF6" if category == "Street Fighter 6" else category
-        logger.info(f"Started {intent_str} {difficulty.value} {category_str} trivia question for {interaction.user.name} in server {guild_name}")
- 
+
+        # Start timeout task
+        active_q.timeout_task = asyncio.create_task(
+            self._timeout_question(guild_id, interaction.user.id)
+        )
+
+        self.active_questions[guild_id][interaction.user.id] = active_q
+
+        logger.info(f"Started trivia for {interaction.user.name} in {guild_id} ({active_count}/{MAX_CONCURRENT_PLAYERS} players)")
+
     def _get_difficulty_color(self, difficulty: Difficulty) -> discord.Color:
         """Get color based on difficulty"""
         colors = {
@@ -836,477 +626,342 @@ class TriviaCog(commands.Cog):
             Difficulty.HARD: discord.Color.red()
         }
         return colors.get(difficulty, discord.Color.blurple())
-    
-    async def _timeout_question(self, guild_id: str):
-        """Handle question timeout for a specific server"""
+
+    async def _timeout_question(self, guild_id: str, user_id: int):
+        """Handle question timeout"""
         try:
             await asyncio.sleep(QUESTION_TIMEOUT)
 
             if guild_id not in self.active_questions:
-                return  # Already answered
+                return
+            if user_id not in self.active_questions[guild_id]:
+                return
 
-            user_id, correct_letter, correct_answer, msg_id, _, channel_id, difficulty, was_intentional, question_data = self.active_questions[guild_id]
+            active_q = self.active_questions[guild_id][user_id]
 
-            # Track this question as seen (even if timeout)
-            self.data_manager.mark_question_seen(guild_id, str(user_id), question_data)
+            # Mark question as seen
+            self.data_manager.mark_question_seen(guild_id, str(user_id), active_q.question_data.to_dict())
 
             # Apply timeout penalty
-            user_stats = self.data_manager.get_user_stats(guild_id, str(user_id), "Unknown")
             penalty = SCORING_CONFIG["penalties"]["timeout"]
-            self.data_manager.update_user_stats(guild_id, str(user_id), difficulty, False, QUESTION_TIMEOUT, penalty)
+            self.data_manager.update_user_stats(guild_id, str(user_id), active_q.difficulty, False, QUESTION_TIMEOUT, penalty)
+            user_stats = self.data_manager.get_user_stats(guild_id, str(user_id), "Unknown")
 
             # Update message
-            channel = self.bot.get_channel(channel_id)
+            channel = self.bot.get_channel(active_q.channel_id)
             if channel:
                 try:
-                    message = await channel.fetch_message(msg_id)
-
+                    message = await channel.fetch_message(active_q.message_id)
                     timeout_embed = discord.Embed(
-                        title="⏰ Time's Up!",
+                        title="Time's Up!",
                         description=f"<@{user_id}> took too long to answer!\n\n"
-                                   f"The correct answer was **{correct_letter}) {correct_answer}**\n\n"
+                                   f"The correct answer was **{active_q.correct_letter}) {active_q.correct_answer}**\n\n"
                                    f"**Timeout Penalty:** {penalty} points\n"
                                    f"**New Score:** {user_stats.total_score} points",
                         color=discord.Color.red()
                     )
-
                     await message.edit(embed=timeout_embed)
-
                 except discord.NotFound:
-                    logger.warning("Timeout message not found")
+                    pass
                 except Exception as e:
                     logger.error(f"Error updating timeout message: {e}")
 
         except asyncio.CancelledError:
-            # Task was cancelled because question was answered - this is normal
             pass
         except Exception as e:
-            logger.error(f"Error in timeout handler for guild {guild_id}: {e}")
+            logger.error(f"Error in timeout handler: {e}")
         finally:
-            # ALWAYS clean up, even if there was an error
-            self._cleanup_question(guild_id)
-    
+            self._cleanup_question(guild_id, user_id)
 
-    def _create_question_hash(self, question_data: Dict) -> str:
-        """Create a unique hash for a question to track if it's been seen"""
-        # Use question text + correct answer to create unique identifier
-        question_text = question_data.get("question", "")
-        correct_answer = question_data.get("correct_answer", "")
-        
-        # Create a simple hash
-        import hashlib
-        content = f"{question_text}|{correct_answer}".encode('utf-8')
-        return hashlib.md5(content).hexdigest()[:12]  # First 12 chars of MD5
-
-    # Wrap the main logic in on_message with try-catch and lock
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
+        """Listen for trivia answers"""
         if message.author.bot or not message.guild:
             return
 
         guild_id = str(message.guild.id)
+        user_id = message.author.id
 
-        # Quick check before acquiring lock (optimization)
+        # Quick check before acquiring lock
         if guild_id not in self.active_questions:
             return
+        if user_id not in self.active_questions.get(guild_id, {}):
+            return
 
-        # Acquire lock to prevent race conditions from rapid messages
+        # Acquire lock
         lock = self._get_answer_lock(guild_id)
         async with lock:
             try:
-                # Check again under lock - question may have been answered while waiting
+                # Check again under lock
                 if guild_id not in self.active_questions:
                     return
+                if user_id not in self.active_questions[guild_id]:
+                    return
 
-                user_id, correct_letter, correct_answer, msg_id, start_time, channel_id, difficulty, was_intentional, question_data = self.active_questions[guild_id]
+                active_q = self.active_questions[guild_id][user_id]
 
-                # Only the person who started the question can answer
-                if message.author.id != user_id or message.channel.id != channel_id:
+                # Verify channel
+                if message.channel.id != active_q.channel_id:
                     return
 
                 content = message.content.strip().upper()
                 if content not in ["A", "B", "C", "D"]:
                     return
 
-                # Cancel timeout task
-                if guild_id in self.timeout_tasks and not self.timeout_tasks[guild_id].done():
-                    self.timeout_tasks[guild_id].cancel()
+                # Cancel timeout
+                if active_q.timeout_task and not active_q.timeout_task.done():
+                    active_q.timeout_task.cancel()
 
-                # Calculate response time and score
-                response_time = time.time() - start_time
-                is_correct = content == correct_letter
+                # Calculate score
+                response_time = time.time() - active_q.start_time
+                is_correct = content == active_q.correct_letter
+                is_sf6 = active_q.question_data.provider == "sf6"
 
-                # Get user stats for this server
                 user_stats = self.data_manager.get_user_stats(guild_id, str(user_id), message.author.name)
 
-                # Calculate score with improved system
-                category = html.unescape(question_data["category"])
-                is_sf6 = category == "Street Fighter 6"
-
-                # Calculate score with improved system
                 score_change, breakdown = ScoreCalculator.calculate_final_score(
-                    difficulty, response_time, is_correct, user_stats.current_streak, was_intentional, is_sf6
+                    active_q.difficulty,
+                    response_time,
+                    is_correct,
+                    user_stats.current_streak,
+                    active_q.was_intentional,
+                    is_sf6
                 )
 
-                # Track this question as seen - use question_data which we already have
-                self.data_manager.mark_question_seen(guild_id, str(user_id), question_data)
+                # Mark question as seen
+                self.data_manager.mark_question_seen(guild_id, str(user_id), active_q.question_data.to_dict())
 
-                # Clear active question for this server AFTER using all the data
-                del self.active_questions[guild_id]
-                if guild_id in self.timeout_tasks:
-                    del self.timeout_tasks[guild_id]
+                # Clean up before updating stats
+                self._cleanup_question(guild_id, user_id)
 
-                # Update user stats for this server
-                self.data_manager.update_user_stats(guild_id, str(user_id), difficulty, is_correct, response_time, score_change)
+                # Update stats
+                self.data_manager.update_user_stats(guild_id, str(user_id), active_q.difficulty, is_correct, response_time, score_change)
+                updated_stats = self.data_manager.get_user_stats(guild_id, str(user_id), message.author.name)
 
-                # GET UPDATED USER STATS AFTER THE UPDATE
-                updated_user_stats = self.data_manager.get_user_stats(guild_id, str(user_id), message.author.name)
+                # Send response
+                await self._send_answer_response(
+                    message, is_correct, active_q.correct_letter, active_q.correct_answer,
+                    response_time, score_change, breakdown, updated_stats,
+                    active_q.was_intentional, active_q.question_data
+                )
 
-                # Create response embed
-                await self._send_answer_response(message, is_correct, correct_letter, correct_answer,
-                                            response_time, score_change, breakdown, updated_user_stats, was_intentional, question_data)
             except Exception as e:
-                logger.error(f"Error in trivia message handler: {e}")
-                # Ensure cleanup happens
-                self._cleanup_question(guild_id)
+                logger.error(f"Error in trivia answer handler: {e}")
+                self._cleanup_question(guild_id, user_id)
 
-
-    
-
-    async def _send_answer_response(self, message: discord.Message, is_correct: bool, 
-                              correct_letter: str, correct_answer: str, response_time: float,
-                              score_change: int, breakdown: Dict, user_stats: UserStats, 
-                              was_intentional: bool, question_data: Dict):
+    async def _send_answer_response(
+        self,
+        message: discord.Message,
+        is_correct: bool,
+        correct_letter: str,
+        correct_answer: str,
+        response_time: float,
+        score_change: int,
+        breakdown: Dict,
+        user_stats: UserStats,
+        was_intentional: bool,
+        question_data: StandardQuestion
+    ):
+        """Send the answer response embed"""
         if is_correct:
             embed = discord.Embed(
-                title="✅ Correct!",
+                title="Correct!",
                 description=f"Excellent work, {message.author.mention}!",
                 color=discord.Color.green()
             )
         else:
             embed = discord.Embed(
-                title="❌ Incorrect!",
+                title="Incorrect!",
                 description=f"Nice try {message.author.mention}!\n"
-                            f"The correct answer was **{correct_letter}) {correct_answer}**",
+                           f"The correct answer was **{correct_letter}) {correct_answer}**",
                 color=discord.Color.red()
             )
-        
-        # Improved score breakdown with new information
+
         score_text = (
-            f"**🏆 Score Change:** `{score_change:+d}` points\n"
-            f"**📊 Total Score:** `{user_stats.total_score}` points\n"
-            f"**🔥 Streak:** `{user_stats.current_streak}`\n"
-            f"**⏱️ Response Time:** `{response_time:.1f}s` ({breakdown['speed_tier']})\n"
+            f"**Score Change:** `{score_change:+d}` points\n"
+            f"**Total Score:** `{user_stats.total_score}` points\n"
+            f"**Streak:** `{user_stats.current_streak}`\n"
+            f"**Response Time:** `{response_time:.1f}s` ({breakdown['speed_tier']})\n"
         )
 
         if is_correct:
             score_text += (
-                f"\n**🧮 Score Breakdown:**\n"
-                f"• 💎 Base Points: `{breakdown['base_points']}`\n"
-                f"• ⚡ Speed Bonus: `+{breakdown['speed_bonus']}`\n"
-                f"• 🔁 Streak Multiplier: `x{breakdown['streak_multiplier']}`\n"
+                f"\n**Score Breakdown:**\n"
+                f"Base Points: `{breakdown['base_points']}`\n"
+                f"Speed Bonus: `+{breakdown['speed_bonus']}`\n"
+                f"Streak Multiplier: `x{breakdown['streak_multiplier']}`"
             )
         else:
             intent_text = "Intentional Choice" if was_intentional else "Random Difficulty"
             score_text += (
-                f"\n**💥 Penalty Applied:**\n"
-                f"• ❌ {breakdown['penalty_reason']}: `{score_change}` points\n"
-                f"• 🎯 Difficulty Type: {intent_text}"
+                f"\n**Penalty Applied:**\n"
+                f"{breakdown['penalty_reason']}: `{score_change}` points\n"
+                f"Difficulty Type: {intent_text}"
             )
 
         embed.add_field(name="\u200b", value=score_text, inline=False)
 
-        category = html.unescape(question_data["category"])
-        
-        # Add SF6-specific explanation if available
-        if category == "Street Fighter 6" and question_data.get("explanation"):
+        # SF6 explanation
+        if question_data.explanation and question_data.provider == "sf6":
             embed.add_field(
-                name="🎮 Frame Data Explanation",
-                value=f"*{question_data['explanation']}*",
-                inline=False
-            )
-
-        # Add strategic tips for wrong answers
-        if not is_correct and was_intentional:
-            if category == "Street Fighter 6":
-                tip_text = "*SF6 frame data is complex! Try easier difficulties first to build your knowledge base.*"
-            else:
-                tip_text = "*Choosing specific difficulties increases both rewards AND penalties. Consider random difficulty for safer play!*"
-                
-            embed.add_field(
-                name="💡 Strategy Tip", 
-                value=tip_text,
+                name="Frame Data Explanation",
+                value=f"*{question_data.explanation}*",
                 inline=False
             )
 
         await message.channel.send(embed=embed)
-    
-    @app_commands.command(name="trivia_stats", description="View trivia statistics for this server")
+
+    @app_commands.command(name="trivia_stats", description="View your trivia statistics")
     async def trivia_stats(self, interaction: discord.Interaction, user: Optional[discord.Member] = None):
-        """View trivia statistics for this server"""
+        """View trivia statistics"""
         await interaction.response.defer()
-        
+
         guild_id = self.get_guild_id(interaction)
         target_user = user or interaction.user
         user_stats = self.data_manager.get_user_stats(guild_id, str(target_user.id), target_user.name)
-        
         server_name = interaction.guild.name if interaction.guild else "DM"
-        
+
         embed = discord.Embed(
-            title=f"📊 Trivia Stats - {target_user.name}",
+            title=f"Trivia Stats - {target_user.name}",
             description=f"**Server:** {server_name}",
             color=discord.Color.blue()
         )
-        
-        # Basic stats
+
         accuracy = (user_stats.correct_answers / user_stats.questions_answered * 100) if user_stats.questions_answered > 0 else 0
         embed.add_field(
-            name="📊 Overall Performance",
+            name="Overall Performance",
             value=(
-                f"**💯 Total Score:** `{user_stats.total_score}`\n"
-                f"**❓ Questions Answered:** `{user_stats.questions_answered}`\n"
-                f"**🎯 Accuracy:** `{accuracy:.1f}%`\n"
-                f"**🔥 Current Streak:** `{user_stats.current_streak}`\n"
-                f"**🏅 Best Streak:** `{user_stats.best_streak}`\n"
-                f"**⏱️ Avg. Response Time:** `{user_stats.avg_response_time:.1f}s`"
+                f"**Total Score:** `{user_stats.total_score}`\n"
+                f"**Questions Answered:** `{user_stats.questions_answered}`\n"
+                f"**Accuracy:** `{accuracy:.1f}%`\n"
+                f"**Current Streak:** `{user_stats.current_streak}`\n"
+                f"**Best Streak:** `{user_stats.best_streak}`\n"
+                f"**Avg Response Time:** `{user_stats.avg_response_time:.1f}s`"
             ),
             inline=False
         )
 
-        # Enhanced difficulty breakdown with question tracking
+        # Difficulty breakdown
         diff_text = ""
         diff_emoji = {"easy": "🟢", "medium": "🟡", "hard": "🔴"}
-        total_unique_questions = self.data_manager.get_user_question_count(guild_id, str(target_user.id))
-        
         for diff, stats in user_stats.difficulty_stats.items():
             if stats["total"] > 0:
                 acc = (stats["correct"] / stats["total"] * 100)
                 diff_text += f"**{diff_emoji[diff]} {diff.title()}:** {stats['correct']}/{stats['total']} ({acc:.1f}%)\n"
-        
+
         if diff_text:
-            diff_text += f"\n**🎯 Unique Questions Seen:** {total_unique_questions}"
-            embed.add_field(name="🎯 Difficulty Breakdown", value=diff_text, inline=False)
-        
-        # Add SF6 availability notice
-        if self.sf6_trivia.available:
-            embed.add_field(
-                name="🎮 SF6 Trivia Available", 
-                value="*Try Street Fighter 6 category for hardcore frame data challenges!*",
-                inline=False
-            )
-        
+            embed.add_field(name="Difficulty Breakdown", value=diff_text, inline=False)
+
         await interaction.followup.send(embed=embed)
-    
-    @app_commands.command(name="trivia_leaderboard", description="View the trivia leaderboard for this server")
+
+    @app_commands.command(name="trivia_leaderboard", description="View the trivia leaderboard")
     async def trivia_leaderboard(self, interaction: discord.Interaction):
-        """View the trivia leaderboard for this server with enhanced styling"""
+        """View the trivia leaderboard"""
         await interaction.response.defer()
-        
+
         guild_id = self.get_guild_id(interaction)
         server_name = interaction.guild.name if interaction.guild else "DM"
-        
+
         leaderboard = self.data_manager.get_server_leaderboard(guild_id, 10)
-        
+
         if not leaderboard:
             embed = discord.Embed(
-                title="🏆 Trivia Leaderboard 🏆",
-                description=f"## 🌟 **{server_name}** 🌟\n\n"
-                        f"```diff\n"
-                        f"+ 🚀 No champions yet! 🚀\n"
-                        f"+ 🌟 Be the first to play! 🌟\n"
-                        f"+ ⭐ Your legend starts here! ⭐\n"
-                        f"```\n\n"
-                        f"🚀💫 **Ready to compete?** Use `/trivia` to start your legendary journey! 🎯✨\n\n"
-                        f"🎮 **NEW:** Try `Street Fighter 6` category for frame data mastery!",
+                title="Trivia Leaderboard",
+                description=f"**{server_name}**\n\nNo players yet! Use `/trivia` to start playing.",
                 color=discord.Color.gold()
             )
-            embed.set_thumbnail(url="https://cdn.discordapp.com/emojis/1234567890.png")
             await interaction.followup.send(embed=embed)
             return
-        
-        # Create the main leaderboard embed
+
         embed = discord.Embed(
-            title="",
-            description="",
+            title="Trivia Leaderboard",
+            description=f"**{server_name}**",
             color=discord.Color.gold()
         )
-        
-        # Custom header with server name
-        header = f"🏆🌟 **TRIVIA CHAMPIONS** 🌟🏆\n"
-        header += f"###  **{server_name}** \n"
-        header += f"\n"
-        
-        top_3 = leaderboard[:3]
-        podium_medals = ["👑", "🥈", "🥉"]
-        podium_names = ["CHAMPION", "RUNNER-UP", "THIRD PLACE"]
 
-        podium_text = ""
-        
-        for i, (user_id, stats) in enumerate(top_3):
+        medals = ["🥇", "🥈", "🥉"]
+        leaderboard_text = ""
+
+        for i, (user_id, stats) in enumerate(leaderboard):
             accuracy = (stats.correct_answers / stats.questions_answered * 100) if stats.questions_answered > 0 else 0
+            medal = medals[i] if i < 3 else f"#{i+1}"
+            leaderboard_text += f"{medal} **{stats.username}** - {stats.total_score:,} pts ({accuracy:.1f}%)\n"
 
-            podium_text += f"\n{podium_medals[i]} **{podium_names[i]}** {podium_medals[i]}\n"
-            podium_text += f"```ansi\n"
-            podium_text += f"\u001b[1;36m👤 {stats.username}\u001b[0m\n"
-            podium_text += f"\u001b[1;35m💰 Score:\u001b[0m \u001b[1;32m{stats.total_score:,} points\u001b[0m\n"
-            podium_text += f"\u001b[1;34m🎯 Accuracy:\u001b[0m \u001b[1;31m{accuracy:.1f}%\u001b[0m\n"
-            podium_text += f"\u001b[1;33m🔥 Best Streak:\u001b[0m \u001b[1;36m{stats.best_streak}\u001b[0m\n"
-            podium_text += f"\u001b[1;32m❓ Questions:\u001b[0m \u001b[1;37m{stats.questions_answered}\u001b[0m\n"
-            podium_text += f"```"
+        embed.add_field(name="Rankings", value=leaderboard_text, inline=False)
+        embed.set_footer(text=f"Players active: {self._get_active_count(guild_id)}/{MAX_CONCURRENT_PLAYERS}")
 
-        # Remaining players (4-10)
-        remaining_text = ""
-        if len(leaderboard) > 3:
-            remaining_text = "\n\n📊 **REMAINING RANKINGS** 📊\n"
-            
-            for i, (user_id, stats) in enumerate(leaderboard[3:], 4):
-                accuracy = (stats.correct_answers / stats.questions_answered * 100) if stats.questions_answered > 0 else 0
-                
-                # Rank indicators with more variety
-                if i == 4:
-                    rank_emoji = "💎"
-                elif i == 5:
-                    rank_emoji = "⭐"
-                elif i <= 7:
-                    rank_emoji = "⚡" 
-                elif i <= 9:
-                    rank_emoji = "✨"
-                else:
-                    rank_emoji = "💫"
-                    
-                remaining_text += f"\n{rank_emoji} **#{i}** • **{stats.username}** {rank_emoji}\n"
-                remaining_text += f"> 💰 **{stats.total_score:,}** pts • 🎯 **{accuracy:.1f}%** • 🔥 **{stats.best_streak}** • ❓ **{stats.questions_answered}** \n"
-        
-        # Stats summary
-        total_players = len(leaderboard)
-        total_questions = sum(stats.questions_answered for _, stats in leaderboard)
-        avg_accuracy = sum((stats.correct_answers / stats.questions_answered * 100) if stats.questions_answered > 0 else 0 for _, stats in leaderboard) / total_players
-        
-        embed.description = header + podium_text + remaining_text 
-        
-        # Add thumbnail and footer with SF6 mention
-        embed.set_footer(text="✨ Use /trivia to climb the rankings! • 👑 Try SF6 for frame data mastery! ", 
-                        icon_url=interaction.user.display_avatar.url)
-        
         await interaction.followup.send(embed=embed)
-    
-    @app_commands.command(name="trivia_scoring", description="View the scoring system explanation")
-    async def trivia_scoring(self, interaction: discord.Interaction):
-        """Explain the trivia scoring system"""
+
+    @app_commands.command(name="trivia_categories", description="View available trivia categories")
+    async def trivia_categories(self, interaction: discord.Interaction):
+        """Show available trivia categories"""
         await interaction.response.defer()
-        
+
         embed = discord.Embed(
-            title="🧮 Trivia Scoring System",
-            description="Understanding how points are calculated:",
+            title="Trivia Categories",
+            description="Choose a category when starting trivia with `/trivia category:<name>`",
             color=discord.Color.blue()
         )
-        
-        # Base points
-        base_text = ""
-        for diff, points in SCORING_CONFIG["base_points"].items():
-            emoji = {"easy": "🟢", "medium": "🟡", "hard": "🔴"}[diff]
-            base_text += f"**{emoji} {diff.title()}:** {points} points\n"
-        
-        embed.add_field(name="💎 Base Points", value=base_text, inline=True)
-        
-        # Speed bonuses
-        speed_text = ""
-        for bonus in SCORING_CONFIG["speed_bonuses"]:
-            speed_text += f"**≤{bonus['max_time']}s:** +{bonus['bonus']} pts\n"
-        speed_text += "**>25s:** No bonus"
-        
-        embed.add_field(name="⚡ Speed Bonuses", value=speed_text, inline=True)
-        
-        # Streak multipliers
-        streak_text = ""
-        for streak in SCORING_CONFIG["streak_multipliers"]:
-            if streak["min_streak"] > 1:
-                streak_text += f"**{streak['min_streak']}+ streak:** x{streak['multiplier']}\n"
-        
-        embed.add_field(name="🔥 Streak Multipliers", value=streak_text, inline=True)
-        
-        # Wrong answer penalties
-        embed.add_field(
-            name="❌ Wrong Answer Penalties",
-            value="**Random Difficulty:**\n"
-                  "🟢 Easy: -5 pts\n🟡 Medium: -10 pts\n🔴 Hard: -15 pts\n\n"
-                  "**Chosen Difficulty:**\n"
-                  "🟢 Easy: -5 pts\n🟡 Medium: -12 pts\n🔴 Hard: -20 pts\n\n"
-                  "*+5 extra penalty if wrong in <5s*",
-            inline=False
-        )
-        
-        # Strategy tip with SF6 mention
-        embed.add_field(
-            name="💡 Strategy Tips",
-            value="• **Random difficulty** = Lower risk, lower reward\n"
-                  "• **Chosen difficulty** = Higher reward, higher penalty\n"
-                  "• **Speed matters** but don't rush wrong answers!\n"
-                  "• **Streaks** multiply your points significantly\n"
-                  "• **🎮 SF6 questions** always use easy scoring (they're inherently harder!)",
-            inline=False
-        )
-        
-        embed.set_footer(text="Choose your difficulty wisely - with great reward comes great risk!")
-        
+
+        for category in UnifiedCategory:
+            emoji = CATEGORY_EMOJIS.get(category, "")
+            # Get sub-categories
+            from trivia.categories import get_category_display_info
+            info = get_category_display_info()
+            sub_cats = info[category.value]["sub_categories"]
+            sub_text = ", ".join(sub_cats[:5])
+            if len(sub_cats) > 5:
+                sub_text += f" +{len(sub_cats)-5} more"
+
+            embed.add_field(
+                name=f"{emoji} {category.value}",
+                value=sub_text or "Various topics",
+                inline=True
+            )
+
+        embed.set_footer(text="Tip: Try 'Street Fighter 6' for hardcore frame data challenges!")
         await interaction.followup.send(embed=embed)
-    
+
     @app_commands.command(name="trivia_debug", description="Debug information (admin only)")
     @app_commands.default_permissions(administrator=True)
     async def trivia_debug(self, interaction: discord.Interaction):
-        """Debug information for administrators - now includes SF6 status"""
+        """Debug information for administrators"""
         await interaction.response.defer(ephemeral=True)
-        
+
         guild_id = self.get_guild_id(interaction)
-        memory_info = self.data_manager.get_memory_usage_info()
-        
+
         embed = discord.Embed(
-            title="🔧 Trivia Debug Information",
+            title="Trivia Debug Information",
             color=discord.Color.purple()
         )
-        
+
+        # Active questions info
+        active_in_guild = self._get_active_count(guild_id)
+        total_active = sum(len(q) for q in self.active_questions.values())
+
+        embed.add_field(
+            name="Active Questions",
+            value=f"**This Server:** {active_in_guild}/{MAX_CONCURRENT_PLAYERS}\n"
+                  f"**Total (all servers):** {total_active}",
+            inline=False
+        )
+
+        # Provider status
+        provider_text = ""
+        for pid, provider in self.providers.items():
+            status = "Available" if provider.is_available else "Unavailable"
+            provider_text += f"**{provider.name}:** {status}\n"
+
+        embed.add_field(name="Providers", value=provider_text, inline=False)
+
+        # Memory info
+        memory_info = self.data_manager.get_memory_usage_info()
         embed.add_field(
             name="Memory Usage",
             value=f"**Servers Loaded:** {memory_info['servers_loaded']}\n"
                   f"**Total Users:** {memory_info['total_users']}\n"
-                  f"**Pending Saves:** {memory_info['pending_saves']}\n"
-                  f"**Question Pool:** {memory_info['question_tracking']['question_pool_size']}\n"
-                  f"**Avg Questions/User:** {memory_info['question_tracking']['average_questions_per_user']:.1f}",
+                  f"**Pending Saves:** {memory_info['pending_saves']}",
             inline=False
         )
-        
-        embed.add_field(
-            name="Active Questions",
-            value=f"**Currently Active:** {len(self.active_questions)}\n"
-                  f"**This Server:** {'Yes' if guild_id in self.active_questions else 'No'}",
-            inline=False
-        )
-        
-        # Show current scoring config
-        embed.add_field(
-            name="Scoring Configuration",
-            value=f"**Easy Base:** {SCORING_CONFIG['base_points']['easy']}\n"
-                  f"**Medium Base:** {SCORING_CONFIG['base_points']['medium']}\n"
-                  f"**Hard Base:** {SCORING_CONFIG['base_points']['hard']}\n"
-                  f"**Max Speed Bonus:** {SCORING_CONFIG['speed_bonuses'][0]['bonus']}",
-            inline=False
-        )
-        
-        # SF6 system status
-        sf6_stats = self.sf6_trivia.get_statistics() if self.sf6_trivia.available else {}
-        sf6_status_text = f"**Database Available:** {'✅ Yes' if self.sf6_trivia.available else '❌ No'}\n"
-        
-        if self.sf6_trivia.available:
-            sf6_status_text += f"**Total Moves:** {sf6_stats.get('total_moves', 'Unknown')}\n"
-            sf6_status_text += f"**Characters:** {sf6_stats.get('total_characters', 'Unknown')}\n"
-            sf6_status_text += f"**Available Questions:** {sf6_stats.get('startup_available', 0)} startup, {sf6_stats.get('damage_available', 0)} damage, etc."
-        else:
-            sf6_status_text += "**Error:** Database file not found or corrupted"
-        
-        embed.add_field(
-            name="🎮 SF6 System Status",
-            value=sf6_status_text,
-            inline=False
-        )
-        
+
         await interaction.followup.send(embed=embed)
