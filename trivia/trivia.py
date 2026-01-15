@@ -953,6 +953,10 @@ class TriviaCog(commands.Cog):
         embed.description = header + podium_text + remaining_text
         embed.set_footer(text=footer_text)
 
+        # Add server icon as thumbnail
+        if interaction.guild and interaction.guild.icon:
+            embed.set_thumbnail(url=interaction.guild.icon.url)
+
         await interaction.followup.send(embed=embed)
 
     async def autocomplete_season(self, interaction: discord.Interaction, current: str):
