@@ -409,11 +409,22 @@ class TriviaCog(commands.Cog):
         categories = get_unified_categories()
         # Add SF6 as special option under Gaming
         all_options = categories + ["Street Fighter 6"]
-        return [
-            app_commands.Choice(name=f"{get_category_emoji(UnifiedCategory(cat)) if cat in categories else '🎮'} {cat}", value=cat)
-            for cat in all_options
-            if current.lower() in cat.lower()
-        ][:25]
+
+        choices = []
+        for cat in all_options:
+            if current.lower() in cat.lower():
+                # Get emoji for display, but value is always plain text
+                if cat == "Street Fighter 6":
+                    emoji = "🎮"
+                else:
+                    try:
+                        emoji = get_category_emoji(UnifiedCategory(cat))
+                    except ValueError:
+                        emoji = "❓"
+                # name = what user sees (with emoji), value = what's sent (plain text)
+                choices.append(app_commands.Choice(name=f"{emoji} {cat}", value=cat))
+
+        return choices[:25]
 
     async def autocomplete_difficulty(self, interaction: discord.Interaction, current: str):
         """Autocomplete for difficulty levels"""
@@ -1136,48 +1147,4 @@ class TriviaCog(commands.Cog):
             )
 
         embed.set_footer(text="Tip: Try 'Street Fighter 6' for hardcore frame data challenges!")
-        await interaction.followup.send(embed=embed)
-
-    @app_commands.command(name="trivia_debug", description="Debug information (admin only)")
-    @app_commands.default_permissions(administrator=True)
-    async def trivia_debug(self, interaction: discord.Interaction):
-        """Debug information for administrators"""
-        await interaction.response.defer(ephemeral=True)
-
-        guild_id = self.get_guild_id(interaction)
-
-        embed = discord.Embed(
-            title="Trivia Debug Information",
-            color=discord.Color.purple()
-        )
-
-        # Active questions info
-        active_in_guild = self._get_active_count(guild_id)
-        total_active = sum(len(q) for q in self.active_questions.values())
-
-        embed.add_field(
-            name="Active Questions",
-            value=f"**This Server:** {active_in_guild}/{MAX_CONCURRENT_PLAYERS}\n"
-                  f"**Total (all servers):** {total_active}",
-            inline=False
-        )
-
-        # Provider status
-        provider_text = ""
-        for pid, provider in self.providers.items():
-            status = "Available" if provider.is_available else "Unavailable"
-            provider_text += f"**{provider.name}:** {status}\n"
-
-        embed.add_field(name="Providers", value=provider_text, inline=False)
-
-        # Memory info
-        memory_info = self.data_manager.get_memory_usage_info()
-        embed.add_field(
-            name="Memory Usage",
-            value=f"**Servers Loaded:** {memory_info['servers_loaded']}\n"
-                  f"**Total Users:** {memory_info['total_users']}\n"
-                  f"**Pending Saves:** {memory_info['pending_saves']}",
-            inline=False
-        )
-
         await interaction.followup.send(embed=embed)
