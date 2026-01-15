@@ -70,52 +70,59 @@ class SF6TriviaManager:
             logger.error(f"SF6 database check failed: {e}")
             return False
     
-    def generate_question(self, difficulty: Optional[str] = None, 
-                         character: Optional[str] = None) -> Optional[SF6Question]:
-        """Generate an enhanced SF6 trivia question with comprehensive logging"""
+    def generate_question(self, difficulty: Optional[str] = None,
+                         character: Optional[str] = None,
+                         max_retries: int = 5) -> Optional[SF6Question]:
+        """Generate an enhanced SF6 trivia question with comprehensive logging and validation"""
         logger.info(f"Generating SF6 question: difficulty={difficulty}, character={character}")
-        
+
         if not self.available:
             logger.error("SF6 database not available for question generation")
             return None
-        
-        try:
-            # Determine question type based on difficulty
-            question_types = self._get_question_types(difficulty)
-            question_type = random.choice(question_types)
-            
-            logger.info(f"Selected question type: {question_type} from available types: {question_types}")
-            
-            # Generate question based on type
-            if question_type == "comparative":
-                result = self._create_comparative_question(character)
-            elif question_type == "extreme_value":
-                result = self._create_extreme_value_question(character)
-            elif question_type == "frame_trap":
-                result = self._create_frame_trap_question(character)
-            elif question_type == "gauge_efficiency": 
-                result = self._create_gauge_efficiency_question(character)
-            elif question_type == "special_property":
-                result = self._create_special_property_question(character)
-            elif question_type == "find_property":
-                result = self._create_find_property_question()
-            else:
-                # Fall back to original question generation
-                result = self._create_standard_question(character, difficulty)
-            
-            if result:
-                logger.info(f"Successfully generated {question_type} SF6 question: '{result.question[:50]}...'")
-                logger.debug(f"Question details - Character: {result.character}, Move: {result.move_name}")
-                logger.debug(f"Correct answer: {result.correct_answer}")
-                logger.debug(f"Wrong answers: {result.incorrect_answers}")
-            else:
-                logger.warning(f"Failed to generate {question_type} SF6 question")
-            
-            return result
-            
-        except Exception as e:
-            logger.error(f"Error generating enhanced SF6 question: {e}", exc_info=True)
-            return None
+
+        # Try multiple times to generate a valid question
+        for attempt in range(max_retries):
+            try:
+                # Determine question type based on difficulty
+                question_types = self._get_question_types(difficulty)
+                question_type = random.choice(question_types)
+
+                logger.info(f"Attempt {attempt + 1}/{max_retries}: Selected question type: {question_type}")
+
+                # Generate question based on type
+                if question_type == "comparative":
+                    result = self._create_comparative_question(character)
+                elif question_type == "extreme_value":
+                    result = self._create_extreme_value_question(character)
+                elif question_type == "frame_trap":
+                    result = self._create_frame_trap_question(character)
+                elif question_type == "gauge_efficiency":
+                    result = self._create_gauge_efficiency_question(character)
+                elif question_type == "special_property":
+                    result = self._create_special_property_question(character)
+                elif question_type == "find_property":
+                    result = self._create_find_property_question()
+                else:
+                    # Fall back to original question generation
+                    result = self._create_standard_question(character, difficulty)
+
+                # Validate the question before returning
+                if result and self._validate_question(result):
+                    logger.info(f"Successfully generated valid {question_type} SF6 question: '{result.question[:50]}...'")
+                    logger.debug(f"Question details - Character: {result.character}, Move: {result.move_name}")
+                    logger.debug(f"Correct answer: {result.correct_answer}")
+                    logger.debug(f"Wrong answers: {result.incorrect_answers}")
+                    return result
+                elif result:
+                    logger.warning(f"Question failed validation, retrying... (attempt {attempt + 1})")
+                else:
+                    logger.warning(f"Failed to generate {question_type} SF6 question, retrying...")
+
+            except Exception as e:
+                logger.error(f"Error generating SF6 question (attempt {attempt + 1}): {e}", exc_info=True)
+
+        logger.error(f"Failed to generate valid SF6 question after {max_retries} attempts")
+        return None
     
     def _get_question_types(self, difficulty: Optional[str]) -> List[str]:
         """Get available question types based on difficulty"""
@@ -147,12 +154,48 @@ class SF6TriviaManager:
     def _dedup_answers(self, answers: List[str], correct: str) -> List[str]:
         """Remove duplicates and the correct answer from wrong answers."""
         unique = []
-        seen = set([correct])
+        seen = set([correct.strip().lower()])
         for a in answers:
-            if a not in seen:
+            a_normalized = str(a).strip().lower()
+            if a_normalized not in seen:
                 unique.append(a)
-                seen.add(a)
+                seen.add(a_normalized)
         return unique[:3]
+
+    def _validate_question(self, question: SF6Question) -> bool:
+        """
+        Validate that a question has valid, unique answers.
+        Returns True if valid, False if there are issues.
+        """
+        if not question:
+            return False
+
+        correct = str(question.correct_answer).strip().lower()
+        incorrect = [str(a).strip().lower() for a in question.incorrect_answers]
+
+        # Check 1: Must have exactly 3 wrong answers
+        if len(question.incorrect_answers) < 3:
+            logger.warning(f"Question has fewer than 3 wrong answers: {len(question.incorrect_answers)}")
+            return False
+
+        # Check 2: No wrong answer should match the correct answer
+        for wrong in incorrect:
+            if wrong == correct:
+                logger.warning(f"Wrong answer '{wrong}' matches correct answer '{correct}'")
+                return False
+
+        # Check 3: All wrong answers should be unique
+        if len(set(incorrect)) != len(incorrect):
+            logger.warning(f"Duplicate wrong answers found: {incorrect}")
+            return False
+
+        # Check 4: All 4 answers combined should be unique
+        all_answers = [correct] + incorrect
+        if len(set(all_answers)) != 4:
+            logger.warning(f"Not 4 unique answers: {all_answers}")
+            return False
+
+        return True
 
     def _create_comparative_question(self, character_filter: Optional[str] = None) -> Optional[SF6Question]:
         """Create questions like 'Which character's Crouching Light Punch has the slowest startup?' - WITH LOGGING"""
@@ -236,15 +279,19 @@ class SF6TriviaManager:
                 correct_value = move_data[0][property_name]
             
             logger.info(f"Generated question: '{question_stem}' - Answer: {correct_char} ({correct_value})")
-            
+
             # Generate wrong answers from other characters
             best_value = self._safe_int(move_data[0][property_name])
-            tied = [m for m in move_data if self._safe_int(m[property_name]) == best_value]
+
+            # Find ALL characters that are tied with the best value - they're all technically correct
+            tied_chars = {m["character"] for m in move_data if self._safe_int(m[property_name]) == best_value}
+            logger.debug(f"Characters tied with best value {best_value}: {tied_chars}")
+
             correct_char = move_data[0]["character"]
             correct_value = move_data[0][property_name]
 
-            # Generate wrong answers excluding tied characters
-            wrong_chars = [m["character"] for m in move_data if m["character"] != correct_char]
+            # Generate wrong answers excluding ALL tied characters (they would also be correct)
+            wrong_chars = [m["character"] for m in move_data if m["character"] not in tied_chars]
             wrong_chars = self._dedup_answers(wrong_chars, correct_char)
 
             if len(wrong_chars) < 3:
@@ -282,63 +329,72 @@ class SF6TriviaManager:
             conn.close()
     
     def _create_find_property_question(self) -> Optional[SF6Question]:
-            """Find the move that matches an exact property value (damage, onHit, etc)."""
-            conn = sqlite3.connect(self.db_path)
-            try:
-                properties = ["damage", "onHit", "onBlock", "active", "recovery",
-                            "driveGaugeGain", "driveGaugeLoss", "superGaugeGain"]
-                prop = random.choice(properties)
+        """Find the move that matches an exact property value (damage, onHit, etc)."""
+        conn = sqlite3.connect(self.db_path)
+        try:
+            properties = ["damage", "onHit", "onBlock", "active", "recovery",
+                        "driveGaugeGain", "driveGaugeLoss", "superGaugeGain"]
+            prop = random.choice(properties)
 
-                # Query moves with a valid property value
-                cursor = conn.execute(f"""
-                    SELECT character, move_name, {prop}
-                    FROM moves
-                    WHERE {prop} IS NOT NULL AND {prop} != '' 
-                    AND {prop} != 'None'
-                    ORDER BY RANDOM()
-                    LIMIT 50
-                """)
-                results = cursor.fetchall()
-                if not results:
-                    return None
+            # Query moves with a valid property value
+            cursor = conn.execute(f"""
+                SELECT character, move_name, {prop}
+                FROM moves
+                WHERE {prop} IS NOT NULL AND {prop} != ''
+                AND {prop} != 'None'
+                ORDER BY RANDOM()
+                LIMIT 100
+            """)
+            results = cursor.fetchall()
+            if not results:
+                return None
 
-                # Pick correct move
-                correct_char, move_name, correct_val = random.choice(results)
-                correct_val = str(correct_val).strip()
+            # Pick correct move
+            correct_char, move_name, correct_val = random.choice(results)
+            correct_val = str(correct_val).strip()
+            correct_answer = f"{correct_char} {move_name}".strip()
 
-                # Get wrong moves with close values
-                wrong_candidates = [(c, m, v) for (c, m, v) in results if str(v) != correct_val]
-                if not wrong_candidates:
-                    return None
-                random.shuffle(wrong_candidates)
-                wrongs = []
-                for c, m, v in wrong_candidates:
-                    move_text = f"{c} {m}".strip()
-                    if move_text not in wrongs:
-                        wrongs.append(move_text)
-                    if len(wrongs) == 3:
-                        break
+            # Find ALL moves with the same value (they would also be correct)
+            same_value_moves = {f"{c} {m}".strip() for c, m, v in results if str(v).strip() == correct_val}
+            logger.debug(f"Moves with same value {correct_val}: {same_value_moves}")
 
-                if len(wrongs) < 3:
-                    return None
+            # Get wrong moves - exclude ALL moves with the same property value
+            wrong_candidates = [(c, m, v) for (c, m, v) in results if str(v).strip() != correct_val]
+            if len(wrong_candidates) < 3:
+                return None
 
-                # Question format
-                question_text = f"Which move in Street Fighter 6 does {correct_val} {prop}?"
-                correct_answer = f"{correct_char} {move_name}".strip()
+            random.shuffle(wrong_candidates)
+            wrongs = []
+            seen = set()
+            for c, m, v in wrong_candidates:
+                move_text = f"{c} {m}".strip()
+                move_lower = move_text.lower()
+                # Ensure unique and not matching correct answer
+                if move_lower not in seen and move_text not in same_value_moves:
+                    wrongs.append(move_text)
+                    seen.add(move_lower)
+                if len(wrongs) == 3:
+                    break
 
-                return SF6Question(
-                    question=question_text,
-                    correct_answer=correct_answer,
-                    incorrect_answers=wrongs,
-                    difficulty="hard",
-                    category="Street Fighter 6",
-                    move_name=move_name,
-                    character=correct_char,
-                    explanation=f"{correct_answer} has {correct_val} {prop}",
-                    question_type="find_property"
-                )
-            finally:
-                conn.close()
+            if len(wrongs) < 3:
+                return None
+
+            # Question format
+            question_text = f"Which move in Street Fighter 6 does {correct_val} {prop}?"
+
+            return SF6Question(
+                question=question_text,
+                correct_answer=correct_answer,
+                incorrect_answers=wrongs,
+                difficulty="hard",
+                category="Street Fighter 6",
+                move_name=move_name,
+                character=correct_char,
+                explanation=f"{correct_answer} has {correct_val} {prop}",
+                question_type="find_property"
+            )
+        finally:
+            conn.close()
 
     def _create_extreme_value_question(self, character_filter: Optional[str] = None) -> Optional[SF6Question]:
         """Create questions like 'Which character's Standing Light Punch has the fastest startup?' - WITH LOGGING"""
@@ -361,38 +417,41 @@ class SF6TriviaManager:
             
             logger.debug(f"Selected move type: {move_type}, property: {prop_name} ({prop_info['description']})")
             
-            # Find the extreme value for this common move type
+            # Find all characters with this move type and their values
             query = f"""
                 SELECT character, move_name, {prop_name}
-                FROM moves 
+                FROM moves
                 WHERE move_name LIKE ? AND {prop_name} IS NOT NULL AND {prop_name} != ''
                 ORDER BY CAST({prop_name} AS INTEGER) {"ASC" if prop_info["query"] == "MIN" else "DESC"}
-                LIMIT 1
             """
-            
+
             logger.debug(f"Executing extreme value query: {query}")
             cursor = conn.execute(query, (f"%{move_type}%",))
-            result = cursor.fetchone()
-            
-            if not result:
+            all_results = cursor.fetchall()
+
+            if not all_results:
                 logger.warning(f"No results found for extreme value question")
                 return None
-            
-            character, move_name, extreme_value = result
+
+            # Get the extreme value and find ALL characters that share it (ties)
+            character, move_name, extreme_value = all_results[0]
+            extreme_int = self._safe_int(extreme_value)
+            tied_chars = {r[0] for r in all_results if self._safe_int(r[2]) == extreme_int}
+
             logger.info(f"Found extreme value: {character} - {str(move_name)[:30]} - {prop_name}={extreme_value}")
+            logger.debug(f"Characters tied with extreme value: {tied_chars}")
             
             # Create question focusing on the character with extreme value for this common move
             question_text = f"Which character's {move_type} has the {prop_info['description']}?"
-            
+
             # Get other characters who have this move type for wrong answers
-            cursor = conn.execute(f"""
-                SELECT DISTINCT character FROM moves 
-                WHERE move_name LIKE ? AND character != ? AND {prop_name} IS NOT NULL
-                ORDER BY RANDOM() LIMIT 10
-            """, (f"%{move_type}%", character))
-            
-            wrong_answers = [row[0] for row in cursor.fetchall()[:3]]
-            logger.debug(f"Generated wrong answers: {wrong_answers}")
+            # Exclude ALL tied characters (they would also be correct answers)
+            wrong_answers = [r[0] for r in all_results if r[0] not in tied_chars]
+            # Deduplicate and shuffle
+            wrong_answers = list(dict.fromkeys(wrong_answers))  # Remove duplicates, preserve order
+            random.shuffle(wrong_answers)
+            wrong_answers = wrong_answers[:3]
+            logger.debug(f"Generated wrong answers (excluding tied chars {tied_chars}): {wrong_answers}")
             
             if len(wrong_answers) < 3:
                 logger.warning(f"Could not generate enough wrong answers: only {len(wrong_answers)}")
