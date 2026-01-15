@@ -92,19 +92,19 @@ class ScoreCalculator:
         for bonus_config in SCORING_CONFIG["speed_bonuses"]:
             if response_time <= bonus_config["max_time"]:
                 if response_time <= 3:
-                    tier = "Lightning Fast!"
+                    tier = "⚡ Lightning Fast!"
                 elif response_time <= 6:
-                    tier = "Very Fast!"
+                    tier = "🔥 Very Fast!"
                 elif response_time <= 10:
-                    tier = "Fast!"
+                    tier = "💨 Fast!"
                 elif response_time <= 15:
-                    tier = "Good Speed"
+                    tier = "👍 Good Speed"
                 elif response_time <= 20:
-                    tier = "Decent"
+                    tier = "🐢 Decent"
                 else:
-                    tier = "Getting Slow..."
+                    tier = "🦥 Getting Slow..."
                 return bonus_config["bonus"], tier
-        return 0, "Too Slow"
+        return 0, "⏰ Too Slow"
 
     @staticmethod
     def calculate_streak_multiplier(streak: int) -> float:
@@ -548,7 +548,7 @@ class TriviaCog(commands.Cog):
         # Create embed
         category_emoji = get_category_emoji(question.unified_category)
         if is_sf6:
-            title = f"🎮 Street Fighter 6 Trivia"
+            title = f"🎮⚔️ Street Fighter 6 Trivia"
             embed_color = discord.Color.from_rgb(255, 215, 0)
         else:
             title = f"{category_emoji} {question.category} Trivia"
@@ -563,21 +563,21 @@ class TriviaCog(commands.Cog):
         diff_emoji = {"easy": "🟢", "medium": "🟡", "hard": "🔴"}
         diff_display = f"{diff_emoji[difficulty.value]} {difficulty.value.title()}"
         if was_intentional:
-            diff_display += " (Higher Penalty Risk!)"
+            diff_display += " ⚠️ (Higher Penalty Risk!)"
         else:
             diff_display += " (Random)"
-        embed.add_field(name="Difficulty", value=diff_display, inline=True)
+        embed.add_field(name="⚡ Difficulty", value=diff_display, inline=True)
 
         # Scoring info
         if is_sf6:
             base_points = SCORING_CONFIG["base_points"]["easy"]
-            scoring_note = "\n*(SF6 uses Easy scoring)*"
+            scoring_note = "\n*(🎮 SF6 uses Easy scoring)*"
         else:
             base_points = SCORING_CONFIG["base_points"][difficulty.value]
             scoring_note = ""
         max_speed_bonus = SCORING_CONFIG["speed_bonuses"][0]["bonus"]
         embed.add_field(
-            name="Scoring",
+            name="💰 Scoring",
             value=f"**Base:** {base_points} pts\n**Max Speed:** +{max_speed_bonus} pts{scoring_note}",
             inline=True
         )
@@ -585,11 +585,15 @@ class TriviaCog(commands.Cog):
         # Show current streak
         user_stats = self.data_manager.get_user_stats(guild_id, str(interaction.user.id), interaction.user.name)
         if user_stats.current_streak > 1:
-            embed.add_field(name="Current Streak", value=f"**{user_stats.current_streak}**", inline=True)
+            streak_fires = "🔥" * min(user_stats.current_streak // 3, 3)
+            embed.add_field(name="🔥 Current Streak", value=f"**{user_stats.current_streak}** {streak_fires}", inline=True)
 
         # Show concurrent players info
         active_count = self._get_active_count(guild_id) + 1
-        embed.set_footer(text=f"Only {interaction.user.name} can answer! Type A, B, C, or D. ({QUESTION_TIMEOUT}s) | Players: {active_count}/{MAX_CONCURRENT_PLAYERS}")
+        footer_text = f"🎯 Only {interaction.user.name} can answer! Type A, B, C, or D. ({QUESTION_TIMEOUT}s) | 🎮 Players: {active_count}/{MAX_CONCURRENT_PLAYERS}"
+        if is_sf6:
+            footer_text += " | ⚔️ Frame data mastery required!"
+        embed.set_footer(text=footer_text)
 
         msg = await interaction.followup.send(embed=embed)
 
@@ -653,11 +657,11 @@ class TriviaCog(commands.Cog):
                 try:
                     message = await channel.fetch_message(active_q.message_id)
                     timeout_embed = discord.Embed(
-                        title="Time's Up!",
+                        title="⏰ Time's Up!",
                         description=f"<@{user_id}> took too long to answer!\n\n"
                                    f"The correct answer was **{active_q.correct_letter}) {active_q.correct_answer}**\n\n"
-                                   f"**Timeout Penalty:** {penalty} points\n"
-                                   f"**New Score:** {user_stats.total_score} points",
+                                   f"**⚠️ Timeout Penalty:** {penalty} points\n"
+                                   f"**📊 New Score:** {user_stats.total_score} points",
                         color=discord.Color.red()
                     )
                     await message.edit(embed=timeout_embed)
@@ -765,36 +769,45 @@ class TriviaCog(commands.Cog):
         """Send the answer response embed"""
         if is_correct:
             embed = discord.Embed(
-                title="Correct!",
+                title="✅ Correct!",
                 description=f"Excellent work, {message.author.mention}!",
                 color=discord.Color.green()
             )
         else:
             embed = discord.Embed(
-                title="Incorrect!",
+                title="❌ Incorrect!",
                 description=f"Nice try {message.author.mention}!\n"
                            f"The correct answer was **{correct_letter}) {correct_answer}**",
                 color=discord.Color.red()
             )
 
+        # Build streak display with fire emoji for streaks
+        streak_display = f"`{user_stats.current_streak}`"
+        if user_stats.current_streak >= 10:
+            streak_display = f"🔥🔥🔥 `{user_stats.current_streak}`"
+        elif user_stats.current_streak >= 5:
+            streak_display = f"🔥🔥 `{user_stats.current_streak}`"
+        elif user_stats.current_streak >= 3:
+            streak_display = f"🔥 `{user_stats.current_streak}`"
+
         score_text = (
-            f"**Score Change:** `{score_change:+d}` points\n"
-            f"**Total Score:** `{user_stats.total_score}` points\n"
-            f"**Streak:** `{user_stats.current_streak}`\n"
-            f"**Response Time:** `{response_time:.1f}s` ({breakdown['speed_tier']})\n"
+            f"**🏆 Score Change:** `{score_change:+d}` points\n"
+            f"**📊 Total Score:** `{user_stats.total_score}` points\n"
+            f"**🔥 Streak:** {streak_display}\n"
+            f"**⏱️ Response Time:** `{response_time:.1f}s` ({breakdown['speed_tier']})\n"
         )
 
         if is_correct:
             score_text += (
-                f"\n**Score Breakdown:**\n"
-                f"Base Points: `{breakdown['base_points']}`\n"
-                f"Speed Bonus: `+{breakdown['speed_bonus']}`\n"
-                f"Streak Multiplier: `x{breakdown['streak_multiplier']}`"
+                f"\n**🧮 Score Breakdown:**\n"
+                f"• Base Points: `{breakdown['base_points']}`\n"
+                f"• Speed Bonus: `+{breakdown['speed_bonus']}`\n"
+                f"• 🔁 Streak Multiplier: `x{breakdown['streak_multiplier']}`"
             )
         else:
             intent_text = "Intentional Choice" if was_intentional else "Random Difficulty"
             score_text += (
-                f"\n**Penalty Applied:**\n"
+                f"\n**⚠️ Penalty Applied:**\n"
                 f"{breakdown['penalty_reason']}: `{score_change}` points\n"
                 f"Difficulty Type: {intent_text}"
             )
@@ -804,7 +817,7 @@ class TriviaCog(commands.Cog):
         # SF6 explanation
         if question_data.explanation and question_data.provider == "sf6":
             embed.add_field(
-                name="Frame Data Explanation",
+                name="🎮 Frame Data Explanation",
                 value=f"*{question_data.explanation}*",
                 inline=False
             )
@@ -822,21 +835,21 @@ class TriviaCog(commands.Cog):
         server_name = interaction.guild.name if interaction.guild else "DM"
 
         embed = discord.Embed(
-            title=f"Trivia Stats - {target_user.name}",
+            title=f"📊 Trivia Stats - {target_user.name}",
             description=f"**Server:** {server_name}",
             color=discord.Color.blue()
         )
 
         accuracy = (user_stats.correct_answers / user_stats.questions_answered * 100) if user_stats.questions_answered > 0 else 0
         embed.add_field(
-            name="Overall Performance",
+            name="🏆 Overall Performance",
             value=(
-                f"**Total Score:** `{user_stats.total_score}`\n"
-                f"**Questions Answered:** `{user_stats.questions_answered}`\n"
-                f"**Accuracy:** `{accuracy:.1f}%`\n"
-                f"**Current Streak:** `{user_stats.current_streak}`\n"
-                f"**Best Streak:** `{user_stats.best_streak}`\n"
-                f"**Avg Response Time:** `{user_stats.avg_response_time:.1f}s`"
+                f"**💰 Total Score:** `{user_stats.total_score}`\n"
+                f"**❓ Questions Answered:** `{user_stats.questions_answered}`\n"
+                f"**🎯 Accuracy:** `{accuracy:.1f}%`\n"
+                f"**🔥 Current Streak:** `{user_stats.current_streak}`\n"
+                f"**🏅 Best Streak:** `{user_stats.best_streak}`\n"
+                f"**⏱️ Avg Response Time:** `{user_stats.avg_response_time:.1f}s`"
             ),
             inline=False
         )
@@ -866,7 +879,7 @@ class TriviaCog(commands.Cog):
 
         if not leaderboard:
             embed = discord.Embed(
-                title="Trivia Leaderboard",
+                title="🏆 Trivia Leaderboard",
                 description=f"**{server_name}**\n\nNo players yet! Use `/trivia` to start playing.",
                 color=discord.Color.gold()
             )
@@ -874,21 +887,28 @@ class TriviaCog(commands.Cog):
             return
 
         embed = discord.Embed(
-            title="Trivia Leaderboard",
+            title="🏆 Trivia Leaderboard",
             description=f"**{server_name}**",
             color=discord.Color.gold()
         )
 
         medals = ["🥇", "🥈", "🥉"]
+        rank_emojis = ["💎", "⭐", "✨", "💫", "🌟", "✦", "•"]
         leaderboard_text = ""
 
         for i, (user_id, stats) in enumerate(leaderboard):
             accuracy = (stats.correct_answers / stats.questions_answered * 100) if stats.questions_answered > 0 else 0
-            medal = medals[i] if i < 3 else f"#{i+1}"
-            leaderboard_text += f"{medal} **{stats.username}** - {stats.total_score:,} pts ({accuracy:.1f}%)\n"
+            if i < 3:
+                medal = medals[i]
+            else:
+                rank_emoji = rank_emojis[min(i - 3, len(rank_emojis) - 1)]
+                medal = f"{rank_emoji} #{i+1}"
+            # Add fire for high streaks
+            streak_indicator = f" 🔥{stats.best_streak}" if stats.best_streak >= 5 else ""
+            leaderboard_text += f"{medal} **{stats.username}** - {stats.total_score:,} pts ({accuracy:.1f}%){streak_indicator}\n"
 
-        embed.add_field(name="Rankings", value=leaderboard_text, inline=False)
-        embed.set_footer(text=f"Players active: {self._get_active_count(guild_id)}/{MAX_CONCURRENT_PLAYERS}")
+        embed.add_field(name="📊 Rankings", value=leaderboard_text, inline=False)
+        embed.set_footer(text=f"🎮 Players active: {self._get_active_count(guild_id)}/{MAX_CONCURRENT_PLAYERS}")
 
         await interaction.followup.send(embed=embed)
 
