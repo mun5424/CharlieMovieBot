@@ -869,7 +869,7 @@ class TriviaCog(commands.Cog):
 
     @app_commands.command(name="trivia_leaderboard", description="View the trivia leaderboard")
     async def trivia_leaderboard(self, interaction: discord.Interaction):
-        """View the trivia leaderboard"""
+        """View the trivia leaderboard for this server with enhanced styling"""
         await interaction.response.defer()
 
         guild_id = self.get_guild_id(interaction)
@@ -879,36 +879,228 @@ class TriviaCog(commands.Cog):
 
         if not leaderboard:
             embed = discord.Embed(
-                title="🏆 Trivia Leaderboard",
-                description=f"**{server_name}**\n\nNo players yet! Use `/trivia` to start playing.",
+                title="🏆 Trivia Leaderboard 🏆",
+                description=f"## 🌟 **{server_name}** 🌟\n\n"
+                        f"```diff\n"
+                        f"+ 🚀 No champions yet! 🚀\n"
+                        f"+ 🌟 Be the first to play! 🌟\n"
+                        f"+ ⭐ Your legend starts here! ⭐\n"
+                        f"```\n\n"
+                        f"🚀💫 **Ready to compete?** Use `/trivia` to start your legendary journey! 🎯✨\n\n"
+                        f"🎮 **NEW:** Try `Street Fighter 6` category for frame data mastery!",
                 color=discord.Color.gold()
             )
             await interaction.followup.send(embed=embed)
             return
 
+        # Create the main leaderboard embed
         embed = discord.Embed(
-            title="🏆 Trivia Leaderboard",
-            description=f"**{server_name}**",
+            title="",
+            description="",
             color=discord.Color.gold()
         )
 
-        medals = ["🥇", "🥈", "🥉"]
-        rank_emojis = ["💎", "⭐", "✨", "💫", "🌟", "✦", "•"]
-        leaderboard_text = ""
+        # Custom header with server name
+        header = f"🏆🌟 **TRIVIA CHAMPIONS** 🌟🏆\n"
+        header += f"###  **{server_name}** \n"
+        header += f"\n"
 
-        for i, (user_id, stats) in enumerate(leaderboard):
+        top_3 = leaderboard[:3]
+        podium_medals = ["👑", "🥈", "🥉"]
+        podium_names = ["CHAMPION", "RUNNER-UP", "THIRD PLACE"]
+
+        podium_text = ""
+
+        for i, (user_id, stats) in enumerate(top_3):
             accuracy = (stats.correct_answers / stats.questions_answered * 100) if stats.questions_answered > 0 else 0
-            if i < 3:
-                medal = medals[i]
-            else:
-                rank_emoji = rank_emojis[min(i - 3, len(rank_emojis) - 1)]
-                medal = f"{rank_emoji} #{i+1}"
-            # Add fire for high streaks
-            streak_indicator = f" 🔥{stats.best_streak}" if stats.best_streak >= 5 else ""
-            leaderboard_text += f"{medal} **{stats.username}** - {stats.total_score:,} pts ({accuracy:.1f}%){streak_indicator}\n"
 
-        embed.add_field(name="📊 Rankings", value=leaderboard_text, inline=False)
-        embed.set_footer(text=f"🎮 Players active: {self._get_active_count(guild_id)}/{MAX_CONCURRENT_PLAYERS}")
+            podium_text += f"\n{podium_medals[i]} **{podium_names[i]}** {podium_medals[i]}\n"
+            podium_text += f"```ansi\n"
+            podium_text += f"\u001b[1;36m👤 {stats.username}\u001b[0m\n"
+            podium_text += f"\u001b[1;35m💰 Score:\u001b[0m \u001b[1;32m{stats.total_score:,} points\u001b[0m\n"
+            podium_text += f"\u001b[1;34m🎯 Accuracy:\u001b[0m \u001b[1;31m{accuracy:.1f}%\u001b[0m\n"
+            podium_text += f"\u001b[1;33m🔥 Best Streak:\u001b[0m \u001b[1;36m{stats.best_streak}\u001b[0m\n"
+            podium_text += f"\u001b[1;32m❓ Questions:\u001b[0m \u001b[1;37m{stats.questions_answered}\u001b[0m\n"
+            podium_text += f"```"
+
+        # Remaining players (4-10)
+        remaining_text = ""
+        if len(leaderboard) > 3:
+            remaining_text = "\n\n📊 **REMAINING RANKINGS** 📊\n"
+
+            for i, (user_id, stats) in enumerate(leaderboard[3:], 4):
+                accuracy = (stats.correct_answers / stats.questions_answered * 100) if stats.questions_answered > 0 else 0
+
+                # Rank indicators with more variety
+                if i == 4:
+                    rank_emoji = "💎"
+                elif i == 5:
+                    rank_emoji = "⭐"
+                elif i <= 7:
+                    rank_emoji = "⚡"
+                elif i <= 9:
+                    rank_emoji = "✨"
+                else:
+                    rank_emoji = "💫"
+
+                remaining_text += f"\n{rank_emoji} **#{i}** • **{stats.username}** {rank_emoji}\n"
+                remaining_text += f"> 💰 **{stats.total_score:,}** pts • 🎯 **{accuracy:.1f}%** • 🔥 **{stats.best_streak}** • ❓ **{stats.questions_answered}** \n"
+
+        # Stats summary
+        total_players = len(leaderboard)
+        footer_text = f"🎮 Players active: {self._get_active_count(guild_id)}/{MAX_CONCURRENT_PLAYERS} | 👥 Total ranked: {total_players}"
+
+        embed.description = header + podium_text + remaining_text
+        embed.set_footer(text=footer_text)
+
+        await interaction.followup.send(embed=embed)
+
+    async def autocomplete_season(self, interaction: discord.Interaction, current: str):
+        """Autocomplete for hall of fame seasons"""
+        guild_id = self.get_guild_id(interaction)
+        hof_data = self.data_manager.get_hall_of_fame(guild_id)
+
+        return [
+            app_commands.Choice(name=s.season_name, value=s.season_name)
+            for s in hof_data
+            if current.lower() in s.season_name.lower()
+        ][:20]
+
+    @app_commands.command(name="hall_of_fame", description="View archived seasons and past champions")
+    @app_commands.describe(season="Specific season to view details")
+    @app_commands.autocomplete(season=autocomplete_season)
+    async def hall_of_fame_cmd(self, interaction: discord.Interaction, season: Optional[str] = None):
+        """View the hall of fame with enhanced styling"""
+        await interaction.response.defer()
+
+        guild_id = self.get_guild_id(interaction)
+        server_name = interaction.guild.name if interaction.guild else "DM"
+
+        hof_data = self.data_manager.get_hall_of_fame(guild_id)
+
+        if not hof_data:
+            embed = discord.Embed(
+                title="",
+                description=f"🏛️ **HALL OF FAME** 🏛️\n"
+                        f"### 👑 **{server_name}** 👑\n\n"
+                        f"```diff\n"
+                        f"🌟 The halls echo with silence... 🌟\n"
+                        f"🏺 No legendary seasons yet! 🏺\n"
+                        f"⚔️ History awaits your conquest! ⚔️\n"
+                        f"```\n"
+                        f"📜 **History awaits your greatness!** 📜\n"
+                        f"🎭 Seasons will be immortalized here after using `/reset_scores`\n"
+                        f"✨ Start building your legendary legacy with `/trivia`!\n\n"
+                        f"🎮 **NEW:** Try Street Fighter 6 trivia for hardcore frame data challenges!✨ ",
+                color=discord.Color.gold()
+            )
+            if interaction.guild and interaction.guild.icon:
+                embed.set_thumbnail(url=interaction.guild.icon.url)
+            await interaction.followup.send(embed=embed)
+            return
+
+        if season:
+            # Show specific season details with enhanced styling
+            season_data = None
+            for s in hof_data:
+                if s.season_name.lower() == season.lower():
+                    season_data = s
+                    break
+
+            if not season_data:
+                available_seasons = "`, `".join([s.season_name for s in hof_data])
+                embed = discord.Embed(
+                    title="🔍 Season Not Found",
+                    description=f"### ❌ **'{season}'** does not exist\n\n"
+                            f"**📚 Available Seasons:**\n`{available_seasons}`\n\n"
+                            f"💡 *Try using autocomplete to find the right season!*",
+                    color=discord.Color.red()
+                )
+                await interaction.followup.send(embed=embed)
+                return
+
+            # Create detailed season view
+            embed = discord.Embed(title="", description="", color=discord.Color.gold())
+
+            header = f"🏛️ **HALL OF FAME** 🏛️\n\n"
+            header += f"### 👑 **{season_data.season_name}**\n\n"
+
+            # Season info box
+            season_info = f"```ansi\n"
+            season_info += f"\u001b[1;36m🏰 Server:\u001b[0m \u001b[1;33m{season_data.server_name}\u001b[0m\n"
+            season_info += f"\u001b[1;35m📅 Ended:\u001b[0m \u001b[1;32m{season_data.end_date}\u001b[0m\n"
+            season_info += f"```\n"
+
+            # Top 3 legendary champions
+            legends_text = ""
+
+            top_3_legends = season_data.leaderboard[:3]
+            legend_medals = ["👑", "🥈", "🥉"]
+            legend_titles = ["ULTIMATE CHAMPION", "ROYAL RUNNER-UP", "TRIUMPHANT THIRD"]
+
+            for i, player in enumerate(top_3_legends):
+                legends_text += f"\n{legend_medals[i]} **{legend_titles[i]}** {legend_medals[i]}\n"
+                legends_text += f"```ansi\n"
+                legends_text += f"\u001b[1;36m👤 \u001b[1;33m{player['username']}\u001b[0m\n"
+                legends_text += f"\u001b[1;35m🏆 Final Score:\u001b[0m \u001b[1;32m{player['total_score']:,} points\u001b[0m\n"
+                legends_text += f"\u001b[1;34m🎯 Mastery:\u001b[0m \u001b[1;31m{player['accuracy']}% accuracy\u001b[0m\n"
+                legends_text += f"\u001b[1;33m🔥 Epic Streak:\u001b[0m \u001b[1;36m{player['best_streak']}\u001b[0m\n"
+                legends_text += f"\u001b[1;32m⚔️ Questions:\u001b[0m \u001b[1;37m{player['correct_answers']}/{player['questions_answered']}\u001b[0m\n"
+                legends_text += f"```"
+
+            # Hall of champions (4-10)
+            hall_text = ""
+            if len(season_data.leaderboard) > 3:
+                hall_text = "\n **HALL OF CHAMPIONS** \n\n"
+
+                for i, player in enumerate(season_data.leaderboard[3:10], 4):
+                    # Add variety to ranking emojis
+                    if i <= 5:
+                        rank_emojis = "💎"
+                    elif i <= 7:
+                        rank_emojis = "⭐"
+                    else:
+                        rank_emojis = "✨"
+
+                    hall_text += f"**#{i}** {rank_emojis} **{player['username']}** {rank_emojis} • "
+                    hall_text += f"💯 **{player['total_score']:,}** pts • "
+                    hall_text += f"🎯 **{player['accuracy']}%** • "
+                    hall_text += f"🔥 **{player['best_streak']}** • "
+                    hall_text += f"❓ **{player['correct_answers']}** \n"
+
+            embed.description = header + season_info + legends_text + hall_text
+
+        else:
+            # Show hall of fame overview with enhanced styling
+            embed = discord.Embed(title="", description="", color=discord.Color.gold())
+
+            header = f"🏛️ **HALL OF FAME** 🏛️\n"
+            header += f"### 🏰 **{server_name}**\n\n"
+            header += f"📜 **{len(hof_data)} Season{'s' if len(hof_data) != 1 else ''}**\n"
+            header += f"💡 *Use `/hall_of_fame season:<name>` for detailed chronicles*\n\n"
+
+            seasons_text = "🎭 **CHRONICLES OF CHAMPIONS** 🎭\n"
+
+            for i, season_data in enumerate(reversed(hof_data), 1):  # Most recent first
+                if season_data.leaderboard:
+                    champion = season_data.leaderboard[0]
+
+                    seasons_text += f"### 👑 **{season_data.season_name}** 👑\n"
+
+                    # Champion showcase with colored blocks
+                    seasons_text += f"```ansi\n"
+                    seasons_text += f"\u001b[1;33m👑 \u001b[0m \u001b[1;36m{champion['username']}\u001b[0m\n"
+                    seasons_text += f"\u001b[1;35m🏆 Victory Score:\u001b[0m \u001b[1;32m{champion['total_score']:,} points\u001b[0m\n"
+                    seasons_text += f"\u001b[1;34m👥 Total Warriors:\u001b[0m \u001b[1;31m{season_data.total_players}\u001b[0m\n"
+                    seasons_text += f"\u001b[1;36m📅 Concluded:\u001b[0m \u001b[1;33m{season_data.end_date.split()[0]}\u001b[0m\n"
+                    seasons_text += f"\u001b[1;32m❓ Questions:\u001b[0m \u001b[1;37m{season_data.total_questions_asked:,}\u001b[0m\n"
+                    seasons_text += f"```\n"
+
+            embed.description = header + seasons_text
+
+        # Enhanced footer and thumbnail
+        if interaction.guild and interaction.guild.icon:
+            embed.set_thumbnail(url=interaction.guild.icon.url)
 
         await interaction.followup.send(embed=embed)
 
