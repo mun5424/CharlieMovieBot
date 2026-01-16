@@ -7,28 +7,106 @@ import aiohttp
 import asyncio
 import logging
 import time
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Any, Tuple
 
 logger = logging.getLogger(__name__)
 
 # Jikan API configuration
 JIKAN_BASE_URL = "https://api.jikan.moe/v4"
 JIKAN_TIMEOUT = aiohttp.ClientTimeout(total=10, connect=3)
-JIKAN_AUTOCOMPLETE_TIMEOUT = aiohttp.ClientTimeout(total=2.8, connect=1.5)  # Discord has 3s limit
+JIKAN_AUTOCOMPLETE_TIMEOUT = aiohttp.ClientTimeout(total=2.8, connect=1.5)  # Discord has ~3s limit
 
-# Rate limiting: 3 requests per second, 60 per minute
-_last_request_time = 0
+# Rate limiting: ~3 requests per second
+_last_request_time = 0.0
 _request_lock = asyncio.Lock()
-MIN_REQUEST_INTERVAL = 0.35  # ~3 requests per second
+MIN_REQUEST_INTERVAL = 0.35  # ~3 req/sec
 
 # Shared session
 _session: Optional[aiohttp.ClientSession] = None
 
-# Search cache with TTL (query -> (results, timestamp))
-_search_cache: Dict[str, tuple] = {}
-CACHE_TTL = 120  # Cache results for 2 minutes
-MAX_CACHE_SIZE = 200  # Maximum cached queries
+# Search cache with TTL (key -> (payload, timestamp))
+_search_cache: Dict[str, Tuple[Any, float]] = {}
+CACHE_TTL = 120  # seconds
+MAX_CACHE_SIZE = 200
 
+
+# ---------------- Normalization ----------------
+
+def _safe_int_year(value: Any) -> Optional[int]:
+    try:
+        if value is None or value == "":
+            return None
+        if isinstance(value, int):
+            return value
+        s = str(value)
+        if len(s) >= 4 and s[:4].isdigit():
+            return int(s[:4])
+    except Exception:
+        pass
+    return None
+
+
+def normalize_anime(item: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Normalize a raw Jikan v4 anime item into the schema expected by commands/db.
+
+    Returns dict with keys:
+      mal_id, title, title_japanese, episodes, status, score, image_url, synopsis, year, season, type
+    """
+    if not item or not isinstance(item, dict):
+        return {}
+
+    mal_id = item.get("mal_id")
+    # Prefer English for display; fallback to default title.
+    title = item.get("title_english") or item.get("title") or "Unknown"
+    title_jp = item.get("title") or ""
+
+    episodes = item.get("episodes")
+    if episodes in (0, "0", ""):
+        episodes = None
+
+    status = item.get("status") or "Unknown"
+    score = item.get("score")
+
+    images = item.get("images") or {}
+    jpg = images.get("jpg") or {}
+    webp = images.get("webp") or {}
+    image_url = (
+        jpg.get("large_image_url")
+        or jpg.get("image_url")
+        or webp.get("large_image_url")
+        or webp.get("image_url")
+        or item.get("image_url")  # allow already-flattened inputs
+        or ""
+    )
+
+    synopsis = item.get("synopsis") or ""
+
+    # Year: Jikan sometimes supplies `year`; otherwise derive from `aired.from`.
+    year = _safe_int_year(item.get("year"))
+    if not year:
+        aired = item.get("aired") or {}
+        year = _safe_int_year(aired.get("from"))
+
+    season = item.get("season")
+    anime_type = item.get("type") or "TV"
+
+    return {
+        "mal_id": mal_id,
+        "title": title,
+        "title_japanese": title_jp,
+        "episodes": episodes,
+        "status": status,
+        "score": score,
+        "image_url": image_url,
+        "synopsis": synopsis,
+        "year": year,
+        "season": season,
+        "type": anime_type,
+    }
+
+
+# ---------------- Session management ----------------
 
 async def get_session() -> aiohttp.ClientSession:
     """Get or create the shared aiohttp session."""
@@ -38,7 +116,7 @@ async def get_session() -> aiohttp.ClientSession:
         _session = aiohttp.ClientSession(
             timeout=JIKAN_TIMEOUT,
             connector=connector,
-            headers={"User-Agent": "CharlieMovieBot/1.0"}
+            headers={"User-Agent": "CharlieMovieBot/1.0"},
         )
     return _session
 
@@ -52,240 +130,191 @@ async def close_session():
         logger.info("Closed Jikan API session")
 
 
-async def _rate_limited_request(url: str, params: dict = None) -> Optional[dict]:
-    """Make a rate-limited request to Jikan API."""
-    global _last_request_time
-
-    async with _request_lock:
-        # Enforce rate limiting
-        now = time.time()
-        elapsed = now - _last_request_time
-        if elapsed < MIN_REQUEST_INTERVAL:
-            await asyncio.sleep(MIN_REQUEST_INTERVAL - elapsed)
-
-        _last_request_time = time.time()
-
-    try:
-        session = await get_session()
-        async with session.get(url, params=params) as resp:
-            if resp.status == 200:
-                return await resp.json()
-            elif resp.status == 429:
-                logger.warning("Jikan API rate limited, waiting...")
-                await asyncio.sleep(1)
-                return None
-            else:
-                logger.error(f"Jikan API error: {resp.status}")
-                return None
-    except asyncio.TimeoutError:
-        logger.error("Jikan API timeout")
-        return None
-    except aiohttp.ClientError as e:
-        logger.error(f"Jikan API client error: {e}")
-        return None
-
+# ---------------- Cache helpers ----------------
 
 def _clean_cache():
-    """Remove expired entries from cache."""
+    """Remove expired entries from cache and cap size."""
     global _search_cache
     now = time.time()
+
     expired = [k for k, (_, ts) in _search_cache.items() if now - ts > CACHE_TTL]
     for k in expired:
         del _search_cache[k]
 
-    # If still too large, remove oldest entries
     if len(_search_cache) > MAX_CACHE_SIZE:
+        # remove oldest
         sorted_keys = sorted(_search_cache.keys(), key=lambda k: _search_cache[k][1])
-        for k in sorted_keys[:len(_search_cache) - MAX_CACHE_SIZE]:
+        for k in sorted_keys[: len(_search_cache) - MAX_CACHE_SIZE]:
             del _search_cache[k]
 
+
+def _cache_get(key: str) -> Optional[Any]:
+    val = _search_cache.get(key)
+    if not val:
+        return None
+    payload, ts = val
+    if time.time() - ts < CACHE_TTL:
+        return payload
+    # expired
+    _search_cache.pop(key, None)
+    return None
+
+
+def _cache_set(key: str, payload: Any):
+    _search_cache[key] = (payload, time.time())
+    _clean_cache()
+
+
+# ---------------- HTTP helpers ----------------
+
+async def _enforce_rate_limit():
+    global _last_request_time
+    async with _request_lock:
+        now = time.time()
+        elapsed = now - _last_request_time
+        if elapsed < MIN_REQUEST_INTERVAL:
+            await asyncio.sleep(MIN_REQUEST_INTERVAL - elapsed)
+        _last_request_time = time.time()
+
+
+async def _get_json(url: str, params: dict = None, timeout: aiohttp.ClientTimeout = None) -> Optional[dict]:
+    """
+    Make a request (rate-limited) and return JSON.
+    Handles basic 429 backoff with Retry-After.
+    """
+    await _enforce_rate_limit()
+
+    try:
+        session = await get_session()
+        async with session.get(url, params=params, timeout=timeout) as resp:
+            if resp.status == 200:
+                return await resp.json()
+
+            if resp.status == 429:
+                retry_after = resp.headers.get("Retry-After")
+                delay = 1.0
+                if retry_after:
+                    try:
+                        delay = float(retry_after)
+                    except Exception:
+                        pass
+                logger.warning(f"Jikan API 429 rate limited. retry_after={delay}s")
+                await asyncio.sleep(min(delay, 3.0))
+                return None
+
+            # Sometimes Jikan returns JSON error bodies; we don't need to parse them here.
+            logger.warning(f"Jikan API error status={resp.status} url={url}")
+            return None
+
+    except asyncio.TimeoutError:
+        logger.debug(f"Jikan API timeout url={url}")
+        return None
+    except aiohttp.ClientError as e:
+        logger.debug(f"Jikan API client error: {type(e).__name__}: {e}")
+        return None
+    except Exception as e:
+        logger.debug(f"Jikan API unexpected error: {type(e).__name__}: {e}")
+        return None
+
+
+# ---------------- Public API ----------------
 
 async def search_anime(query: str, limit: int = 10) -> List[Dict]:
     """
     Search for anime by title with caching.
-
-    Returns list of anime with:
-    - mal_id: MyAnimeList ID
-    - title: Japanese/Romaji title
-    - title_english: English title (may be None)
-    - episodes: Number of episodes
-    - status: Airing status
-    - score: MAL score
-    - image_url: Poster image URL
-    - synopsis: Description
-    - year: Release year
+    Returns normalized anime dicts.
     """
-    # Normalize query for cache key
-    cache_key = f"{query.lower().strip()}:{limit}"
-
-    # Check cache first
-    if cache_key in _search_cache:
-        results, timestamp = _search_cache[cache_key]
-        if time.time() - timestamp < CACHE_TTL:
-            return results
-
-    # Clean cache periodically
-    _clean_cache()
-
-    url = f"{JIKAN_BASE_URL}/anime"
-    params = {"q": query, "limit": limit, "sfw": "true"}
-
-    data = await _rate_limited_request(url, params)
-    if not data or "data" not in data:
+    q = (query or "").strip()
+    if not q:
         return []
 
-    results = []
-    for item in data["data"]:
-        # Get the best available title
-        title = item.get("title_english") or item.get("title", "Unknown")
+    cache_key = f"search:{q.lower()}:{limit}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
 
-        # Get image URL
-        images = item.get("images", {})
-        jpg_images = images.get("jpg", {})
-        image_url = jpg_images.get("large_image_url") or jpg_images.get("image_url", "")
+    url = f"{JIKAN_BASE_URL}/anime"
+    params = {"q": q, "limit": limit, "sfw": "true"}
 
-        results.append({
-            "mal_id": item.get("mal_id"),
-            "title": title,
-            "title_japanese": item.get("title", ""),
-            "episodes": item.get("episodes"),
-            "status": item.get("status", "Unknown"),
-            "score": item.get("score"),
-            "image_url": image_url,
-            "synopsis": item.get("synopsis", ""),
-            "year": item.get("year"),
-            "season": item.get("season"),
-            "type": item.get("type", "TV"),  # TV, Movie, OVA, etc.
-        })
+    data = await _get_json(url, params=params)
+    items = (data or {}).get("data") or []
+    results: List[Dict] = []
 
-    # Cache the results
-    _search_cache[cache_key] = (results, time.time())
+    for item in items:
+        n = normalize_anime(item)
+        if n.get("mal_id") and n.get("title"):
+            results.append(n)
 
+    _cache_set(cache_key, results)
     return results
 
 
 async def search_anime_async(query: str) -> Optional[Dict]:
-    """
-    Search for a single anime (first result).
-    Used for commands like /anime_add.
-    """
+    """Search for a single anime (first result)."""
     results = await search_anime(query, limit=1)
     return results[0] if results else None
 
 
 async def search_anime_autocomplete(query: str, limit: int = 10) -> List[Dict]:
     """
-    Fast anime search for autocomplete (shorter timeout, cache-first).
-    Returns quickly to meet Discord's 3s autocomplete deadline.
+    Fast anime search for autocomplete (short timeout, cache-first).
+    Still rate-limited to avoid slamming Jikan during typing.
+    Returns normalized anime dicts (minimal fields OK).
     """
-    if len(query) < 2:
+    q = (query or "").strip()
+    if len(q) < 2:
         return []
 
-    # Normalize query for cache key
-    cache_key = f"{query.lower().strip()}:{limit}"
+    cache_key = f"ac:{q.lower()}:{limit}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
 
-    # Check cache first - return immediately if cached
-    if cache_key in _search_cache:
-        results, timestamp = _search_cache[cache_key]
-        if time.time() - timestamp < CACHE_TTL:
-            return results
-
-    # Try to fetch with short timeout
     url = f"{JIKAN_BASE_URL}/anime"
-    params = {"q": query, "limit": limit, "sfw": "true"}
+    params = {"q": q, "limit": limit, "sfw": "true"}
 
-    try:
-        session = await get_session()
-        async with session.get(url, params=params, timeout=JIKAN_AUTOCOMPLETE_TIMEOUT) as resp:
-            if resp.status != 200:
-                return []
-            data = await resp.json()
+    data = await _get_json(url, params=params, timeout=JIKAN_AUTOCOMPLETE_TIMEOUT)
+    items = (data or {}).get("data") or []
+    results: List[Dict] = []
 
-        if not data or "data" not in data:
-            return []
+    for item in items:
+        n = normalize_anime(item)
+        # autocomplete doesn’t need synopsis, but we keep schema consistent
+        if n.get("mal_id") and n.get("title"):
+            results.append(n)
 
-        results = []
-        for item in data["data"]:
-            title = item.get("title_english") or item.get("title", "Unknown")
-            if not title:
-                continue
-
-            results.append({
-                "mal_id": item.get("mal_id"),
-                "title": title,
-                "title_japanese": item.get("title", ""),
-                "episodes": item.get("episodes"),
-                "status": item.get("status", "Unknown"),
-                "score": item.get("score"),
-                "year": item.get("year"),
-                "type": item.get("type", "TV"),
-            })
-
-        # Cache the results
-        _search_cache[cache_key] = (results, time.time())
-        return results
-
-    except asyncio.TimeoutError:
-        logger.debug("Jikan autocomplete timed out (expected under load)")
-        return []
-    except Exception as e:
-        logger.debug(f"Jikan autocomplete error: {e}")
-        return []
+    _cache_set(cache_key, results)
+    return results
 
 
 async def get_anime_by_id(mal_id: int) -> Optional[Dict]:
-    """Get anime details by MAL ID."""
-    # Check cache first
+    """Get anime details by MAL ID (normalized)."""
     cache_key = f"id:{mal_id}"
-    if cache_key in _search_cache:
-        result, timestamp = _search_cache[cache_key]
-        if time.time() - timestamp < CACHE_TTL:
-            return result
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
 
     url = f"{JIKAN_BASE_URL}/anime/{mal_id}"
+    data = await _get_json(url)
+    item = (data or {}).get("data")
+    n = normalize_anime(item)
 
-    data = await _rate_limited_request(url)
-    if not data or "data" not in data:
+    if not n.get("mal_id"):
         return None
 
-    item = data["data"]
-    images = item.get("images", {})
-    jpg_images = images.get("jpg", {})
-    image_url = jpg_images.get("large_image_url") or jpg_images.get("image_url", "")
+    _cache_set(cache_key, n)
+    return n
 
-    result = {
-        "mal_id": item.get("mal_id"),
-        "title": item.get("title_english") or item.get("title", "Unknown"),
-        "title_japanese": item.get("title", ""),
-        "episodes": item.get("episodes"),
-        "status": item.get("status", "Unknown"),
-        "score": item.get("score"),
-        "image_url": image_url,
-        "synopsis": item.get("synopsis", ""),
-        "year": item.get("year"),
-        "season": item.get("season"),
-        "type": item.get("type", "TV"),
-    }
 
-    # Cache the result
-    _search_cache[cache_key] = (result, time.time())
-    return result
-
+# ---------------- MAL Direct List Fetch (unchanged except tiny polish) ----------------
 
 async def get_user_animelist_direct(username: str, status: str = None, limit: int = 500) -> List[Dict]:
     """
     Fetch a user's anime list directly from MyAnimeList.
 
-    Args:
-        username: MAL username
-        status: Filter by status - "watching", "completed", "on_hold", "dropped", "plan_to_watch"
-        limit: Max entries to fetch (default 500)
-
     Returns:
-        List of anime entries with mal_id, title, episodes, score, status, etc.
+        List of entries with mal_id, title, episodes, image_url, score, status, episodes_watched
     """
-    # Map status names to MAL status codes
-    # 1=watching, 2=completed, 3=on_hold, 4=dropped, 6=plan_to_watch, 7=all
     status_map = {
         "watching": 1,
         "completed": 2,
@@ -296,9 +325,9 @@ async def get_user_animelist_direct(username: str, status: str = None, limit: in
     }
     status_code = status_map.get(status, 7)
 
-    all_entries = []
+    all_entries: List[Dict] = []
     offset = 0
-    page_size = 300  # MAL returns up to 300 per request
+    page_size = 300
 
     try:
         session = await get_session()
@@ -309,28 +338,24 @@ async def get_user_animelist_direct(username: str, status: str = None, limit: in
 
             async with session.get(url, params=params, timeout=JIKAN_TIMEOUT) as resp:
                 if resp.status == 400:
-                    # User not found or list private
-                    logger.warning(f"MAL list not accessible for {username}")
+                    logger.warning(f"MAL list not accessible for {username} (not found or private)")
                     return []
                 if resp.status != 200:
-                    logger.error(f"MAL list fetch error: {resp.status}")
+                    logger.warning(f"MAL list fetch error: status={resp.status}")
                     return all_entries
 
                 data = await resp.json()
-
                 if not data:
                     break
 
+                status_names = {1: "watching", 2: "completed", 3: "on_hold", 4: "dropped", 6: "plan_to_watch"}
+
                 for item in data:
-                    # Get title - prefer English, fall back to Japanese
                     title = item.get("anime_title_eng") or item.get("anime_title", "Unknown")
                     if isinstance(title, int):
-                        # Sometimes anime_title is an int (like 86), use it as string
                         title = str(title)
 
-                    # Map MAL status code to string
                     mal_status = item.get("status")
-                    status_names = {1: "watching", 2: "completed", 3: "on_hold", 4: "dropped", 6: "plan_to_watch"}
 
                     all_entries.append({
                         "mal_id": item.get("anime_id"),
@@ -344,17 +369,15 @@ async def get_user_animelist_direct(username: str, status: str = None, limit: in
 
                 offset += len(data)
 
-                # If we got less than page_size, we're done
                 if len(data) < page_size:
                     break
 
-                # Rate limit
-                await asyncio.sleep(MIN_REQUEST_INTERVAL)
+            await asyncio.sleep(MIN_REQUEST_INTERVAL)
 
     except asyncio.TimeoutError:
-        logger.error(f"MAL list fetch timeout for {username}")
+        logger.warning(f"MAL list fetch timeout for {username}")
     except Exception as e:
-        logger.error(f"MAL list fetch error for {username}: {e}")
+        logger.warning(f"MAL list fetch error for {username}: {type(e).__name__}: {e}")
 
     return all_entries
 
@@ -362,19 +385,11 @@ async def get_user_animelist_direct(username: str, status: str = None, limit: in
 async def get_user_animelist(username: str, status: str = None, limit: int = 300) -> List[Dict]:
     """
     Fetch a user's anime list from MyAnimeList via Jikan API.
-
-    Args:
-        username: MAL username
-        status: Filter by status - "watching", "completed", "on_hold", "dropped", "plan_to_watch"
-        limit: Max entries to fetch (default 300)
-
-    Returns:
-        List of anime entries with mal_id, title, episodes, score, status, etc.
-        Returns empty list if MAL is down or user not found.
+    Returns empty list if unavailable.
     """
-    all_entries = []
+    all_entries: List[Dict] = []
     offset = 0
-    page_size = 25  # Jikan returns 25 per page by default
+    page_size = 25
 
     while len(all_entries) < limit:
         url = f"{JIKAN_BASE_URL}/users/{username}/animelist"
@@ -384,19 +399,10 @@ async def get_user_animelist(username: str, status: str = None, limit: int = 300
         if status:
             params["status"] = status
 
-        data = await _rate_limited_request(url, params)
-
-        # Check for 404 or missing data
-        if not data:
-            # API error - could be MAL down or user not found
+        data = await _get_json(url, params=params)
+        if not data or "data" not in data:
             if len(all_entries) == 0:
-                logger.warning(f"Failed to fetch animelist for {username} - MAL may be down")
-            break
-
-        if "data" not in data:
-            # Could be error response like {"status": 404, ...}
-            if data.get("status") == 404:
-                logger.warning(f"Animelist not found for {username} - user may not exist or MAL is down")
+                logger.warning(f"Failed to fetch animelist for {username} (MAL/Jikan may be down)")
             break
 
         entries = data["data"]
@@ -405,28 +411,24 @@ async def get_user_animelist(username: str, status: str = None, limit: int = 300
 
         for item in entries:
             anime = item.get("anime", {})
-            images = anime.get("images", {})
-            jpg_images = images.get("jpg", {})
-            image_url = jpg_images.get("large_image_url") or jpg_images.get("image_url", "")
+            n = normalize_anime(anime)
 
             all_entries.append({
-                "mal_id": anime.get("mal_id"),
-                "title": anime.get("title", "Unknown"),
-                "episodes": anime.get("episodes"),
-                "image_url": image_url,
-                "score": item.get("score"),  # User's score
-                "status": item.get("status"),  # watching, completed, etc.
+                "mal_id": n.get("mal_id"),
+                "title": n.get("title") or "Unknown",
+                "episodes": n.get("episodes"),
+                "image_url": n.get("image_url") or "",
+                "score": item.get("score"),
+                "status": item.get("status"),
                 "episodes_watched": item.get("episodes_watched", 0),
             })
 
         offset += len(entries)
 
-        # Check if there's more data
         pagination = data.get("pagination", {})
         if not pagination.get("has_next_page", False):
             break
 
-        # Rate limit between pages
         await asyncio.sleep(MIN_REQUEST_INTERVAL)
 
     return all_entries
@@ -436,11 +438,10 @@ async def warmup_session():
     """Pre-warm the session to reduce first-request latency."""
     try:
         session = await get_session()
-        # Make a lightweight request to establish connection
         async with session.get(f"{JIKAN_BASE_URL}/anime/1", timeout=aiohttp.ClientTimeout(total=5)) as resp:
             if resp.status == 200:
                 logger.info("Jikan API session pre-warmed")
             else:
                 logger.warning(f"Jikan API warmup got status {resp.status}")
     except Exception as e:
-        logger.warning(f"Failed to pre-warm Jikan session: {e}")
+        logger.warning(f"Failed to pre-warm Jikan session: {type(e).__name__}: {e}")
