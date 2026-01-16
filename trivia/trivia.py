@@ -36,7 +36,7 @@ try:
     SCORING_CONFIG = config.TRIVIA_CONFIG["scoring"]
     QUESTION_TIMEOUT = config.TRIVIA_CONFIG.get("question_timeout", 30)
     AUTHORIZED_RESET_USER_ID = config.TRIVIA_CONFIG.get("authorized_reset_user_id", "YOUR_USER_ID_HERE")
-except (ImportError, KeyError) as e:
+except (ImportError, KeyError, AttributeError) as e:
     logger.warning(f"Could not load config, using fallback scoring: {e}")
     SCORING_CONFIG = {
         "base_points": {"easy": 10, "medium": 20, "hard": 30},
