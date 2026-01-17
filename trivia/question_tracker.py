@@ -4,6 +4,7 @@ Question tracking system for preventing duplicate trivia questions
 
 from typing import Dict, Any
 import hashlib
+import html
 import logging
 import time
 
@@ -28,7 +29,12 @@ class QuestionTracker:
         # Use question text + correct answer to create unique identifier
         question_text = question_data.get("question", "")
         correct_answer = question_data.get("correct_answer", "")
-        
+
+        # Normalize: decode HTML entities and strip whitespace for consistent hashing
+        # This ensures "What&apos;s" and "What's" hash to the same value
+        question_text = html.unescape(str(question_text)).strip().lower()
+        correct_answer = html.unescape(str(correct_answer)).strip().lower()
+
         # Create a compact hash (8 chars should be sufficient for uniqueness)
         content = f"{question_text}|{correct_answer}".encode('utf-8')
         return hashlib.md5(content).hexdigest()[:8]
