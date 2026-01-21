@@ -34,39 +34,151 @@ def _format_value(v: Optional[str], max_len: int = 256) -> str:
     return v
 
 
+def _get_data_field(data: dict, *keys: str) -> Optional[str]:
+    """Try multiple possible field names and return the first non-empty value."""
+    for key in keys:
+        val = data.get(key)
+        if val and str(val).strip():
+            return str(val).strip()
+    return None
+
+
+def _performance_color(perf: Optional[str]) -> int:
+    """Return embed color based on performance rating."""
+    if not perf:
+        return 0x5865F2  # Discord blurple
+    perf_lower = perf.lower()
+    if "s+" in perf_lower or "s tier" in perf_lower:
+        return 0xFFD700  # Gold
+    if "s" in perf_lower and "a" not in perf_lower:
+        return 0xC0C0C0  # Silver
+    if "a+" in perf_lower:
+        return 0x00FF00  # Bright green
+    if "a" in perf_lower:
+        return 0x32CD32  # Lime green
+    if "b" in perf_lower:
+        return 0x3498DB  # Blue
+    if "c" in perf_lower:
+        return 0xE67E22  # Orange
+    return 0x5865F2  # Discord blurple
+
+
 def _pretty_embed_from_row(row: dict) -> discord.Embed:
     data = json.loads(row["data_json"])
 
-    title = row["name"]
-    embed = discord.Embed(title=title)
+    name = row["name"]
+    brand = row.get("brand") or ""
+    perf = row.get("performance")
 
-    # Set image if available (DB first, then JSON override fallback)
+    # Build a short description/tagline
+    desc_parts = []
+    if brand:
+        desc_parts.append(f"**{brand}**")
+    os_val = row.get("os")
+    if os_val:
+        desc_parts.append(f"{os_val}")
+    form = row.get("form_factor")
+    if form:
+        desc_parts.append(f"{form}")
+
+    description = " · ".join(desc_parts) if desc_parts else None
+
+    embed = discord.Embed(
+        title=name,
+        description=description,
+        color=_performance_color(perf),
+    )
+
+    # Large image at the bottom
     image_url = row.get("image_url")
     if not (isinstance(image_url, str) and image_url.startswith("http")):
         image_url = images.get_image_url(row["slug"])
     if image_url:
-        embed.set_thumbnail(url=image_url)
+        embed.set_image(url=image_url)
 
-    # "Nice" fields if present
-    embed.add_field(name="Brand", value=_format_value(row.get("brand")), inline=True)
-    embed.add_field(name="OS", value=_format_value(row.get("os")), inline=True)
-    embed.add_field(name="Released", value=_format_value(row.get("released")), inline=True)
+    # --- Row 1: Key Info ---
+    price = row.get("price_avg")
+    if price:
+        embed.add_field(name="Price", value=price, inline=True)
 
-    embed.add_field(name="Form Factor", value=_format_value(row.get("form_factor")), inline=True)
-    embed.add_field(name="Performance", value=_format_value(row.get("performance")), inline=True)
-    embed.add_field(name="Price (avg)", value=_format_value(row.get("price_avg")), inline=True)
+    released = row.get("released")
+    if released:
+        embed.add_field(name="Released", value=released, inline=True)
 
+    if perf:
+        embed.add_field(name="Performance", value=perf, inline=True)
+
+    # --- Row 2: Display ---
+    screen = _get_data_field(data, "Screen Size", "Screen", "Display Size")
+    resolution = _get_data_field(data, "Resolution", "Screen Resolution", "Display Resolution")
+    aspect = _get_data_field(data, "Aspect Ratio", "Aspect")
+
+    display_parts = []
+    if screen:
+        display_parts.append(screen)
+    if resolution:
+        display_parts.append(resolution)
+    if aspect:
+        display_parts.append(f"({aspect})")
+
+    if display_parts:
+        embed.add_field(name="Display", value=" · ".join(display_parts), inline=False)
+
+    # --- Row 3: Hardware ---
+    soc = _get_data_field(data, "System On A Chip (SoC)", "SoC", "Chipset", "Processor")
+    cpu = _get_data_field(data, "CPU", "Processor")
+    gpu = _get_data_field(data, "GPU", "Graphics")
+    ram = _get_data_field(data, "RAM", "Memory")
+
+    hw_parts = []
+    if soc:
+        hw_parts.append(f"**SoC:** {soc}")
+    elif cpu:
+        hw_parts.append(f"**CPU:** {cpu}")
+    if gpu:
+        hw_parts.append(f"**GPU:** {gpu}")
+    if ram:
+        hw_parts.append(f"**RAM:** {ram}")
+
+    if hw_parts:
+        embed.add_field(name="Hardware", value="\n".join(hw_parts), inline=False)
+
+    # --- Row 4: Battery & Storage ---
+    battery = _get_data_field(data, "Battery", "Battery Capacity", "Battery (mAh)")
+    storage = _get_data_field(data, "Storage", "Internal Storage")
+    weight = _get_data_field(data, "Weight", "Weight (g)")
+
+    if battery:
+        embed.add_field(name="Battery", value=battery, inline=True)
+    if storage:
+        embed.add_field(name="Storage", value=storage, inline=True)
+    if weight:
+        embed.add_field(name="Weight", value=weight, inline=True)
+
+    # --- Connectivity ---
+    wifi = _get_data_field(data, "WiFi", "Wi-Fi", "Wireless")
+    bt = _get_data_field(data, "Bluetooth", "BT")
+    hdmi = _get_data_field(data, "HDMI", "Video Out", "HDMI Out")
+
+    conn_parts = []
+    if wifi and wifi.lower() not in ("no", "none", "n/a", "-"):
+        conn_parts.append(f"WiFi: {wifi}")
+    if bt and bt.lower() not in ("no", "none", "n/a", "-"):
+        conn_parts.append(f"BT: {bt}")
+    if hdmi and hdmi.lower() not in ("no", "none", "n/a", "-"):
+        conn_parts.append(f"HDMI: {hdmi}")
+
+    if conn_parts:
+        embed.add_field(name="Connectivity", value=" · ".join(conn_parts), inline=False)
+
+    # --- Vendor Link ---
     vendor = row.get("vendor_link")
     if vendor and vendor.startswith("http"):
-        embed.add_field(name="Vendor Link", value=vendor, inline=False)
+        embed.add_field(name="Buy", value=f"[Vendor Link]({vendor})", inline=False)
 
-    # Add some extra interesting fields if they exist in the sheet
-    for key in ["System On A Chip (SoC)", "CPU", "GPU", "RAM", "Screen Size", "Resolution", "Weight"]:
-        if key in data and str(data[key]).strip():
-            embed.add_field(name=key, value=_format_value(data[key]), inline=True)
+    # Footer with slug for reference
+    embed.set_footer(text=f"Data from Retro Handhelds Sheet · {row['slug']}")
 
-    # Footer metadata
-    embed.set_footer(text=f"slug: {row['slug']}")
     return embed
 
 
