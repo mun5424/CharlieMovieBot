@@ -192,48 +192,66 @@ def sha256_text(s: str) -> str:
     return hashlib.sha256(s.encode("utf-8")).hexdigest()
 
 
+def sha256_json(obj: Any) -> str:
+    s = json.dumps(obj, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()
+
+
 async def refresh_from_sheet(sheet_id: str, gid: str) -> Tuple[bool, int]:
     await db.init_db()
 
-    # Fetch CSV for data
     csv_url = build_export_url(sheet_id, gid)
     csv_text = await fetch_csv_text(csv_url)
-    new_hash = sha256_text(csv_text)
+    csv_hash = sha256_text(csv_text)
 
-    old_hash = await db.get_meta("csv_hash")
-    if old_hash == new_hash:
-        logger.info("Handhelds ingest: no change detected (hash match).")
-        await db.set_meta("last_refresh_ok_unix", str(db._now_unix()))
-        return (False, 0)
-
-    # Fetch HTML for images (embedded images only appear in HTML export)
+    # Always try to fetch images (because images can change even if CSV doesn't)
     image_map: Dict[str, str] = {}
+    image_hash: str | None = None
     try:
         html_url = build_html_url(sheet_id, gid)
         html_text = await fetch_html_text(html_url)
         image_map = extract_images_from_html(html_text)
+        image_hash = sha256_json(image_map)
         logger.info("Handhelds ingest: extracted %d images from HTML", len(image_map))
     except Exception as e:
         logger.warning("Handhelds ingest: failed to extract images from HTML: %s", e)
 
-    sheet_rows = parse_rows(csv_text)
-    rows = to_db_rows(sheet_rows, image_map=image_map)
+    old_csv_hash = await db.get_meta("csv_hash")
+    old_img_hash = await db.get_meta("image_hash")
 
-    # Optional: fail loudly if we got 0 usable rows, because that’s suspicious here
-    if not rows:
-        # Show a couple headers to help debug mapping
-        headers = list(sheet_rows[0].keys()) if sheet_rows else []
-        raise RuntimeError(f"Parsed {len(sheet_rows)} sheet rows but mapped 0 DB rows. Headers sample: {headers[:8]}")
+    csv_changed = (old_csv_hash != csv_hash)
+    img_changed = (image_hash is not None and old_img_hash != image_hash)
 
-    changed_count, total = await db.upsert_many(rows)
-    
-    logger.info("Handhelds ingest: sheet_rows=%d db_rows=%d", len(sheet_rows), len(rows))
+    # If CSV changed, do full ingest/upsert
+    if csv_changed:
+        sheet_rows = parse_rows(csv_text)
+        rows = to_db_rows(sheet_rows, image_map=image_map)
 
-    await db.set_meta("csv_hash", new_hash)
+        if not rows:
+            headers = list(sheet_rows[0].keys()) if sheet_rows else []
+            raise RuntimeError(f"Parsed {len(sheet_rows)} sheet rows but mapped 0 DB rows. Headers sample: {headers[:8]}")
+
+        changed_count, total = await db.upsert_many(rows)
+
+        await db.set_meta("csv_hash", csv_hash)
+        if image_hash is not None:
+            await db.set_meta("image_hash", image_hash)
+
+        await db.set_meta("last_refresh_ok_unix", str(db._now_unix()))
+        await db.set_meta("last_row_count", str(total))
+        await db.set_meta("source_url", csv_url)
+
+        logger.info("Handhelds ingest: upserted %s rows (parsed=%s).", changed_count, total)
+        return (True, total)
+
+    # If CSV NOT changed but images changed, update images only
+    if img_changed and image_map:
+        updated = await db.update_images_by_name_norm(image_map)  # implement this
+        await db.set_meta("image_hash", image_hash)
+        await db.set_meta("last_refresh_ok_unix", str(db._now_unix()))
+        logger.info("Handhelds ingest: updated %d image URLs (CSV unchanged).", updated)
+        return (True, 0)
+
+    logger.info("Handhelds ingest: no changes detected (CSV and images).")
     await db.set_meta("last_refresh_ok_unix", str(db._now_unix()))
-    await db.set_meta("last_row_count", str(total))
-    await db.set_meta("source_url", url)
-
-    logger.info("Handhelds ingest: upserted %s rows (parsed=%s).", changed_count, total)
-    return (True, total)
-
+    return (False, 0)

@@ -121,27 +121,29 @@ class HandheldCommands(commands.Cog):
         embed = _pretty_embed_from_row(row)
         await interaction.followup.send(embed=embed)
 
-    @app_commands.command(name="handheld_refresh", description="Manually refresh handheld data from spreadsheet")
-    @app_commands.default_permissions(administrator=True)
-    async def handheld_refresh(self, interaction: discord.Interaction):
-        await interaction.response.defer(thinking=True)
 
-        sheet_id = getattr(config, "HANDHELDS_SHEET_ID", None)
-        gid = getattr(config, "HANDHELDS_SHEET_GID", "0")
+    # disabling for now 
+    # @app_commands.command(name="handheld_refresh", description="Manually refresh handheld data from spreadsheet")
+    # @app_commands.default_permissions(administrator=True)
+    # async def handheld_refresh(self, interaction: discord.Interaction):
+    #     await interaction.response.defer(thinking=True)
 
-        if not sheet_id:
-            return await interaction.followup.send("HANDHELDS_SHEET_ID not configured.")
+    #     sheet_id = getattr(config, "HANDHELDS_SHEET_ID", None)
+    #     gid = getattr(config, "HANDHELDS_SHEET_GID", "0")
 
-        try:
-            await db.init_db()
-            changed, count = await ingest.refresh_from_sheet(sheet_id=sheet_id, gid=str(gid))
-            if changed:
-                await interaction.followup.send(f"Refreshed {count} handhelds from spreadsheet.")
-            else:
-                await interaction.followup.send("No changes detected (data already up to date).")
-        except Exception as e:
-            logger.exception("Manual handheld refresh failed: %s", e)
-            await interaction.followup.send(f"Refresh failed: {e}")
+    #     if not sheet_id:
+    #         return await interaction.followup.send("HANDHELDS_SHEET_ID not configured.")
+
+    #     try:
+    #         await db.init_db()
+    #         changed, count = await ingest.refresh_from_sheet(sheet_id=sheet_id, gid=str(gid))
+    #         if changed:
+    #             await interaction.followup.send(f"Refreshed {count} handhelds from spreadsheet.")
+    #         else:
+    #             await interaction.followup.send("No changes detected (data already up to date).")
+    #     except Exception as e:
+    #         logger.exception("Manual handheld refresh failed: %s", e)
+    #         await interaction.followup.send(f"Refresh failed: {e}")
 
 
 def _seconds_until_next_monday_4am() -> float:

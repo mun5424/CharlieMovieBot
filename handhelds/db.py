@@ -175,3 +175,50 @@ def slugify(name: str) -> str:
     s = re.sub(r"[^\w\s-]", "", s)
     s = re.sub(r"[\s_-]+", "-", s)
     return s.strip("-")
+
+async def update_images_by_name_norm(image_map: dict[str, str]) -> int:
+    """
+    Update image_url for rows matching name_norm.
+    Only updates when the new URL is non-empty and differs from what's stored.
+    Returns number of rows updated.
+    """
+    if not image_map:
+        return 0
+
+    await init_db()
+
+    # Clean + normalize input (avoid updating with junk)
+    items: list[tuple[str, str]] = []
+    for name_norm, url in image_map.items():
+        if not name_norm:
+            continue
+        nn = str(name_norm).strip().lower()
+        u = str(url).strip()
+        if not nn or not u or not u.startswith("http"):
+            continue
+        items.append((u, nn, u))  # params for UPDATE
+
+    if not items:
+        return 0
+
+    async with aiosqlite.connect(DB_FILE) as conn:
+        await conn.execute("PRAGMA journal_mode=WAL;")
+        await conn.execute("PRAGMA synchronous=NORMAL;")
+
+        # One UPDATE per item; executemany is fine for a few thousand rows
+        cur = await conn.executemany(
+            """
+            UPDATE handhelds
+               SET image_url = ?
+             WHERE name_norm = ?
+               AND (image_url IS NULL OR image_url != ?)
+            """,
+            items
+        )
+        await conn.commit()
+
+        # aiosqlite cursor.rowcount with executemany can be unreliable depending on sqlite version,
+        # so we compute updated count explicitly via SELECT changes().
+        cur2 = await conn.execute("SELECT changes();")
+        row = await cur2.fetchone()
+        return int(row[0]) if row else 0
