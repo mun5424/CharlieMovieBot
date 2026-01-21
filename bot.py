@@ -56,6 +56,7 @@ class BotManager:
             from commands import general, watchlist, anime, gamelog
             from food import commands as food_commands
             from trivia.trivia import TriviaCog
+            from handhelds import commands as handhelds_commands
 
             # Load traditional commands
             general.setup(self.bot)
@@ -69,12 +70,16 @@ class BotManager:
             trivia_cog = TriviaCog(self.bot)
             await self.bot.add_cog(trivia_cog)
             self.logger.info("✅ Trivia cog loaded")
-            
+
             # Add shutdown handler for trivia data
             if hasattr(trivia_cog, 'data_manager'):
                 self.bot.add_shutdown_handler(
                     lambda: trivia_cog.data_manager.force_save_all()
                 )
+
+            # Load handhelds cog
+            await handhelds_commands.setup(self.bot)
+            self.logger.info("✅ Handhelds cog loaded")
             
             # Log registered commands
             registered_commands = [cmd.name for cmd in self.bot.tree.get_commands()]
@@ -137,6 +142,14 @@ class BotManager:
                 self.logger.info("✅ Food database initialized")
             except Exception as e:
                 self.logger.warning(f"⚠️ Food database not available: {e}")
+
+            # Initialize handhelds database
+            try:
+                from handhelds.db import init_db as init_handhelds_db
+                await init_handhelds_db()
+                self.logger.info("✅ Handhelds database initialized")
+            except Exception as e:
+                self.logger.warning(f"⚠️ Handhelds database not available: {e}")
 
             # Pre-warm TMDB session to avoid first-request latency
             try:
