@@ -100,18 +100,16 @@ class RetroCatalogClient:
         Check if an image exists for the given slug.
         Returns the proxied image URL if it exists (HTTP 200), None otherwise.
         Uses weserv.nl proxy for proper Content-Type headers (Discord compatibility).
+        Checks against the proxy URL directly since retrocatalog returns 200 for errors.
         """
         await self._rate_limit()
 
-        # Check against the original URL
-        check_url = f"{RETRO_BASE}{IMAGE_PATH}{slug}"
-        # Return the proxied URL for Discord embed compatibility
         proxy_url = f"{IMAGE_PROXY}{slug}"
         headers = {"User-Agent": "CharlieMovieBot/1.0 (+retrocatalog resolver)"}
 
         try:
             async with self.session.head(
-                check_url,
+                proxy_url,
                 headers=headers,
                 allow_redirects=True,
                 timeout=DEFAULT_TIMEOUT
