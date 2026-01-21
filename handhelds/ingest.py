@@ -31,6 +31,7 @@ def extract_image_url(value: str | None) -> str | None:
     return None
 
 from handhelds import db
+from handhelds.ingest_images import extract_images_from_html
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +39,13 @@ DEFAULT_TIMEOUT = aiohttp.ClientTimeout(total=25, connect=8)
 
 
 def build_export_url(sheet_id: str, gid: str) -> str:
+    """CSV export URL."""
     return f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&gid={gid}"
+
+
+def build_html_url(sheet_id: str, gid: str) -> str:
+    """HTML export URL (needed for embedded images)."""
+    return f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:html&gid={gid}"
 
 
 
@@ -61,10 +68,11 @@ def pick_field(row: Dict[str, str], *candidates: str) -> Optional[str]:
     return None
 
 
-async def fetch_csv_text(url: str) -> str:
+async def fetch_text(url: str, expect_html: bool = False) -> str:
+    """Fetch text from URL. Set expect_html=True for HTML exports."""
     headers = {
         "User-Agent": "CharlieMovieBot/1.0 (+handhelds ingest)",
-        "Accept": "text/csv,text/plain;q=0.9,*/*;q=0.8",
+        "Accept": "text/html,text/csv,text/plain;q=0.9,*/*;q=0.8",
     }
 
     async with aiohttp.ClientSession(timeout=DEFAULT_TIMEOUT) as session:
@@ -80,10 +88,22 @@ async def fetch_csv_text(url: str) -> str:
             resp.raise_for_status()
 
             lowered = text.lower()
-            if "<html" in lowered or "<!doctype html" in lowered or "accounts.google.com" in lowered or "sign in" in lowered:
-                raise RuntimeError("Expected CSV but got HTML (login/permission page). Check sharing or endpoint.")
+            # Check for login page (only matters for CSV, HTML export is expected to have html tags)
+            if not expect_html:
+                if "<html" in lowered or "<!doctype html" in lowered or "accounts.google.com" in lowered or "sign in" in lowered:
+                    raise RuntimeError("Expected CSV but got HTML (login/permission page). Check sharing or endpoint.")
 
             return text
+
+
+async def fetch_csv_text(url: str) -> str:
+    """Fetch CSV text from URL."""
+    return await fetch_text(url, expect_html=False)
+
+
+async def fetch_html_text(url: str) -> str:
+    """Fetch HTML text from URL."""
+    return await fetch_text(url, expect_html=True)
 
 
 
@@ -106,8 +126,16 @@ def parse_rows(csv_text: str) -> List[Dict[str, str]]:
     return rows
 
 
-def to_db_rows(sheet_rows: List[Dict[str, str]]) -> List[Dict[str, Any]]:
+def to_db_rows(sheet_rows: List[Dict[str, str]], image_map: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
+    """
+    Convert sheet rows to DB rows.
+
+    Args:
+        sheet_rows: Parsed CSV rows
+        image_map: Optional dict mapping lowercase name -> image URL (from HTML extraction)
+    """
     out: List[Dict[str, Any]] = []
+    image_map = image_map or {}
 
     for r in sheet_rows:
         name = pick_field(
@@ -133,8 +161,12 @@ def to_db_rows(sheet_rows: List[Dict[str, str]]) -> List[Dict[str, Any]]:
         performance = pick_field(r, "Performance Rating")
         price_avg = pick_field(r, "Price (average)", "Price")
         vendor_link = pick_field(r, "Vendor Link", "Vendor Link 1", "Vendor Link 2")
+
+        # Try CSV image field first, then fall back to HTML-extracted image
         raw_image = pick_field(r, "Image URL", "Image", "Thumbnail", "Photo")
         image_url = extract_image_url(raw_image)
+        if not image_url:
+            image_url = image_map.get(name_norm)
 
         data_json = json.dumps(r, ensure_ascii=False)
 
@@ -163,8 +195,9 @@ def sha256_text(s: str) -> str:
 async def refresh_from_sheet(sheet_id: str, gid: str) -> Tuple[bool, int]:
     await db.init_db()
 
-    url = build_export_url(sheet_id, gid)
-    csv_text = await fetch_csv_text(url)
+    # Fetch CSV for data
+    csv_url = build_export_url(sheet_id, gid)
+    csv_text = await fetch_csv_text(csv_url)
     new_hash = sha256_text(csv_text)
 
     old_hash = await db.get_meta("csv_hash")
@@ -173,11 +206,18 @@ async def refresh_from_sheet(sheet_id: str, gid: str) -> Tuple[bool, int]:
         await db.set_meta("last_refresh_ok_unix", str(db._now_unix()))
         return (False, 0)
 
-    sheet_rows: List[Dict[str, str]] = []
-    rows: List[Dict[str, Any]] = []   # <-- add this
+    # Fetch HTML for images (embedded images only appear in HTML export)
+    image_map: Dict[str, str] = {}
+    try:
+        html_url = build_html_url(sheet_id, gid)
+        html_text = await fetch_html_text(html_url)
+        image_map = extract_images_from_html(html_text)
+        logger.info("Handhelds ingest: extracted %d images from HTML", len(image_map))
+    except Exception as e:
+        logger.warning("Handhelds ingest: failed to extract images from HTML: %s", e)
 
     sheet_rows = parse_rows(csv_text)
-    rows = to_db_rows(sheet_rows)
+    rows = to_db_rows(sheet_rows, image_map=image_map)
 
     # Optional: fail loudly if we got 0 usable rows, because that’s suspicious here
     if not rows:
