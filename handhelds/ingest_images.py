@@ -1,85 +1,56 @@
 import re
-from html.parser import HTMLParser
 
-# Image cells in gviz HTML are links like: <a href="https://lh7-rt.googleusercontent.com/...">Image</a>
+TR_RE = re.compile(r"<tr[^>]*>(.*?)</tr>", re.IGNORECASE | re.DOTALL)
+TD_RE = re.compile(r"<t[dh][^>]*>(.*?)</t[dh]>", re.IGNORECASE | re.DOTALL)
 HREF_RE = re.compile(r'href="([^"]+)"', re.IGNORECASE)
-
-class _TableParser(HTMLParser):
-    def __init__(self):
-        super().__init__()
-        self.in_td = False
-        self.current_cell_html = []
-        self.current_row = []
-        self.rows = []
-        self.in_tr = False
-
-    def handle_starttag(self, tag, attrs):
-        if tag == "tr":
-            self.in_tr = True
-            self.current_row = []
-        if tag in ("td", "th") and self.in_tr:
-            self.in_td = True
-            self.current_cell_html = []
-        if self.in_td:
-            attr_str = " ".join(f'{k}="{v}"' for k, v in attrs)
-            self.current_cell_html.append(f"<{tag} {attr_str}>")
-
-    def handle_endtag(self, tag):
-        if self.in_td:
-            self.current_cell_html.append(f"</{tag}>")
-        if tag in ("td", "th") and self.in_td:
-            self.in_td = False
-            self.current_row.append("".join(self.current_cell_html))
-        if tag == "tr" and self.in_tr:
-            self.in_tr = False
-            if self.current_row:
-                self.rows.append(self.current_row)
-
-    def handle_data(self, data):
-        if self.in_td:
-            self.current_cell_html.append(data)
-
+TAG_STRIP_RE = re.compile(r"<[^>]+>")
 
 def _strip_tags(s: str) -> str:
-    return re.sub(r"<[^>]+>", "", s or "").strip()
+    return TAG_STRIP_RE.sub("", s or "").strip()
 
-
-def _pick_best_href(cell_html: str) -> str | None:
-    """
-    Prefer the googleusercontent thumbnail links from Sheets.
-    Example: https://lh7-rt.googleusercontent.com/sheetsz/...=w120-h64?key=...
-    """
+def _best_href(cell_html: str) -> str | None:
     hrefs = HREF_RE.findall(cell_html or "")
     if not hrefs:
         return None
-
-    # Prefer googleusercontent thumbnails
+    # prefer googleusercontent
     for h in hrefs:
         if "googleusercontent.com" in h:
             return h
-
-    # Otherwise fall back to first href
     return hrefs[0]
 
-
 def extract_images_from_html(html: str) -> dict[str, str]:
-    p = _TableParser()
-    p.feed(html)
-
     out: dict[str, str] = {}
 
-    # rows[0] is header. col A = image link, col B = handheld name.
-    for row in p.rows[1:]:
-        if len(row) < 2:
+    rows = TR_RE.findall(html or "")
+    if not rows:
+        return out
+
+    # skip header row
+    for tr in rows[1:]:
+        cells = TD_RE.findall(tr)
+        if len(cells) < 2:
             continue
 
-        col_a = row[0]
-        name = _strip_tags(row[1])
-        if not name:
+        # Sometimes there is an extra first column (like row number). So try first 3 cells for image,
+        # and next cells for name.
+        # We'll look for the first cell that contains a useful href, and the first non-empty text cell as name.
+        href = None
+        for idx in range(min(3, len(cells))):
+            href = _best_href(cells[idx])
+            if href:
+                break
+
+        name = None
+        for idx in range(min(6, len(cells))):
+            t = _strip_tags(cells[idx])
+            if t and t.lower() not in ("image",):
+                name = t
+                break
+
+        if not name or not href:
             continue
 
-        href = _pick_best_href(col_a)
-        if href and href.startswith("http"):
-            out[name.lower()] = href
+        if href.startswith("http"):
+            out[name.strip().lower()] = href
 
     return out
