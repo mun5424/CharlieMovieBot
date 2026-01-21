@@ -13,6 +13,9 @@ logger = logging.getLogger(__name__)
 RETRO_BASE = "https://retrocatalog.com"
 IMAGE_PATH = "/images/retro-handheld_front_"
 
+# Use weserv.nl proxy to get proper Content-Type headers for Discord embeds
+IMAGE_PROXY = "https://images.weserv.nl/?url=retrocatalog.com/images/retro-handheld_front_"
+
 DEFAULT_TIMEOUT = aiohttp.ClientTimeout(total=15, connect=8)
 
 # Common brand prefixes to strip from device names
@@ -95,22 +98,26 @@ class RetroCatalogClient:
     async def check_image_exists(self, slug: str) -> Optional[str]:
         """
         Check if an image exists for the given slug.
-        Returns the image URL if it exists (HTTP 200), None otherwise.
+        Returns the proxied image URL if it exists (HTTP 200), None otherwise.
+        Uses weserv.nl proxy for proper Content-Type headers (Discord compatibility).
         """
         await self._rate_limit()
 
-        image_url = f"{RETRO_BASE}{IMAGE_PATH}{slug}"
+        # Check against the original URL
+        check_url = f"{RETRO_BASE}{IMAGE_PATH}{slug}"
+        # Return the proxied URL for Discord embed compatibility
+        proxy_url = f"{IMAGE_PROXY}{slug}"
         headers = {"User-Agent": "CharlieMovieBot/1.0 (+retrocatalog resolver)"}
 
         try:
             async with self.session.head(
-                image_url,
+                check_url,
                 headers=headers,
                 allow_redirects=True,
                 timeout=DEFAULT_TIMEOUT
             ) as resp:
                 if resp.status == 200:
-                    return image_url
+                    return proxy_url
                 return None
         except Exception as e:
             logger.debug("RetroCatalog image check failed for %s: %s", slug, e)
