@@ -253,7 +253,6 @@ async def refresh_from_sheet(sheet_id: str, gid: str) -> Tuple[bool, int]:
         return (True, 0)
 
     logger.info("Handhelds ingest: html length=%d", len(html_text))
-    logger.info("Handhelds ingest: parsed html rows=%d", len(getattr(p, "rows", [])))  # or return row count from extractor
     logger.info("Handhelds ingest: image_map size=%d", len(image_map))
     if image_map:
         k = next(iter(image_map))
