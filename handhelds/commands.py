@@ -176,9 +176,6 @@ def _pretty_embed_from_row(row: dict) -> discord.Embed:
     if vendor and vendor.startswith("http"):
         embed.add_field(name="Buy", value=f"[Vendor Link]({vendor})", inline=False)
 
-    # Footer with slug for reference
-    embed.set_footer(text=f"Data from Retro Handhelds Sheet · {row['slug']}")
-
     return embed
 
 
