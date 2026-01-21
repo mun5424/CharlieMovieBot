@@ -38,8 +38,8 @@ DEFAULT_TIMEOUT = aiohttp.ClientTimeout(total=25, connect=8)
 
 
 def build_export_url(sheet_id: str, gid: str) -> str:
-    # Docs: /export?format=csv (and gid for tab selection)
-    return f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
+    return f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&gid={gid}"
+
 
 
 def normalize_header(h: str) -> str:
@@ -68,9 +68,23 @@ async def fetch_csv_text(url: str) -> str:
     }
 
     async with aiohttp.ClientSession(timeout=DEFAULT_TIMEOUT) as session:
-        async with session.get(url, headers=headers) as resp:
+        async with session.get(url, headers=headers, allow_redirects=True) as resp:
+            text = await resp.text()
+            ctype = (resp.headers.get("Content-Type") or "").lower()
+
+            logger.info(
+                "handhelds fetch: status=%s ctype=%s final_url=%s len=%s head=%r",
+                resp.status, ctype, str(resp.url), len(text), text[:200]
+            )
+
             resp.raise_for_status()
-            return await resp.text()
+
+            lowered = text.lower()
+            if "<html" in lowered or "<!doctype html" in lowered or "accounts.google.com" in lowered or "sign in" in lowered:
+                raise RuntimeError("Expected CSV but got HTML (login/permission page). Check sharing or endpoint.")
+
+            return text
+
 
 
 def parse_rows(csv_text: str) -> List[Dict[str, str]]:
@@ -158,7 +172,11 @@ async def refresh_from_sheet(sheet_id: str, gid: str) -> Tuple[bool, int]:
         return (False, 0)
 
     sheet_rows = parse_rows(csv_text)
-    rows = to_db_rows(sheet_rows)
+    if sheet_rows:
+        logger.info("handhelds headers=%s", list(sheet_rows[0].keys()))
+    else:
+        logger.warning("handhelds parse_rows returned 0 rows")
+        rows = to_db_rows(sheet_rows)
     changed_count, total = await db.upsert_many(rows)
 
     await db.set_meta("csv_hash", new_hash)
