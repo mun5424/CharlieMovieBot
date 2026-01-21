@@ -13,10 +13,7 @@ import logging
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-import ssl
-
 import aiohttp
-import certifi
 
 _IMAGE_RE = re.compile(r'=IMAGE\(\s*"([^"]+)"', re.IGNORECASE)
 
@@ -209,11 +206,7 @@ async def resolve_missing_images_from_retrocatalog() -> int:
     logger.info("RetroCatalog: attempting to resolve images for %d handhelds", len(missing))
     resolved = 0
 
-    # Create SSL context with certifi certificates (fixes macOS SSL issues)
-    ssl_context = ssl.create_default_context(cafile=certifi.where())
-    connector = aiohttp.TCPConnector(ssl=ssl_context)
-
-    async with aiohttp.ClientSession(timeout=DEFAULT_TIMEOUT, connector=connector) as session:
+    async with aiohttp.ClientSession(timeout=DEFAULT_TIMEOUT) as session:
         for item in missing:
             name = item["name"]
             slug = item["slug"]
