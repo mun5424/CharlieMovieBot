@@ -19,11 +19,48 @@ CANONICAL_RE = re.compile(r'<link\s+rel="canonical"\s+href="([^"]+)"', re.IGNORE
 
 DEFAULT_TIMEOUT = aiohttp.ClientTimeout(total=20, connect=8)
 
+# Common brand prefixes to strip from device names
+BRAND_PREFIXES = [
+    "anbernic", "retroid", "powkiddy", "miyoo", "ayn", "ayaneo",
+    "gpd", "onexplayer", "steam", "valve", "nintendo", "sony",
+    "sega", "atari", "trimui", "rgb10", "gameforce", "odroid",
+    "clockwork", "hardkernel", "abernic",  # common misspelling
+]
+
 
 def slugify_name(name: str) -> str:
+    """
+    Convert device name to RetroCatalog-style slug.
+
+    Examples:
+        "Anbernic RG35XX Plus" -> "rg-35xx-plus"
+        "Retroid Pocket 4 Pro" -> "pocket-4-pro"
+        "Miyoo Mini Plus" -> "mini-plus"
+    """
     s = name.strip().lower()
+
+    # Remove brand prefix if present
+    for brand in BRAND_PREFIXES:
+        if s.startswith(brand + " "):
+            s = s[len(brand):].strip()
+            break
+        # Also try without space (e.g., "AnbernicRG35XX")
+        if s.startswith(brand) and len(s) > len(brand):
+            rest = s[len(brand):]
+            if rest[0].isalnum():
+                s = rest.strip()
+                break
+
+    # Insert hyphen between letters and digits: "rg35xx" -> "rg-35xx"
+    # But NOT between digits and letters: "35xx" stays "35xx" (retrocatalog style)
+    s = re.sub(r"([a-z])(\d)", r"\1-\2", s)
+
+    # Remove non-word chars except spaces/hyphens, collapse whitespace to hyphens
     s = re.sub(r"[^\w\s-]", "", s)
-    s = re.sub(r"[\s_-]+", "-", s)
+    s = re.sub(r"[\s_]+", "-", s)
+    # Collapse multiple hyphens
+    s = re.sub(r"-+", "-", s)
+
     return s.strip("-")
 
 
@@ -86,17 +123,32 @@ class RetroCatalogClient:
             return None
 
 
+def _simple_slugify(name: str) -> str:
+    """Simple slug without brand stripping (fallback)."""
+    s = name.strip().lower()
+    s = re.sub(r"[^\w\s-]", "", s)
+    s = re.sub(r"[\s_-]+", "-", s)
+    return s.strip("-")
+
+
 async def resolve_retrocatalog(name: str, session: aiohttp.ClientSession) -> Optional[RetroHandheld]:
     """
-    Best-effort resolver: try a few slug variants.
+    Best-effort resolver: try multiple slug variants.
     """
     client = RetroCatalogClient(session, min_delay_s=1.0)
 
     base = slugify_name(name)
+    full = _simple_slugify(name)
+
     candidates = [
-        base,
-        base.replace("plus", "plus"),  # placeholder if you add more transforms
+        base,                              # "rg-35xx-plus" (brand stripped, hyphenated)
+        full,                              # "anbernic-rg35xx-plus" (full name, simple slug)
     ]
+
+    # Also try without trailing modifiers like "plus", "pro", "h", "sp"
+    for suffix in ["-plus", "-pro", "-h", "-sp", "-s"]:
+        if base.endswith(suffix):
+            candidates.append(base[:-len(suffix)])
 
     tried = set()
     for slug in candidates:
@@ -104,8 +156,11 @@ async def resolve_retrocatalog(name: str, session: aiohttp.ClientSession) -> Opt
             continue
         tried.add(slug)
 
+        logger.debug("RetroCatalog: trying slug '%s' for '%s'", slug, name)
         hit = await client.fetch_handheld_page(slug)
         if hit:
+            logger.debug("RetroCatalog: found '%s' at slug '%s'", name, slug)
             return hit
 
+    logger.debug("RetroCatalog: no match for '%s' (tried: %s)", name, list(tried))
     return None
