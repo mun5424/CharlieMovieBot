@@ -211,6 +211,12 @@ async def refresh_from_sheet(sheet_id: str, gid: str) -> Tuple[bool, int]:
         html_url = build_html_url(sheet_id, gid)
         html_text = await fetch_html_text(html_url)
         image_map = extract_images_from_html(html_text)
+        if len(image_map) == 0:
+            # log a tiny diagnostic: how many hrefs exist in the whole doc?
+            href_count = html_text.lower().count("href=")
+            a_count = html_text.lower().count("<a ")
+            logger.info("Handhelds ingest: html diagnostics: <a count=%d href count=%d", a_count, href_count)
+            logger.info("Handhelds ingest: html snippet around first href: %r", html_text[:2000])
         image_hash = sha256_json(image_map)
         logger.info("Handhelds ingest: extracted %d images from HTML", len(image_map))
     except Exception as e:
