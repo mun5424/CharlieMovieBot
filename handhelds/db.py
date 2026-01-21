@@ -186,6 +186,40 @@ async def get_by_slug_or_exact_name(query: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+async def get_handhelds_missing_images() -> List[Dict[str, Any]]:
+    """Get all handhelds without an image_url."""
+    async with aiosqlite.connect(DB_FILE) as conn:
+        conn.row_factory = aiosqlite.Row
+        cur = await conn.execute("""
+            SELECT slug, name
+            FROM handhelds
+            WHERE image_url IS NULL OR image_url = ''
+        """)
+        rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+
+async def update_image_by_slug(slug: str, image_url: str) -> bool:
+    """Update image_url for a handheld by slug. Returns True if updated."""
+    if not slug or not image_url or not image_url.startswith("http"):
+        return False
+
+    async with aiosqlite.connect(DB_FILE) as conn:
+        await conn.execute(
+            """
+            UPDATE handhelds
+               SET image_url = ?
+             WHERE slug = ?
+               AND (image_url IS NULL OR image_url = '')
+            """,
+            (image_url, slug)
+        )
+        await conn.commit()
+        cur = await conn.execute("SELECT changes();")
+        row = await cur.fetchone()
+        return bool(row and row[0] > 0)
+
+
 async def search_names(partial: str, limit: int = 25) -> List[Dict[str, Any]]:
     q = partial.strip().lower()
     if not q:

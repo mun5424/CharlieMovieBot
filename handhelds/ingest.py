@@ -32,6 +32,7 @@ def extract_image_url(value: str | None) -> str | None:
 
 from handhelds import db
 from handhelds.ingest_images import extract_images_from_html
+from handhelds.retrocatalog import resolve_retrocatalog
 
 logger = logging.getLogger(__name__)
 
@@ -192,6 +193,42 @@ def sha256_text(s: str) -> str:
     return hashlib.sha256(s.encode("utf-8")).hexdigest()
 
 
+async def resolve_missing_images_from_retrocatalog() -> int:
+    """
+    Fetch images from retrocatalog.com for handhelds missing images.
+    Returns the number of images successfully resolved.
+    """
+    missing = await db.get_handhelds_missing_images()
+    if not missing:
+        logger.info("RetroCatalog: no handhelds missing images")
+        return 0
+
+    logger.info("RetroCatalog: attempting to resolve images for %d handhelds", len(missing))
+    resolved = 0
+
+    async with aiohttp.ClientSession(timeout=DEFAULT_TIMEOUT) as session:
+        for item in missing:
+            name = item["name"]
+            slug = item["slug"]
+
+            try:
+                hit = await resolve_retrocatalog(name, session)
+                if hit and hit.og_image:
+                    updated = await db.update_image_by_slug(slug, hit.og_image)
+                    if updated:
+                        resolved += 1
+                        logger.info("RetroCatalog: resolved image for %s -> %s", name, hit.og_image[:80])
+                    else:
+                        logger.debug("RetroCatalog: found image for %s but DB update skipped", name)
+                else:
+                    logger.debug("RetroCatalog: no image found for %s", name)
+            except Exception as e:
+                logger.warning("RetroCatalog: error resolving %s: %s", name, e)
+
+    logger.info("RetroCatalog: resolved %d/%d missing images", resolved, len(missing))
+    return resolved
+
+
 def sha256_json(obj: Any) -> str:
     s = json.dumps(obj, ensure_ascii=False, sort_keys=True)
     return hashlib.sha256(s.encode("utf-8")).hexdigest()
@@ -248,14 +285,26 @@ async def refresh_from_sheet(sheet_id: str, gid: str) -> Tuple[bool, int]:
         await db.set_meta("source_url", csv_url)
 
         logger.info("Handhelds ingest: upserted %s rows (parsed=%s).", changed_count, total)
+
+        # Try to fill in missing images from retrocatalog.com
+        retro_resolved = await resolve_missing_images_from_retrocatalog()
+        if retro_resolved:
+            logger.info("Handhelds ingest: resolved %d images from RetroCatalog", retro_resolved)
+
         return (True, total)
 
     # If CSV NOT changed but images changed, update images only
     if img_changed and image_map:
-        updated = await db.update_images_by_name_norm(image_map)  # implement this
+        updated = await db.update_images_by_name_norm(image_map)
         await db.set_meta("image_hash", image_hash)
         await db.set_meta("last_refresh_ok_unix", str(db._now_unix()))
         logger.info("Handhelds ingest: updated %d image URLs (CSV unchanged).", updated)
+
+        # Try to fill in missing images from retrocatalog.com
+        retro_resolved = await resolve_missing_images_from_retrocatalog()
+        if retro_resolved:
+            logger.info("Handhelds ingest: resolved %d images from RetroCatalog", retro_resolved)
+
         return (True, 0)
 
     logger.info("Handhelds ingest: html length=%d", len(html_text))
@@ -268,6 +317,13 @@ async def refresh_from_sheet(sheet_id: str, gid: str) -> Tuple[bool, int]:
 
     logger.info("Handhelds ingest: no changes detected (CSV and images).")
     await db.set_meta("last_refresh_ok_unix", str(db._now_unix()))
+
+    # Still try to fill in missing images from retrocatalog.com
+    retro_resolved = await resolve_missing_images_from_retrocatalog()
+    if retro_resolved:
+        logger.info("Handhelds ingest: resolved %d images from RetroCatalog", retro_resolved)
+        return (True, 0)  # Mark as changed since we updated images
+
     return (False, 0)
 
 
