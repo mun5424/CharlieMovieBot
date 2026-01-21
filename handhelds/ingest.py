@@ -110,7 +110,13 @@ def to_db_rows(sheet_rows: List[Dict[str, str]]) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
 
     for r in sheet_rows:
-        name = pick_field(r, "Handheld", "Name", "Device")
+        name = pick_field(
+            r,
+            "Handheld (Hover for latest updates)",
+            "Handheld",
+            "Name",
+            "Device",
+        )
         if not name:
             # If the sheet ever changes headers, you can log one example row
             # but we just skip here.
@@ -155,10 +161,6 @@ def sha256_text(s: str) -> str:
 
 
 async def refresh_from_sheet(sheet_id: str, gid: str) -> Tuple[bool, int]:
-    """
-    Returns (changed, row_count).
-    Uses hash to avoid rewriting DB when unchanged.
-    """
     await db.init_db()
 
     url = build_export_url(sheet_id, gid)
@@ -171,13 +173,21 @@ async def refresh_from_sheet(sheet_id: str, gid: str) -> Tuple[bool, int]:
         await db.set_meta("last_refresh_ok_unix", str(db._now_unix()))
         return (False, 0)
 
+    sheet_rows: List[Dict[str, str]] = []
+    rows: List[Dict[str, Any]] = []   # <-- add this
+
     sheet_rows = parse_rows(csv_text)
-    if sheet_rows:
-        logger.info("handhelds headers=%s", list(sheet_rows[0].keys()))
-    else:
-        logger.warning("handhelds parse_rows returned 0 rows")
-        rows = to_db_rows(sheet_rows)
+    rows = to_db_rows(sheet_rows)
+
+    # Optional: fail loudly if we got 0 usable rows, because that’s suspicious here
+    if not rows:
+        # Show a couple headers to help debug mapping
+        headers = list(sheet_rows[0].keys()) if sheet_rows else []
+        raise RuntimeError(f"Parsed {len(sheet_rows)} sheet rows but mapped 0 DB rows. Headers sample: {headers[:8]}")
+
     changed_count, total = await db.upsert_many(rows)
+    
+    logger.info("Handhelds ingest: sheet_rows=%d db_rows=%d", len(sheet_rows), len(rows))
 
     await db.set_meta("csv_hash", new_hash)
     await db.set_meta("last_refresh_ok_unix", str(db._now_unix()))
@@ -186,3 +196,4 @@ async def refresh_from_sheet(sheet_id: str, gid: str) -> Tuple[bool, int]:
 
     logger.info("Handhelds ingest: upserted %s rows (parsed=%s).", changed_count, total)
     return (True, total)
+
