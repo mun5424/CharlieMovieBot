@@ -144,10 +144,10 @@ async def _refresh_loop(bot: commands.Bot, hours: int):
 async def setup(bot: commands.Bot):
     await bot.add_cog(HandheldCommands(bot))
 
-    # Background refresh task
+    # Background refresh task - use asyncio.create_task instead of bot.loop
     hours = int(getattr(config, "HANDHELDS_REFRESH_HOURS", 24))
 
-    task = bot.loop.create_task(_refresh_loop(bot, hours=hours))
+    task = asyncio.create_task(_refresh_loop(bot, hours=hours))
     setattr(bot, "_handhelds_refresh_task", task)
 
     # Make sure it gets cancelled on shutdown
