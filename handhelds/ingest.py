@@ -252,6 +252,17 @@ async def refresh_from_sheet(sheet_id: str, gid: str) -> Tuple[bool, int]:
         logger.info("Handhelds ingest: updated %d image URLs (CSV unchanged).", updated)
         return (True, 0)
 
+    logger.info("Handhelds ingest: html length=%d", len(html_text))
+    logger.info("Handhelds ingest: parsed html rows=%d", len(getattr(p, "rows", [])))  # or return row count from extractor
+    logger.info("Handhelds ingest: image_map size=%d", len(image_map))
+    if image_map:
+        k = next(iter(image_map))
+        logger.info("Handhelds ingest: sample image: %r -> %s", k, image_map[k][:80])
+    else:
+        logger.warning("Handhelds ingest: image_map EMPTY (HTML structure mismatch)")
+
     logger.info("Handhelds ingest: no changes detected (CSV and images).")
     await db.set_meta("last_refresh_ok_unix", str(db._now_unix()))
     return (False, 0)
+
+
