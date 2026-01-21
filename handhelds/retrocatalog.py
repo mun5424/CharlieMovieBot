@@ -11,13 +11,9 @@ import aiohttp
 logger = logging.getLogger(__name__)
 
 RETRO_BASE = "https://retrocatalog.com"
-HH_PATH = "/retro-handhelds/"
+IMAGE_PATH = "/images/retro-handheld_front_"
 
-# Prefer og:image if present; otherwise fall back to any big product image patterns
-OG_IMAGE_RE = re.compile(r'<meta\s+property="og:image"\s+content="([^"]+)"', re.IGNORECASE)
-CANONICAL_RE = re.compile(r'<link\s+rel="canonical"\s+href="([^"]+)"', re.IGNORECASE)
-
-DEFAULT_TIMEOUT = aiohttp.ClientTimeout(total=20, connect=8)
+DEFAULT_TIMEOUT = aiohttp.ClientTimeout(total=15, connect=8)
 
 # Common brand prefixes to strip from device names
 BRAND_PREFIXES = [
@@ -64,17 +60,24 @@ def slugify_name(name: str) -> str:
     return s.strip("-")
 
 
+def _simple_slugify(name: str) -> str:
+    """Simple slug without brand stripping (fallback)."""
+    s = name.strip().lower()
+    s = re.sub(r"[^\w\s-]", "", s)
+    s = re.sub(r"[\s_-]+", "-", s)
+    return s.strip("-")
+
+
 @dataclass
 class RetroHandheld:
-    url: str
     slug: str
-    og_image: Optional[str] = None
-    canonical_url: Optional[str] = None
-    html_len: int = 0
+    image_url: str
 
 
 class RetroCatalogClient:
-    def __init__(self, session: aiohttp.ClientSession, *, min_delay_s: float = 1.0):
+    """Client to check if images exist on retrocatalog.com."""
+
+    def __init__(self, session: aiohttp.ClientSession, *, min_delay_s: float = 0.2):
         self.session = session
         self.min_delay_s = min_delay_s
         self._lock = asyncio.Lock()
@@ -89,60 +92,44 @@ class RetroCatalogClient:
                 await asyncio.sleep(wait)
             self._last = loop.time()
 
-    async def fetch_handheld_page(self, slug: str) -> Optional[RetroHandheld]:
+    async def check_image_exists(self, slug: str) -> Optional[str]:
+        """
+        Check if an image exists for the given slug.
+        Returns the image URL if it exists (HTTP 200), None otherwise.
+        """
         await self._rate_limit()
 
-        url = f"{RETRO_BASE}{HH_PATH}{slug}"
+        image_url = f"{RETRO_BASE}{IMAGE_PATH}{slug}"
         headers = {"User-Agent": "CharlieMovieBot/1.0 (+retrocatalog resolver)"}
 
         try:
-            async with self.session.get(url, headers=headers, allow_redirects=True, timeout=DEFAULT_TIMEOUT) as resp:
-                if resp.status != 200:
-                    return None
-                html = await resp.text()
-
-            og = None
-            m = OG_IMAGE_RE.search(html)
-            if m:
-                og = m.group(1).strip()
-
-            canonical = None
-            m2 = CANONICAL_RE.search(html)
-            if m2:
-                canonical = m2.group(1).strip()
-
-            return RetroHandheld(
-                url=url,
-                slug=slug,
-                og_image=og,
-                canonical_url=canonical,
-                html_len=len(html),
-            )
+            async with self.session.head(
+                image_url,
+                headers=headers,
+                allow_redirects=True,
+                timeout=DEFAULT_TIMEOUT
+            ) as resp:
+                if resp.status == 200:
+                    return image_url
+                return None
         except Exception as e:
-            logger.warning("RetroCatalog fetch failed for %s: %s", url, e)
+            logger.debug("RetroCatalog image check failed for %s: %s", slug, e)
             return None
-
-
-def _simple_slugify(name: str) -> str:
-    """Simple slug without brand stripping (fallback)."""
-    s = name.strip().lower()
-    s = re.sub(r"[^\w\s-]", "", s)
-    s = re.sub(r"[\s_-]+", "-", s)
-    return s.strip("-")
 
 
 async def resolve_retrocatalog(name: str, session: aiohttp.ClientSession) -> Optional[RetroHandheld]:
     """
-    Best-effort resolver: try multiple slug variants.
+    Try to find an image URL for a handheld on retrocatalog.com.
+    Uses direct image URL construction and HEAD requests to verify existence.
     """
-    client = RetroCatalogClient(session, min_delay_s=1.0)
+    client = RetroCatalogClient(session, min_delay_s=0.2)
 
     base = slugify_name(name)
     full = _simple_slugify(name)
 
     candidates = [
-        base,                              # "rg-35xx-plus" (brand stripped, hyphenated)
-        full,                              # "anbernic-rg35xx-plus" (full name, simple slug)
+        base,   # "rg-35xx-plus" (brand stripped, hyphenated)
+        full,   # "anbernic-rg35xx-plus" (full name, simple slug)
     ]
 
     # Also try without trailing modifiers like "plus", "pro", "h", "sp"
@@ -157,10 +144,10 @@ async def resolve_retrocatalog(name: str, session: aiohttp.ClientSession) -> Opt
         tried.add(slug)
 
         logger.debug("RetroCatalog: trying slug '%s' for '%s'", slug, name)
-        hit = await client.fetch_handheld_page(slug)
-        if hit:
-            logger.debug("RetroCatalog: found '%s' at slug '%s'", name, slug)
-            return hit
+        image_url = await client.check_image_exists(slug)
+        if image_url:
+            logger.debug("RetroCatalog: found image for '%s' at '%s'", name, image_url)
+            return RetroHandheld(slug=slug, image_url=image_url)
 
-    logger.debug("RetroCatalog: no match for '%s' (tried: %s)", name, list(tried))
+    logger.debug("RetroCatalog: no image for '%s' (tried: %s)", name, list(tried))
     return None
