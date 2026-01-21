@@ -164,3 +164,44 @@ async def update_images_by_name_norm(image_map: dict[str, str]) -> int:
         cur = await conn.execute("SELECT changes();")
         row = await cur.fetchone()
         return int(row[0]) if row else 0
+
+
+async def get_by_slug_or_exact_name(query: str) -> Optional[Dict[str, Any]]:
+    q_norm = query.strip().lower()
+    slug = slugify(query)
+
+    async with aiosqlite.connect(DB_FILE) as conn:
+        conn.row_factory = aiosqlite.Row
+
+        cur = await conn.execute("SELECT * FROM handhelds WHERE slug = ? LIMIT 1", (slug,))
+        row = await cur.fetchone()
+        if row:
+            return dict(row)
+
+        cur = await conn.execute("SELECT * FROM handhelds WHERE name_norm = ? LIMIT 1", (q_norm,))
+        row = await cur.fetchone()
+        if row:
+            return dict(row)
+
+    return None
+
+
+async def search_names(partial: str, limit: int = 25) -> List[Dict[str, Any]]:
+    q = partial.strip().lower()
+    if not q:
+        return []
+
+    like = f"%{q}%"
+    async with aiosqlite.connect(DB_FILE) as conn:
+        conn.row_factory = aiosqlite.Row
+        cur = await conn.execute("""
+            SELECT name, slug, brand, performance
+            FROM handhelds
+            WHERE name_norm LIKE ?
+            ORDER BY
+              CASE WHEN name_norm LIKE ? THEN 0 ELSE 1 END,
+              LENGTH(name_norm) ASC
+            LIMIT ?
+        """, (like, f"{q}%", limit))
+        rows = await cur.fetchall()
+        return [dict(r) for r in rows]
