@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS twitch_streamers (
   guild_id        INTEGER NOT NULL,
   user_login      TEXT    NOT NULL,  -- lowercase twitch login
   display_name    TEXT,              -- optional, used for nice output
+  added_by        INTEGER,           -- discord user id who added this
   PRIMARY KEY (guild_id, user_login)
 );
 
@@ -80,12 +81,18 @@ class TwitchStore:
         return dict(row) if row else {"guild_id": guild_id, "channel_id": None, "role_id": None}
 
     # ---- streamers ----
-    async def add_streamer(self, guild_id: int, user_login: str, display_name: Optional[str] = None) -> None:
+    async def add_streamer(
+        self,
+        guild_id: int,
+        user_login: str,
+        display_name: Optional[str] = None,
+        added_by: Optional[int] = None,
+    ) -> None:
         user_login = user_login.strip().lower()
         db = self._conn()
         await db.execute(
-            "INSERT OR REPLACE INTO twitch_streamers (guild_id, user_login, display_name) VALUES (?, ?, ?)",
-            (guild_id, user_login, display_name),
+            "INSERT OR REPLACE INTO twitch_streamers (guild_id, user_login, display_name, added_by) VALUES (?, ?, ?, ?)",
+            (guild_id, user_login, display_name, added_by),
         )
         # Ensure state row exists
         await db.execute(
@@ -93,6 +100,26 @@ class TwitchStore:
             (guild_id, user_login),
         )
         await db.commit()
+
+    async def count_user_streamers(self, guild_id: int, user_id: int) -> int:
+        """Count how many streamers a specific user has added in this guild."""
+        db = self._conn()
+        cur = await db.execute(
+            "SELECT COUNT(*) FROM twitch_streamers WHERE guild_id = ? AND added_by = ?",
+            (guild_id, user_id),
+        )
+        row = await cur.fetchone()
+        return int(row[0]) if row else 0
+
+    async def get_user_streamer(self, guild_id: int, user_id: int) -> Optional[str]:
+        """Get the streamer a user has added (if any)."""
+        db = self._conn()
+        cur = await db.execute(
+            "SELECT user_login FROM twitch_streamers WHERE guild_id = ? AND added_by = ?",
+            (guild_id, user_id),
+        )
+        row = await cur.fetchone()
+        return row["user_login"] if row else None
 
     async def remove_streamer(self, guild_id: int, user_login: str) -> None:
         user_login = user_login.strip().lower()

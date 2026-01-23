@@ -34,9 +34,8 @@ class TwitchNotifCog(commands.Cog):
         await interaction.response.send_message("✅ Twitch ping role cleared.", ephemeral=True)
 
     @app_commands.command(name="twitch_add", description="Track a Twitch streamer (by login, e.g. shroud).")
-    @app_commands.checks.has_permissions(manage_guild=True)
     async def add_streamer(self, interaction: discord.Interaction, user_login: str):
-        if not interaction.guild_id:
+        if not interaction.guild_id or not interaction.guild:
             await interaction.response.send_message("This command must be used in a server.", ephemeral=True)
             return
         user_login = user_login.strip().lower()
@@ -44,16 +43,39 @@ class TwitchNotifCog(commands.Cog):
             await interaction.response.send_message("Give me a Twitch user_login (e.g. shroud).", ephemeral=True)
             return
 
-        await self.store.add_streamer(interaction.guild_id, user_login)
+        # Check if user is admin (manage_guild permission)
+        is_admin = interaction.user.guild_permissions.manage_guild if hasattr(interaction.user, 'guild_permissions') else False
+
+        # Non-admins can only have one streamer - remove old one first
+        if not is_admin:
+            existing = await self.store.get_user_streamer(interaction.guild_id, interaction.user.id)
+            if existing and existing != user_login:
+                # Remove their old streamer before adding new one
+                await self.store.remove_streamer(interaction.guild_id, existing)
+
+        await self.store.add_streamer(interaction.guild_id, user_login, added_by=interaction.user.id)
         await interaction.response.send_message(f"✅ Tracking Twitch streamer: `{user_login}`", ephemeral=True)
 
     @app_commands.command(name="twitch_remove", description="Stop tracking a Twitch streamer (by login).")
-    @app_commands.checks.has_permissions(manage_guild=True)
     async def remove_streamer(self, interaction: discord.Interaction, user_login: str):
-        if not interaction.guild_id:
+        if not interaction.guild_id or not interaction.guild:
             await interaction.response.send_message("This command must be used in a server.", ephemeral=True)
             return
         user_login = user_login.strip().lower()
+
+        # Check if user is admin
+        is_admin = interaction.user.guild_permissions.manage_guild if hasattr(interaction.user, 'guild_permissions') else False
+
+        # Non-admins can only remove their own streamer
+        if not is_admin:
+            their_streamer = await self.store.get_user_streamer(interaction.guild_id, interaction.user.id)
+            if their_streamer != user_login:
+                await interaction.response.send_message(
+                    "You can only remove streamers you added yourself.",
+                    ephemeral=True
+                )
+                return
+
         await self.store.remove_streamer(interaction.guild_id, user_login)
         await interaction.response.send_message(f"✅ Removed Twitch streamer: `{user_login}`", ephemeral=True)
 
