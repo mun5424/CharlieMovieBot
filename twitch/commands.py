@@ -1,4 +1,6 @@
+import asyncio
 import logging
+
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -127,4 +129,4 @@ async def setup(bot: commands.Bot, db_path: str = "bot.db", poll_interval_sec: i
     await bot.add_cog(cog)
 
     # Start notifier in background after bot is ready
-    bot.loop.create_task(_start_notifier_when_ready(bot, notifier))
+    asyncio.create_task(_start_notifier_when_ready(bot, notifier))
