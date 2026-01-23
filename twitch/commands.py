@@ -19,28 +19,28 @@ class TwitchNotifCog(commands.Cog):
     @app_commands.checks.has_permissions(manage_guild=True)
     async def set_channel(self, interaction: discord.Interaction, channel: discord.TextChannel):
         await self.store.set_guild_channel(interaction.guild_id, channel.id)
-        await interaction.response.send_message(f"✅ Twitch notifications channel set to {channel.mention}", ephemeral=True)
+        await interaction.response.send_message(f"✅ Twitch notifications channel set to {channel.mention}", ephemeral=False)
 
     @app_commands.command(name="twitch_set_role", description="Set the role to ping when a tracked streamer goes live (optional).")
     @app_commands.checks.has_permissions(manage_guild=True)
     async def set_role(self, interaction: discord.Interaction, role: discord.Role):
         await self.store.set_guild_role(interaction.guild_id, role.id)
-        await interaction.response.send_message(f"✅ Twitch ping role set to {role.mention}", ephemeral=True)
+        await interaction.response.send_message(f"✅ Twitch ping role set to {role.mention}", ephemeral=False)
 
     @app_commands.command(name="twitch_clear_role", description="Stop pinging a role for Twitch live notifications.")
     @app_commands.checks.has_permissions(manage_guild=True)
     async def clear_role(self, interaction: discord.Interaction):
         await self.store.set_guild_role(interaction.guild_id, None)
-        await interaction.response.send_message("✅ Twitch ping role cleared.", ephemeral=True)
+        await interaction.response.send_message("✅ Twitch ping role cleared.", ephemeral=False)
 
     @app_commands.command(name="twitch_add", description="Track a Twitch streamer (by login, e.g. shroud).")
     async def add_streamer(self, interaction: discord.Interaction, user_login: str):
         if not interaction.guild_id or not interaction.guild:
-            await interaction.response.send_message("This command must be used in a server.", ephemeral=True)
+            await interaction.response.send_message("This command must be used in a server.", ephemeral=False)
             return
         user_login = user_login.strip().lower()
         if not user_login:
-            await interaction.response.send_message("Give me a Twitch user_login (e.g. shroud).", ephemeral=True)
+            await interaction.response.send_message("Give me a Twitch user_login (e.g. shroud).", ephemeral=False)
             return
 
         # Check if user is admin (manage_guild permission)
@@ -54,12 +54,12 @@ class TwitchNotifCog(commands.Cog):
                 await self.store.remove_streamer(interaction.guild_id, existing)
 
         await self.store.add_streamer(interaction.guild_id, user_login, added_by=interaction.user.id)
-        await interaction.response.send_message(f"✅ Tracking Twitch streamer: `{user_login}`", ephemeral=True)
+        await interaction.response.send_message(f"✅ Successfully added and tracking Twitch streamer: `{user_login}`", ephemeral=False)
 
     @app_commands.command(name="twitch_remove", description="Stop tracking a Twitch streamer (by login).")
     async def remove_streamer(self, interaction: discord.Interaction, user_login: str):
         if not interaction.guild_id or not interaction.guild:
-            await interaction.response.send_message("This command must be used in a server.", ephemeral=True)
+            await interaction.response.send_message("This command must be used in a server.", ephemeral=False)
             return
         user_login = user_login.strip().lower()
 
@@ -72,17 +72,17 @@ class TwitchNotifCog(commands.Cog):
             if their_streamer != user_login:
                 await interaction.response.send_message(
                     "You can only remove streamers you added yourself.",
-                    ephemeral=True
+                    ephemeral=False
                 )
                 return
 
         await self.store.remove_streamer(interaction.guild_id, user_login)
-        await interaction.response.send_message(f"✅ Removed Twitch streamer: `{user_login}`", ephemeral=True)
+        await interaction.response.send_message(f"✅ Removed Twitch streamer: `{user_login}`", ephemeral=False)
 
     @app_commands.command(name="twitch_list", description="List tracked Twitch streamers in this server.")
     async def list_streamers(self, interaction: discord.Interaction):
         if not interaction.guild_id:
-            await interaction.response.send_message("This command must be used in a server.", ephemeral=True)
+            await interaction.response.send_message("This command must be used in a server.", ephemeral=False)
             return
 
         cfg = await self.store.get_guild_config(interaction.guild_id)
@@ -104,7 +104,7 @@ class TwitchNotifCog(commands.Cog):
             lines.append("**Tracked streamers:**")
             lines.extend([f"- `{s['user_login']}`" for s in streamers])
 
-        await interaction.response.send_message("\n".join(lines), ephemeral=True)
+        await interaction.response.send_message("\n".join(lines), ephemeral=False)
 
 async def _start_notifier_when_ready(bot: commands.Bot, notifier: TwitchNotifier):
     """Start the notifier after bot is ready."""
