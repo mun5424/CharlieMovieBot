@@ -131,7 +131,7 @@ class TwitchStore:
     async def list_streamers(self, guild_id: int) -> List[Dict[str, Any]]:
         db = self._conn()
         cur = await db.execute(
-            "SELECT user_login, display_name FROM twitch_streamers WHERE guild_id=? ORDER BY user_login",
+            "SELECT user_login, display_name, added_by FROM twitch_streamers WHERE guild_id=? ORDER BY user_login",
             (guild_id,),
         )
         rows = await cur.fetchall()

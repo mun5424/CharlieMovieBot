@@ -75,3 +75,36 @@ class TwitchClient:
             if login:
                 live[login] = item
         return live
+
+    async def get_users(self, user_logins: List[str]) -> Dict[str, dict]:
+        """
+        Get user info (profile pics, display names) for given logins.
+        Returns dict keyed by user_login (lowercase).
+        """
+        if not user_logins:
+            return {}
+
+        token = await self._get_token()
+        headers = {
+            "Client-ID": self.client_id,
+            "Authorization": f"Bearer {token}",
+        }
+
+        params = [("login", login.strip().lower()) for login in user_logins if login.strip()]
+
+        async with self.session.get(
+            "https://api.twitch.tv/helix/users",
+            headers=headers,
+            params=params,
+            timeout=aiohttp.ClientTimeout(total=10, connect=3),
+        ) as resp:
+            payload = await resp.json()
+            if resp.status != 200:
+                raise RuntimeError(f"Twitch get users failed: {resp.status} {payload}")
+
+        users = {}
+        for item in payload.get("data", []):
+            login = (item.get("login") or "").lower()
+            if login:
+                users[login] = item
+        return users

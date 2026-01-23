@@ -1,14 +1,34 @@
 import asyncio
 import logging
 
+import aiohttp
 import discord
 from discord import app_commands
 from discord.ext import commands
 
 from .store import TwitchStore
 from .notifier import TwitchNotifier
+from .twitch_client import TwitchClient
 
 logger = logging.getLogger(__name__)
+
+# Twitch brand color
+TWITCH_PURPLE = 0x9146FF
+
+
+def _twitch_embed(title: str, description: str = None, success: bool = True) -> discord.Embed:
+    """Create a consistent Twitch-themed embed."""
+    embed = discord.Embed(
+        title=title,
+        description=description,
+        color=TWITCH_PURPLE if success else 0xE74C3C,
+    )
+    embed.set_author(
+        name="Twitch Notifications",
+        icon_url="https://static.twitchcdn.net/assets/favicon-32-e29e246c157142c94346.png"
+    )
+    return embed
+
 
 class TwitchNotifCog(commands.Cog):
     def __init__(self, bot: commands.Bot, store: TwitchStore, notifier: TwitchNotifier):
@@ -21,47 +41,68 @@ class TwitchNotifCog(commands.Cog):
     @app_commands.checks.has_permissions(manage_guild=True)
     async def set_channel(self, interaction: discord.Interaction, channel: discord.TextChannel):
         await self.store.set_guild_channel(interaction.guild_id, channel.id)
-        await interaction.response.send_message(f"✅ Twitch notifications channel set to {channel.mention}", ephemeral=False)
+        embed = _twitch_embed(
+            "Channel Updated",
+            f"Live notifications will be posted in {channel.mention}"
+        )
+        await interaction.response.send_message(embed=embed)
 
     @app_commands.command(name="twitch_set_role", description="Set the role to ping when a tracked streamer goes live (optional).")
     @app_commands.checks.has_permissions(manage_guild=True)
     async def set_role(self, interaction: discord.Interaction, role: discord.Role):
         await self.store.set_guild_role(interaction.guild_id, role.id)
-        await interaction.response.send_message(f"✅ Twitch ping role set to {role.mention}", ephemeral=False)
+        embed = _twitch_embed(
+            "Ping Role Updated",
+            f"{role.mention} will be pinged when streamers go live"
+        )
+        await interaction.response.send_message(embed=embed)
 
     @app_commands.command(name="twitch_clear_role", description="Stop pinging a role for Twitch live notifications.")
     @app_commands.checks.has_permissions(manage_guild=True)
     async def clear_role(self, interaction: discord.Interaction):
         await self.store.set_guild_role(interaction.guild_id, None)
-        await interaction.response.send_message("✅ Twitch ping role cleared.", ephemeral=False)
+        embed = _twitch_embed(
+            "Ping Role Cleared",
+            "No role will be pinged for live notifications"
+        )
+        await interaction.response.send_message(embed=embed)
 
     @app_commands.command(name="twitch_add", description="Track a Twitch streamer (by login, e.g. shroud).")
     async def add_streamer(self, interaction: discord.Interaction, user_login: str):
         if not interaction.guild_id or not interaction.guild:
-            await interaction.response.send_message("This command must be used in a server.", ephemeral=False)
+            await interaction.response.send_message("This command must be used in a server.", ephemeral=True)
             return
         user_login = user_login.strip().lower()
         if not user_login:
-            await interaction.response.send_message("Give me a Twitch user_login (e.g. shroud).", ephemeral=False)
+            await interaction.response.send_message("Please provide a Twitch username.", ephemeral=True)
             return
 
         # Check if user is admin (manage_guild permission)
         is_admin = interaction.user.guild_permissions.manage_guild if hasattr(interaction.user, 'guild_permissions') else False
 
         # Non-admins can only have one streamer - remove old one first
+        replaced = None
         if not is_admin:
             existing = await self.store.get_user_streamer(interaction.guild_id, interaction.user.id)
             if existing and existing != user_login:
-                # Remove their old streamer before adding new one
                 await self.store.remove_streamer(interaction.guild_id, existing)
+                replaced = existing
 
         await self.store.add_streamer(interaction.guild_id, user_login, added_by=interaction.user.id)
-        await interaction.response.send_message(f"✅ Successfully added and tracking Twitch streamer: `{user_login}`", ephemeral=False)
+
+        embed = _twitch_embed(
+            "Streamer Added",
+            f"Now tracking **[{user_login}](https://twitch.tv/{user_login})**"
+        )
+        if replaced:
+            embed.set_footer(text=f"Replaced: {replaced}")
+        embed.set_thumbnail(url=f"https://static-cdn.jtvnw.net/previews-ttv/live_user_{user_login}-320x180.jpg")
+        await interaction.response.send_message(embed=embed)
 
     @app_commands.command(name="twitch_remove", description="Stop tracking a Twitch streamer (by login).")
     async def remove_streamer(self, interaction: discord.Interaction, user_login: str):
         if not interaction.guild_id or not interaction.guild:
-            await interaction.response.send_message("This command must be used in a server.", ephemeral=False)
+            await interaction.response.send_message("This command must be used in a server.", ephemeral=True)
             return
         user_login = user_login.strip().lower()
 
@@ -72,20 +113,28 @@ class TwitchNotifCog(commands.Cog):
         if not is_admin:
             their_streamer = await self.store.get_user_streamer(interaction.guild_id, interaction.user.id)
             if their_streamer != user_login:
-                await interaction.response.send_message(
+                embed = _twitch_embed(
+                    "Permission Denied",
                     "You can only remove streamers you added yourself.",
-                    ephemeral=False
+                    success=False
                 )
+                await interaction.response.send_message(embed=embed, ephemeral=True)
                 return
 
         await self.store.remove_streamer(interaction.guild_id, user_login)
-        await interaction.response.send_message(f"✅ Removed Twitch streamer: `{user_login}`", ephemeral=False)
+        embed = _twitch_embed(
+            "Streamer Removed",
+            f"No longer tracking **{user_login}**"
+        )
+        await interaction.response.send_message(embed=embed)
 
     @app_commands.command(name="twitch_list", description="List tracked Twitch streamers in this server.")
     async def list_streamers(self, interaction: discord.Interaction):
         if not interaction.guild_id:
-            await interaction.response.send_message("This command must be used in a server.", ephemeral=False)
+            await interaction.response.send_message("This command must be used in a server.", ephemeral=True)
             return
+
+        await interaction.response.defer()
 
         cfg = await self.store.get_guild_config(interaction.guild_id)
         streamers = await self.store.list_streamers(interaction.guild_id)
@@ -96,17 +145,70 @@ class TwitchNotifCog(commands.Cog):
         channel = interaction.guild.get_channel(channel_id) if (interaction.guild and channel_id) else None
         role = interaction.guild.get_role(role_id) if (interaction.guild and role_id) else None
 
-        lines = []
-        lines.append(f"**Channel:** {channel.mention if channel else '`(not set)`'}")
-        lines.append(f"**Role:** {role.mention if role else '`(none)`'}")
-        lines.append("")
-        if not streamers:
-            lines.append("No streamers tracked yet. Use `/twitch_add`.")
-        else:
-            lines.append("**Tracked streamers:**")
-            lines.extend([f"- `{s['user_login']}`" for s in streamers])
+        # Config embed
+        config_parts = []
+        config_parts.append(f"**Channel:** {channel.mention if channel else '*Not set*'}")
+        config_parts.append(f"**Role:** {role.mention if role else '*None*'}")
 
-        await interaction.response.send_message("\n".join(lines), ephemeral=False)
+        if not streamers:
+            embed = _twitch_embed(
+                f"Tracked Streamers (0)",
+                "\n".join(config_parts) + "\n\n*No streamers yet — use `/twitch_add <username>`*"
+            )
+            await interaction.followup.send(embed=embed)
+            return
+
+        # Fetch profile pics from Twitch API
+        user_logins = [s['user_login'] for s in streamers]
+        user_info = {}
+        try:
+            async with aiohttp.ClientSession() as session:
+                client = TwitchClient(session)
+                user_info = await client.get_users(user_logins)
+        except Exception as e:
+            logger.warning("Failed to fetch Twitch user info: %s", e)
+
+        # Create grid of streamer embeds (max 10 embeds per message)
+        embeds = []
+
+        # First embed with config info
+        header_embed = discord.Embed(
+            description="\n".join(config_parts),
+            color=TWITCH_PURPLE
+        )
+        header_embed.set_author(
+            name=f"Tracked Streamers ({len(streamers)})",
+            icon_url="https://static.twitchcdn.net/assets/favicon-32-e29e246c157142c94346.png"
+        )
+        embeds.append(header_embed)
+
+        # Streamer embeds with profile pics (compact)
+        for s in streamers[:9]:  # Max 9 more embeds (10 total)
+            login = s['user_login']
+            info = user_info.get(login, {})
+            display_name = info.get('display_name', login)
+            profile_pic = info.get('profile_image_url', '')
+            added_by_id = s.get('added_by')
+
+            streamer_embed = discord.Embed(
+                description=f"**[{display_name}](https://twitch.tv/{login})**",
+                color=TWITCH_PURPLE
+            )
+            if profile_pic:
+                streamer_embed.set_thumbnail(url=profile_pic)
+
+            # Show who added this streamer with their Discord avatar
+            if added_by_id and interaction.guild:
+                member = interaction.guild.get_member(int(added_by_id))
+                if member:
+                    streamer_embed.set_footer(
+                        text=f"Added by {member.display_name}",
+                        icon_url=member.display_avatar.url
+                    )
+
+            embeds.append(streamer_embed)
+
+        await interaction.followup.send(embeds=embeds)
 
 async def _start_notifier_when_ready(bot: commands.Bot, notifier: TwitchNotifier):
     """Start the notifier after bot is ready."""
