@@ -144,6 +144,17 @@ class TwitchNotifier:
         should_notify = (not was_live) or (stream_id and last_stream_id and stream_id != last_stream_id)
 
         if should_notify:
+            # Check bot permissions in the channel
+            if hasattr(channel, 'permissions_for'):
+                bot_perms = channel.permissions_for(guild.me)
+                if not bot_perms.send_messages:
+                    logger.warning(
+                        "Twitch: Missing send_messages permission in guild=%s channel=%s. "
+                        "Please give the bot permission to send messages in that channel.",
+                        guild.id, channel.id
+                    )
+                    return
+
             role_mention = ""
             allowed = discord.AllowedMentions.none()
             if role_id:
@@ -157,8 +168,15 @@ class TwitchNotifier:
             try:
                 await channel.send(msg, allowed_mentions=allowed)
                 notified_at = utc_now_iso()
+            except discord.Forbidden:
+                logger.warning(
+                    "Twitch: Bot lacks permission to post in guild=%s channel=%s. "
+                    "Check channel permissions.",
+                    guild.id, channel.id
+                )
+                notified_at = state.get("last_notified_at")
             except Exception:
-                logger.exception("Failed to send Twitch notification in guild=%s channel=%s", guild.id, getattr(channel, "id", None))
+                logger.exception("Failed to send Twitch notification in guild=%s channel=%s", guild.id, channel.id)
                 notified_at = state.get("last_notified_at")
 
             await self.store.set_state(guild.id, user_login, True, stream_id, started_at, notified_at)
