@@ -168,47 +168,26 @@ class TwitchNotifCog(commands.Cog):
         except Exception as e:
             logger.warning("Failed to fetch Twitch user info: %s", e)
 
-        # Create grid of streamer embeds (max 10 embeds per message)
-        embeds = []
-
-        # First embed with config info
-        header_embed = discord.Embed(
-            description="\n".join(config_parts),
-            color=TWITCH_PURPLE
-        )
-        header_embed.set_author(
-            name=f"Tracked Streamers ({len(streamers)})",
-            icon_url="https://static.twitchcdn.net/assets/favicon-32-e29e246c157142c94346.png"
-        )
-        embeds.append(header_embed)
-
-        # Streamer embeds with profile pics (compact)
-        for s in streamers[:9]:  # Max 9 more embeds (10 total)
+        # Build streamer list
+        streamer_lines = []
+        for s in streamers:
             login = s['user_login']
             info = user_info.get(login, {})
             display_name = info.get('display_name', login)
-            profile_pic = info.get('profile_image_url', '')
             added_by_id = s.get('added_by')
 
-            streamer_embed = discord.Embed(
-                description=f"**[{display_name}](https://twitch.tv/{login})**",
-                color=TWITCH_PURPLE
-            )
-            if profile_pic:
-                streamer_embed.set_thumbnail(url=profile_pic)
-
-            # Show who added this streamer with their Discord avatar
+            # Format: streamer link + who added (bold)
+            line = f"• **[{display_name}](https://twitch.tv/{login})**"
             if added_by_id and interaction.guild:
                 member = interaction.guild.get_member(int(added_by_id))
                 if member:
-                    streamer_embed.set_footer(
-                        text=f"Added by {member.display_name}",
-                        icon_url=member.display_avatar.url
-                    )
+                    line += f" — added by **{member.display_name}**"
+            streamer_lines.append(line)
 
-            embeds.append(streamer_embed)
-
-        await interaction.followup.send(embeds=embeds)
+        # Single embed with everything
+        description = "\n".join(config_parts) + "\n\n" + "\n".join(streamer_lines)
+        embed = _twitch_embed(f"Tracked Streamers ({len(streamers)})", description)
+        await interaction.followup.send(embed=embed)
 
 async def _start_notifier_when_ready(bot: commands.Bot, notifier: TwitchNotifier):
     """Start the notifier after bot is ready."""
