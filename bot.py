@@ -57,6 +57,7 @@ class BotManager:
             from food import commands as food_commands
             from trivia.trivia import TriviaCog
             from handhelds import commands as handhelds_commands
+            from twitch import setup as twitch_setup
 
             # Load traditional commands
             general.setup(self.bot)
@@ -80,7 +81,14 @@ class BotManager:
             # Load handhelds cog
             await handhelds_commands.setup(self.bot)
             self.logger.info("✅ Handhelds cog loaded")
-            
+
+            # Load Twitch notifications (uses bot.db for storage)
+            try:
+                twitch_setup(self.bot, db_path="bot.db", poll_interval_sec=90)
+                self.logger.info("✅ Twitch notifications loaded")
+            except Exception as e:
+                self.logger.warning(f"⚠️ Twitch notifications not available: {e}")
+
             # Log registered commands
             registered_commands = [cmd.name for cmd in self.bot.tree.get_commands()]
             self.logger.info(f"📋 Registered commands: {registered_commands}")
