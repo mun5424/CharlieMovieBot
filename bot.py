@@ -84,7 +84,7 @@ class BotManager:
 
             # Load Twitch notifications (uses bot.db for storage)
             try:
-                twitch_setup(self.bot, db_path="bot.db", poll_interval_sec=90)
+                await twitch_setup(self.bot, db_path="bot.db", poll_interval_sec=90)
                 self.logger.info("✅ Twitch notifications loaded")
             except Exception as e:
                 self.logger.warning(f"⚠️ Twitch notifications not available: {e}")

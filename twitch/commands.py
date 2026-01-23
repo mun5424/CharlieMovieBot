@@ -84,25 +84,25 @@ class TwitchNotifCog(commands.Cog):
 
         await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
-async def _ensure_started(bot: commands.Bot, store: TwitchStore, notifier: TwitchNotifier):
-    # Start after bot is ready
+async def _start_notifier_when_ready(bot: commands.Bot, notifier: TwitchNotifier):
+    """Start the notifier after bot is ready."""
     await bot.wait_until_ready()
     try:
         await notifier.start()
     except Exception:
         logger.exception("Failed to start Twitch notifier")
 
-def setup(bot: commands.Bot, db_path: str = "bot.db", poll_interval_sec: int = 90) -> None:
+
+async def setup(bot: commands.Bot, db_path: str = "bot.db", poll_interval_sec: int = 90) -> None:
     """
-    Call this from your main bot setup, like: twitch_notifs.setup(bot, db_path="mybot.db")
+    Call this from your main bot setup, like: await twitch.setup(bot, db_path="mybot.db")
     """
     store = TwitchStore(db_path)
+    await store.connect()
 
-    async def init_and_add():
-        await store.connect()
-        notifier = TwitchNotifier(bot=bot, store=store, poll_interval_sec=poll_interval_sec)
-        cog = TwitchNotifCog(bot=bot, store=store, notifier=notifier)
-        await bot.add_cog(cog)
-        bot.loop.create_task(_ensure_started(bot, store, notifier))
+    notifier = TwitchNotifier(bot=bot, store=store, poll_interval_sec=poll_interval_sec)
+    cog = TwitchNotifCog(bot=bot, store=store, notifier=notifier)
+    await bot.add_cog(cog)
 
-    bot.loop.create_task(init_and_add())
+    # Start notifier in background after bot is ready
+    bot.loop.create_task(_start_notifier_when_ready(bot, notifier))
