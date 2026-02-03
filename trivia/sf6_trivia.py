@@ -37,9 +37,12 @@ class SF6TriviaManager:
         ]
         
         # Properties suitable for comparative questions
+        # "order" = sort direction where [0] is the "best" value for the question
+        # "asc" = lower is better (fastest startup, lowest recovery)
+        # "desc" = higher is better (most damage, best advantage)
         self.comparable_properties = {
             "startup": {"display": "startup frames", "order": "asc"},
-            "recovery": {"display": "recovery frames", "order": "desc"}, 
+            "recovery": {"display": "recovery frames", "order": "asc"},  # Fixed: lower recovery is better
             "damage": {"display": "damage", "order": "desc"},
             "driveGaugeGain": {"display": "Drive Gauge gain", "order": "desc"},
             "driveGaugeLoss": {"display": "Drive Gauge loss", "order": "asc"},

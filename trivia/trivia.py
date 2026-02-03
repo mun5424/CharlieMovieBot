@@ -230,7 +230,8 @@ class TriviaCog(commands.Cog):
     def _select_random_provider(self, unified_category: Optional[UnifiedCategory] = None) -> TriviaProvider:
         """
         Select a random provider with weighted probabilities.
-        Weights: OpenTDB 50%, Trivia API 30%, SF6 10%, QuizAPI 10%
+        Weights: OpenTDB 55%, Trivia API 40%, SF6 5%
+        QuizAPI disabled (programming-focused questions removed)
         """
         available_providers = []
         weights = []
@@ -238,7 +239,7 @@ class TriviaCog(commands.Cog):
         # OpenTDB - primary provider
         if self.providers.get("opentdb") and self.providers["opentdb"].is_available:
             available_providers.append(self.providers["opentdb"])
-            weights.append(50)
+            weights.append(55)
 
         # The Trivia API - good variety
         if self.providers.get("trivia_api") and self.providers["trivia_api"].is_available:
@@ -246,19 +247,15 @@ class TriviaCog(commands.Cog):
             trivia_api = self.providers["trivia_api"]
             if unified_category is None or unified_category in trivia_api.get_supported_categories():
                 available_providers.append(trivia_api)
-                weights.append(30)
+                weights.append(40)
 
-        # SF6 - only for Gaming or random
+        # SF6 - only for Gaming or random (rare - 5%)
         if self.providers.get("sf6") and self.providers["sf6"].is_available:
             if unified_category is None or unified_category == UnifiedCategory.GAMING:
                 available_providers.append(self.providers["sf6"])
-                weights.append(10)
+                weights.append(5)
 
-        # QuizAPI - only for Science & Tech or random
-        if self.providers.get("quizapi") and self.providers["quizapi"].is_available:
-            if unified_category is None or unified_category == UnifiedCategory.SCIENCE_TECH:
-                available_providers.append(self.providers["quizapi"])
-                weights.append(10)
+        # QuizAPI disabled - programming questions removed
 
         if not available_providers:
             # Fallback to OpenTDB
@@ -271,6 +268,7 @@ class TriviaCog(commands.Cog):
         """
         Select a provider that supports the given category.
         Randomly chooses between available providers with weighting.
+        QuizAPI disabled (programming questions removed)
         """
         available_providers = []
         weights = []
@@ -287,11 +285,7 @@ class TriviaCog(commands.Cog):
                 available_providers.append(trivia_api)
                 weights.append(40)
 
-        # QuizAPI - only for Science & Tech
-        if unified_category == UnifiedCategory.SCIENCE_TECH:
-            if self.providers.get("quizapi") and self.providers["quizapi"].is_available:
-                available_providers.append(self.providers["quizapi"])
-                weights.append(20)
+        # QuizAPI disabled - programming questions removed
 
         if not available_providers:
             return self.providers.get("opentdb")
@@ -334,8 +328,9 @@ class TriviaCog(commands.Cog):
             logger.info(f"Provider {current_provider.name} failed, attempting fallback ({attempt + 1}/{max_attempts})")
 
             # Find a fallback provider we haven't tried
+            # QuizAPI removed from fallback (programming questions disabled)
             current_provider = None
-            fallback_order = ["opentdb", "trivia_api", "sf6", "quizapi"]
+            fallback_order = ["opentdb", "trivia_api", "sf6"]
 
             for pid in fallback_order:
                 if pid in tried_providers:

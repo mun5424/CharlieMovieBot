@@ -180,6 +180,12 @@ class TwitchNotifCog(commands.Cog):
             line = f"• **[{display_name}](https://twitch.tv/{login})**"
             if added_by_id and interaction.guild:
                 member = interaction.guild.get_member(int(added_by_id))
+                if not member:
+                    # Try fetching if not in cache
+                    try:
+                        member = await interaction.guild.fetch_member(int(added_by_id))
+                    except Exception:
+                        member = None
                 if member:
                     line += f" — added by **{member.display_name}**"
             streamer_lines.append(line)
