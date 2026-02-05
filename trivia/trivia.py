@@ -866,10 +866,12 @@ class TriviaCog(commands.Cog):
         else:
             suffix = {1: "st", 2: "nd", 3: "rd"}.get(user_rank % 10, "th")
 
-        await channel.send(
-            f"🕒 Heads up: Trivia season resets in **{days_until}** days. "
-            f"You are **{user_rank}{suffix}** on the current standings!"
+        embed = discord.Embed(
+            description=f"🕒 Heads up: Trivia season resets in **{days_until}** days. "
+                        f"You are **{user_rank}{suffix}** on the current standings!",
+            color=discord.Color.light_grey()
         )
+        await channel.send(embed=embed)
 
     @app_commands.command(name="trivia_stats", description="View your trivia statistics")
     async def trivia_stats(self, interaction: discord.Interaction, user: Optional[discord.Member] = None):
