@@ -760,13 +760,15 @@ class TriviaCog(commands.Cog):
                 )
 
                 # Check for milestone (every 10 questions)
+                logger.info(f"[Milestone] {message.author.name} now at {updated_stats.questions_answered} questions")
                 if updated_stats.questions_answered > 0 and updated_stats.questions_answered % 10 == 0:
+                    logger.info(f"[Milestone] Triggering milestone for {message.author.name} at {updated_stats.questions_answered}")
                     try:
                         await self._send_milestone_reminder(
                             message.channel, guild_id, str(user_id), updated_stats
                         )
                     except Exception as milestone_err:
-                        logger.error(f"Error sending milestone reminder: {milestone_err}")
+                        logger.error(f"Error sending milestone reminder: {milestone_err}", exc_info=True)
 
             except Exception as e:
                 logger.error(f"Error in trivia answer handler: {e}")
