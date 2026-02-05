@@ -7,6 +7,7 @@ import html
 import random
 import asyncio
 import time
+import datetime
 import logging
 from typing import Dict, Optional, Tuple, Any, List
 from dataclasses import dataclass
@@ -35,7 +36,6 @@ try:
     import config
     SCORING_CONFIG = config.TRIVIA_CONFIG["scoring"]
     QUESTION_TIMEOUT = config.TRIVIA_CONFIG.get("question_timeout", 30)
-    AUTHORIZED_RESET_USER_ID = config.TRIVIA_CONFIG.get("authorized_reset_user_id", "YOUR_USER_ID_HERE")
 except (ImportError, KeyError, AttributeError) as e:
     logger.warning(f"Could not load config, using fallback scoring: {e}")
     SCORING_CONFIG = {
@@ -67,6 +67,10 @@ except (ImportError, KeyError, AttributeError) as e:
             "timeout": -10,
         }
     }
+try:
+    import config as _cfg
+    AUTHORIZED_RESET_USER_ID = getattr(_cfg, 'AUTHORIZED_RESET_USER_ID', "YOUR_USER_ID_HERE")
+except ImportError:
     AUTHORIZED_RESET_USER_ID = "YOUR_USER_ID_HERE"
 
 
@@ -755,6 +759,15 @@ class TriviaCog(commands.Cog):
                     active_q.was_intentional, active_q.question_data
                 )
 
+                # Check for milestone (every 10 questions)
+                if updated_stats.questions_answered > 0 and updated_stats.questions_answered % 10 == 0:
+                    try:
+                        await self._send_milestone_reminder(
+                            message.channel, guild_id, str(user_id), updated_stats
+                        )
+                    except Exception as milestone_err:
+                        logger.error(f"Error sending milestone reminder: {milestone_err}")
+
             except Exception as e:
                 logger.error(f"Error in trivia answer handler: {e}")
                 self._cleanup_question(guild_id, user_id)
@@ -829,6 +842,32 @@ class TriviaCog(commands.Cog):
             )
 
         await message.channel.send(embed=embed)
+
+    async def _send_milestone_reminder(self, channel, guild_id, user_id, user_stats):
+        """Send a simple milestone reminder every 10 questions"""
+        from services.trivia_season import get_season_info
+
+        # Get user's rank
+        leaderboard = self.data_manager.get_server_leaderboard(guild_id, 100)
+        total_players = len(self.data_manager.load_server_data(guild_id))
+        user_rank = total_players
+        for i, (uid, stats) in enumerate(leaderboard, 1):
+            if uid == user_id:
+                user_rank = i
+                break
+
+        _, days_until = get_season_info()
+
+        # Ordinal suffix (1st, 2nd, 3rd, 4th...)
+        if 11 <= user_rank % 100 <= 13:
+            suffix = "th"
+        else:
+            suffix = {1: "st", 2: "nd", 3: "rd"}.get(user_rank % 10, "th")
+
+        await channel.send(
+            f"🕒 Heads up: Trivia season resets in **{days_until}** days. "
+            f"You are **{user_rank}{suffix}** on the current standings!"
+        )
 
     @app_commands.command(name="trivia_stats", description="View your trivia statistics")
     async def trivia_stats(self, interaction: discord.Interaction, user: Optional[discord.Member] = None):
@@ -999,7 +1038,7 @@ class TriviaCog(commands.Cog):
                         f"⚔️ History awaits your conquest! ⚔️\n"
                         f"```\n"
                         f"📜 **History awaits your greatness!** 📜\n"
-                        f"🎭 Seasons will be immortalized here after using `/reset_scores`\n"
+                        f"🎭 Seasons are automatically archived on the 7th of every month!\n"
                         f"✨ Start building your legendary legacy with `/trivia`!\n\n"
                         f"🎮 **NEW:** Try Street Fighter 6 trivia for hardcore frame data challenges!✨ ",
                 color=discord.Color.gold()
@@ -1143,3 +1182,24 @@ class TriviaCog(commands.Cog):
 
         embed.set_footer(text="Tip: Try 'Street Fighter 6' for hardcore frame data challenges!")
         await interaction.followup.send(embed=embed)
+
+    @app_commands.command(name="trivia_reset_title", description="Set a custom title for the current trivia season")
+    @app_commands.describe(title="The title for this season (used when the season resets on the 7th)")
+    async def trivia_reset_title(self, interaction: discord.Interaction, title: str):
+        """Set a custom season title that will be used at the next auto-reset"""
+        if str(interaction.user.id) != AUTHORIZED_RESET_USER_ID:
+            await interaction.response.send_message(
+                "You don't have permission to set the season title.", ephemeral=True
+            )
+            return
+
+        guild_id = self.get_guild_id(interaction)
+        self.data_manager.set_season_title(guild_id, title)
+
+        from services.trivia_season import get_season_info
+        _, days_until = get_season_info()
+
+        await interaction.response.send_message(
+            f"Season title set to **{title}**. "
+            f"It will be used when the season resets in **{days_until}** days."
+        )

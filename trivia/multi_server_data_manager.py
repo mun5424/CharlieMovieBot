@@ -66,10 +66,12 @@ class MultiServerDataManager:
         
         self.last_save_time = time.time()
         self.pending_saves = set()  # Track which servers need saving
-        
+        self.season_titles: Dict[str, str] = {}  # guild_id -> custom season title
+
         self.ensure_data_directory()
         self.ensure_hall_of_fame_directory()
         self.load_all_server_data()
+        self._load_season_titles()
     
     def ensure_data_directory(self):
         """Ensure data directory exists"""
@@ -389,15 +391,55 @@ class MultiServerDataManager:
             "question_tracking": tracker_info
         }
     
+    def _get_season_titles_path(self) -> str:
+        """Get path for the season titles file"""
+        base_dir = os.path.dirname(self.data_directory)
+        return os.path.join(base_dir, "season_titles.json")
+
+    def _load_season_titles(self):
+        """Load saved season titles from disk"""
+        path = self._get_season_titles_path()
+        if os.path.exists(path):
+            try:
+                with open(path, "r") as f:
+                    self.season_titles = json.load(f)
+            except (json.JSONDecodeError, TypeError):
+                self.season_titles = {}
+
+    def _save_season_titles(self):
+        """Save season titles to disk"""
+        path = self._get_season_titles_path()
+        try:
+            with open(path, "w") as f:
+                json.dump(self.season_titles, f, indent=2)
+        except Exception as e:
+            logger.error(f"Error saving season titles: {e}")
+
+    def set_season_title(self, guild_id: str, title: str):
+        """Set a custom title for the next season reset"""
+        self.season_titles[guild_id] = title
+        self._save_season_titles()
+        logger.info(f"Season title set for guild {guild_id}: {title}")
+
+    def get_season_title(self, guild_id: str) -> str:
+        """Get the custom season title, or None if not set"""
+        return self.season_titles.get(guild_id)
+
+    def clear_season_title(self, guild_id: str):
+        """Clear the custom season title after it's been used"""
+        if guild_id in self.season_titles:
+            del self.season_titles[guild_id]
+            self._save_season_titles()
+
     def cleanup_memory(self):
         """Clean up memory by removing unused server data"""
         # Clean up old question metadata
         self.question_tracker.cleanup_old_questions()
-        
+
         # Remove servers that haven't been accessed recently
         # This is a simple implementation - could be enhanced with LRU cache
         current_time = time.time()
-        
+
         # For Pi optimization, only keep data for servers with recent activity
         # This is a placeholder - you could implement more sophisticated cleanup
         logger.info("Memory cleanup performed")

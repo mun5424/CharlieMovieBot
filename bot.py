@@ -199,6 +199,16 @@ class BotManager:
             except Exception as e:
                 self.logger.error(f"❌ Failed to load tournament reminder: {e}")
 
+            # Load trivia season scheduler (auto-reset on 7th, last-week reminders)
+            try:
+                from services.trivia_season import setup_trivia_season
+                setup_trivia_season(self.bot)
+                self.logger.info("✅ Trivia season scheduler loaded")
+            except ImportError:
+                self.logger.info("ℹ️ Trivia season scheduler not available")
+            except Exception as e:
+                self.logger.error(f"❌ Failed to load trivia season scheduler: {e}")
+
             # Add other components here as needed
 
         except Exception as e:
