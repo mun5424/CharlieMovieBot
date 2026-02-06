@@ -14,9 +14,11 @@ from discord.ext import tasks
 try:
     from zoneinfo import ZoneInfo
     PACIFIC_TZ = ZoneInfo("America/Los_Angeles")
+    _HAS_ZONEINFO = True
 except ImportError:
     import pytz
     PACIFIC_TZ = pytz.timezone("America/Los_Angeles")
+    _HAS_ZONEINFO = False
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +101,7 @@ def _build_standings_text(leaderboard, limit=5):
 
 def _get_scheduled_time(hour, minute=0):
     """Get a DST-aware time for task scheduling"""
-    if isinstance(PACIFIC_TZ, ZoneInfo):
+    if _HAS_ZONEINFO:
         return datetime.time(hour=hour, minute=minute, tzinfo=PACIFIC_TZ)
     else:
         now = datetime.datetime.now(PACIFIC_TZ)
