@@ -995,9 +995,10 @@ class TriviaCog(commands.Cog):
                 remaining_text += f"\n{rank_emoji} **#{i}** • **{stats.username}** {rank_emoji}\n"
                 remaining_text += f"> 💰 **{stats.total_score:,}** pts • 🎯 **{accuracy:.1f}%** • 🔥 **{stats.best_streak}** • ❓ **{stats.questions_answered}** \n"
 
-        # Stats summary
-        total_players = len(leaderboard)
-        footer_text = f"🎮 Players active: {self._get_active_count(guild_id)}/{MAX_CONCURRENT_PLAYERS} | 👥 Total ranked: {total_players}"
+        # Season reset info in footer
+        from services.trivia_season import get_season_info
+        next_reset, days_until = get_season_info()
+        footer_text = f"Season resets {next_reset.strftime('%B %d, %Y')} at 12 PM PT ({days_until} days left)"
 
         embed.description = header + podium_text + remaining_text
         embed.set_footer(text=footer_text)
