@@ -142,6 +142,11 @@ class DuelSession:
     player1_multiplier: float
     player2_multiplier: float
     is_active: bool = True
+    seen_questions: Optional[set] = None
+
+    def __post_init__(self):
+        if self.seen_questions is None:
+            self.seen_questions = set()
 
 
 class ScoreCalculator:
@@ -1375,7 +1380,7 @@ class TriviaCog(commands.Cog):
         embed.set_footer(text=f"Only {opponent.display_name} can accept or decline. Expires in 60s.")
 
         view = DuelChallengeView(self, interaction, challenger, opponent, mult1, mult2, guild_id)
-        await interaction.response.send_message(embed=embed, view=view)
+        await interaction.response.send_message(content=opponent.mention, embed=embed, view=view)
 
     # ─── Duel flow ───────────────────────────────────────────────────
 
@@ -1435,15 +1440,26 @@ class TriviaCog(commands.Cog):
             await self._end_duel(duel_id)
             return
 
-        # Fetch a question
-        provider = self._select_random_provider()
-        question = await self._fetch_question_with_fallback(
-            provider=provider,
-            unified_category=None,
-            difficulty=None,
-            guild_id=duel.guild_id,
-            user_id=str(duel.player1_id),
-        )
+        # Fetch a question, retrying if we've already seen it this duel
+        question = None
+        for _ in range(3):
+            provider = self._select_random_provider()
+            q = await self._fetch_question_with_fallback(
+                provider=provider,
+                unified_category=None,
+                difficulty=None,
+                guild_id=duel.guild_id,
+                user_id=str(duel.player1_id),
+            )
+            if not q:
+                break
+            q_key = q.question.strip().lower()
+            if q_key not in duel.seen_questions:
+                question = q
+                duel.seen_questions.add(q_key)
+                break
+            logger.info(f"Duel {duel_id}: skipping duplicate question, retrying")
+
         if not question:
             await channel.send("Could not fetch a question. Ending duel.")
             await self._end_duel(duel_id)
@@ -1469,24 +1485,44 @@ class TriviaCog(commands.Cog):
             self._duel_question_timeout(duel_id, duel.current_round)
         )
 
-        # Build embed
-        global_remaining = max(0, 180 - (time.time() - duel.start_time))
-        option_text = "\n".join([f"**{chr(65+i)}.** {opt}" for i, opt in enumerate(options)])
+        # Build embed — match regular trivia style
+        difficulty = Difficulty(question.difficulty)
+        category_emoji = get_category_emoji(question.unified_category)
+        embed_color = self._get_difficulty_color(difficulty)
+
+        option_text = "\n".join([f"**{chr(65+i)}. {opt}**" for i, opt in enumerate(options)])
         diff_emoji = {"easy": "🟢", "medium": "🟡", "hard": "🔴"}
-        d_emoji = diff_emoji.get(question.difficulty, "🟡")
 
         embed = discord.Embed(
-            title=f"Round {duel.current_round}/10",
+            title=f"⚔️ Round {duel.current_round}/10 — {category_emoji} {question.category}",
             description=f"**{question.question}**\n\n{option_text}",
-            color=discord.Color.blurple()
+            color=embed_color,
         )
+
         embed.add_field(
-            name="Score",
-            value=f"{duel.player1_name}: **{duel.player1_score}** | {duel.player2_name}: **{duel.player2_score}**",
+            name="⚡ Difficulty",
+            value=f"{diff_emoji[difficulty.value]} {difficulty.value.title()}",
             inline=True
         )
-        embed.add_field(name="Difficulty", value=f"{d_emoji} {question.difficulty.title()}", inline=True)
-        embed.set_footer(text=f"First correct answer wins! 30s per question | Duel time remaining: {int(global_remaining)}s")
+
+        base_points = SCORING_CONFIG["base_points"][difficulty.value]
+        max_speed_bonus = SCORING_CONFIG["speed_bonuses"][0]["bonus"]
+        embed.add_field(
+            name="💰 Scoring",
+            value=f"**Base:** {base_points} pts\n**Max Speed:** +{max_speed_bonus} pts",
+            inline=True,
+        )
+
+        embed.add_field(
+            name="📊 Score",
+            value=f"**{duel.player1_name}:** {duel.player1_score}\n**{duel.player2_name}:** {duel.player2_score}",
+            inline=True,
+        )
+
+        global_remaining = max(0, 180 - (time.time() - duel.start_time))
+        embed.set_footer(
+            text=f"⚔️ First correct answer wins! Type A, B, C, or D. ({QUESTION_TIMEOUT}s) | Duel time: {int(global_remaining)}s"
+        )
 
         await channel.send(embed=embed)
 
@@ -1590,25 +1626,29 @@ class TriviaCog(commands.Cog):
 
     def _build_round_result_embed(self, duel: DuelSession, rnd: DuelRound) -> discord.Embed:
         if rnd.round_winner == duel.player1_id:
-            winner_text = f"**{duel.player1_name}** wins the round!"
+            winner_text = f"🏆 **{duel.player1_name}** wins the round!"
             color = discord.Color.green()
         elif rnd.round_winner == duel.player2_id:
-            winner_text = f"**{duel.player2_name}** wins the round!"
+            winner_text = f"🏆 **{duel.player2_name}** wins the round!"
             color = discord.Color.green()
         else:
             winner_text = "No winner this round."
             color = discord.Color.light_grey()
 
+        diff_emoji = {"easy": "🟢", "medium": "🟡", "hard": "🔴"}
+        d_emoji = diff_emoji.get(rnd.difficulty, "🟡")
+
         def fmt_answer(ans, correct, t, points):
             if ans is None:
                 return "—"
-            mark = "Correct" if correct else "Wrong"
-            pts = f"+{points}" if points > 0 else str(points)
-            return f"**{ans}** ({mark}) — {t:.1f}s — {pts} pts"
+            if correct:
+                pts = f"+{points}" if points > 0 else str(points)
+                return f"✅ **{ans}** — {t:.1f}s — **{pts} pts**"
+            return f"❌ **{ans}** — {t:.1f}s"
 
         embed = discord.Embed(
-            title=f"Round {rnd.round_number} Result",
-            description=f"Correct answer: **{rnd.correct_answer}**\n{winner_text}",
+            title=f"⚔️ Round {rnd.round_number} Result",
+            description=f"{d_emoji} Correct answer: **{rnd.correct_answer}**\n{winner_text}",
             color=color,
         )
         embed.add_field(
@@ -1622,7 +1662,7 @@ class TriviaCog(commands.Cog):
             inline=True,
         )
         embed.set_footer(
-            text=f"Score — {duel.player1_name}: {duel.player1_score} | {duel.player2_name}: {duel.player2_score}"
+            text=f"📊 {duel.player1_name}: {duel.player1_score} pts | {duel.player2_name}: {duel.player2_score} pts"
         )
         return embed
 
@@ -1682,43 +1722,50 @@ class TriviaCog(commands.Cog):
         winner_raw: int, winner_mult: float, season_pts: int
     ) -> discord.Embed:
         if winner_name:
-            title = f"Duel Over — {winner_name} Wins!"
+            title = f"⚔️ Duel Over — {winner_name} Wins! 🏆"
             color = discord.Color.gold()
         else:
-            title = "Duel Over — It's a Tie!"
+            title = "⚔️ Duel Over — It's a Tie!"
             color = discord.Color.light_grey()
 
         # Count rounds won
         p1_rounds = sum(1 for r in duel.completed_rounds if r.round_winner == duel.player1_id)
         p2_rounds = sum(1 for r in duel.completed_rounds if r.round_winner == duel.player2_id)
+        total_rounds = len(duel.completed_rounds)
 
         desc = (
-            f"**{duel.player1_name}:** {duel.player1_score} pts ({p1_rounds} rounds won) — {duel.player1_multiplier:.2f}x multiplier\n"
-            f"**{duel.player2_name}:** {duel.player2_score} pts ({p2_rounds} rounds won) — {duel.player2_multiplier:.2f}x multiplier\n\n"
+            f"**{duel.player1_name}:** {duel.player1_score} pts — {p1_rounds}/{total_rounds} rounds won — {duel.player1_multiplier:.2f}x\n"
+            f"**{duel.player2_name}:** {duel.player2_score} pts — {p2_rounds}/{total_rounds} rounds won — {duel.player2_multiplier:.2f}x\n\n"
         )
 
         if winner_name:
             desc += (
-                f"**{winner_name}** earns {winner_raw} x{winner_mult:.2f} = "
+                f"💰 **{winner_name}** earns {winner_raw} x{winner_mult:.2f} = "
                 f"**+{season_pts}** to season score!\n"
             )
         else:
-            desc += "Tie — no season score change.\n"
+            desc += "🤝 Tie — no season score change.\n"
+
+        embed = discord.Embed(title=title, description=desc, color=color)
 
         # Round-by-round breakdown
         breakdown = ""
+        diff_emoji = {"easy": "🟢", "medium": "🟡", "hard": "🔴"}
         for rnd in duel.completed_rounds:
+            d_emoji = diff_emoji.get(rnd.difficulty, "🟡")
             if rnd.round_winner == duel.player1_id:
-                icon = f"**{duel.player1_name}**"
+                icon = f"🏆 **{duel.player1_name}**"
             elif rnd.round_winner == duel.player2_id:
-                icon = f"**{duel.player2_name}**"
+                icon = f"🏆 **{duel.player2_name}**"
             else:
-                icon = "Draw"
-            breakdown += f"R{rnd.round_number}: {icon} — {rnd.correct_answer} ({rnd.difficulty})\n"
+                icon = "➖ Draw"
+            breakdown += f"R{rnd.round_number}: {icon} — {rnd.correct_answer} {d_emoji}\n"
 
-        embed = discord.Embed(title=title, description=desc, color=color)
         if breakdown:
-            embed.add_field(name="Round Breakdown", value=breakdown, inline=False)
+            embed.add_field(name="📜 Round Breakdown", value=breakdown, inline=False)
+
+        elapsed = int(time.time() - duel.start_time)
+        embed.set_footer(text=f"Duel completed in {elapsed}s")
         return embed
 
     async def _duel_global_timeout(self, duel_id: str):
