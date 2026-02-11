@@ -89,6 +89,61 @@ class ActiveQuestion:
     timeout_task: Optional[asyncio.Task] = None
 
 
+@dataclass
+class DuelRound:
+    """Result of a completed duel round"""
+    round_number: int
+    question_text: str
+    correct_answer: str
+    difficulty: str
+    player1_answer: Optional[str]
+    player1_correct: bool
+    player1_time: Optional[float]
+    player1_points: int
+    player2_answer: Optional[str]
+    player2_correct: bool
+    player2_time: Optional[float]
+    player2_points: int
+    round_winner: Optional[int]  # user_id or None
+
+
+@dataclass
+class DuelQuestion:
+    """Tracks the current round's question in a duel"""
+    question: StandardQuestion
+    correct_letter: str
+    options: List[str]
+    round_number: int
+    start_time: float
+    timeout_task: Optional[asyncio.Task] = None
+    player1_answer: Optional[str] = None
+    player1_time: Optional[float] = None
+    player2_answer: Optional[str] = None
+    player2_time: Optional[float] = None
+
+
+@dataclass
+class DuelSession:
+    """Tracks an active duel between two players"""
+    duel_id: str
+    guild_id: str
+    channel_id: int
+    player1_id: int
+    player1_name: str
+    player2_id: int
+    player2_name: str
+    current_round: int
+    start_time: float
+    global_timeout_task: Optional[asyncio.Task]
+    current_question: Optional[DuelQuestion]
+    completed_rounds: List[DuelRound]
+    player1_score: int
+    player2_score: int
+    player1_multiplier: float
+    player2_multiplier: float
+    is_active: bool = True
+
+
 class ScoreCalculator:
     @staticmethod
     def calculate_speed_bonus(response_time: float) -> Tuple[int, str]:
@@ -195,6 +250,10 @@ class TriviaCog(commands.Cog):
 
         # Lock to prevent race conditions when processing answers
         self.answer_locks: Dict[str, asyncio.Lock] = {}
+
+        # Duel tracking
+        self.active_duels: Dict[str, DuelSession] = {}  # duel_id -> session
+        self.duel_locks: Dict[str, asyncio.Lock] = {}    # guild_id -> lock
 
         # Initialize providers
         self.providers: Dict[str, TriviaProvider] = {}
@@ -370,6 +429,15 @@ class TriviaCog(commands.Cog):
 
         self.active_questions.clear()
         self.answer_locks.clear()
+
+        # Cancel all duel tasks
+        for duel in self.active_duels.values():
+            if duel.global_timeout_task and not duel.global_timeout_task.done():
+                duel.global_timeout_task.cancel()
+            if duel.current_question and duel.current_question.timeout_task and not duel.current_question.timeout_task.done():
+                duel.current_question.timeout_task.cancel()
+        self.active_duels.clear()
+        self.duel_locks.clear()
 
         # Cleanup providers
         for provider in self.providers.values():
@@ -689,14 +757,24 @@ class TriviaCog(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        """Listen for trivia answers"""
+        """Listen for trivia answers (duels and normal)"""
         if message.author.bot or not message.guild:
             return
 
         guild_id = str(message.guild.id)
         user_id = message.author.id
+        content = message.content.strip().upper()
 
-        # Quick check before acquiring lock
+        if content not in ["A", "B", "C", "D"]:
+            return
+
+        # Check duels first
+        duel = self._find_user_duel(guild_id, message.channel.id, user_id)
+        if duel:
+            await self._handle_duel_answer(duel, user_id, content, message)
+            return
+
+        # Normal trivia — quick check before acquiring lock
         if guild_id not in self.active_questions:
             return
         if user_id not in self.active_questions.get(guild_id, {}):
@@ -716,10 +794,6 @@ class TriviaCog(commands.Cog):
 
                 # Verify channel
                 if message.channel.id != active_q.channel_id:
-                    return
-
-                content = message.content.strip().upper()
-                if content not in ["A", "B", "C", "D"]:
                     return
 
                 # Cancel timeout
@@ -1208,3 +1282,550 @@ class TriviaCog(commands.Cog):
             f"Season title set to **{title}**. "
             f"It will be used when the season resets in **{days_until}** days."
         )
+
+    # ─── Duel helpers ────────────────────────────────────────────────
+
+    def _get_duel_lock(self, guild_id: str) -> asyncio.Lock:
+        if guild_id not in self.duel_locks:
+            self.duel_locks[guild_id] = asyncio.Lock()
+        return self.duel_locks[guild_id]
+
+    def _user_in_duel(self, guild_id: str, user_id: int) -> bool:
+        for duel in self.active_duels.values():
+            if duel.guild_id == guild_id and duel.is_active:
+                if user_id in (duel.player1_id, duel.player2_id):
+                    return True
+        return False
+
+    def _find_user_duel(self, guild_id: str, channel_id: int, user_id: int) -> Optional[DuelSession]:
+        for duel in self.active_duels.values():
+            if (duel.guild_id == guild_id and duel.channel_id == channel_id
+                    and duel.is_active and duel.current_question
+                    and user_id in (duel.player1_id, duel.player2_id)):
+                return duel
+        return None
+
+    @staticmethod
+    def _calculate_duel_multipliers(score1: int, score2: int) -> Tuple[float, float]:
+        """Curved multiplier: small gaps barely matter, big gaps hit hard.
+        underdog 1.0–1.5x, favorite 0.7–1.0x"""
+        s1 = max(score1, 1)
+        s2 = max(score2, 1)
+        if s1 == s2:
+            return 1.0, 1.0
+        min_s, max_s = min(s1, s2), max(s1, s2)
+        ratio = min_s / max_s
+        gap = (1.0 - ratio) ** 2
+        underdog = 1.0 + 0.5 * gap   # 1.0x to 1.5x
+        favorite = 1.0 - 0.3 * gap   # 0.7x to 1.0x
+        if s1 < s2:
+            return underdog, favorite
+        else:
+            return favorite, underdog
+
+    # ─── Duel command ────────────────────────────────────────────────
+
+    @app_commands.command(name="trivia_duel", description="Challenge someone to a trivia duel!")
+    @app_commands.describe(opponent="The user you want to duel")
+    async def trivia_duel(self, interaction: discord.Interaction, opponent: discord.Member):
+        guild_id = self.get_guild_id(interaction)
+        challenger = interaction.user
+
+        # Validation
+        if opponent.id == challenger.id:
+            await interaction.response.send_message("You can't duel yourself.", ephemeral=True)
+            return
+        if opponent.bot:
+            await interaction.response.send_message("You can't duel a bot.", ephemeral=True)
+            return
+        if self._user_in_duel(guild_id, challenger.id):
+            await interaction.response.send_message("You're already in a duel.", ephemeral=True)
+            return
+        if self._user_in_duel(guild_id, opponent.id):
+            await interaction.response.send_message(f"{opponent.display_name} is already in a duel.", ephemeral=True)
+            return
+        if self._has_active_question(guild_id, challenger.id):
+            await interaction.response.send_message("Finish your current trivia question first.", ephemeral=True)
+            return
+        if self._has_active_question(guild_id, opponent.id):
+            await interaction.response.send_message(f"{opponent.display_name} has an active trivia question.", ephemeral=True)
+            return
+
+        # Calculate multipliers
+        stats1 = self.data_manager.get_user_stats(guild_id, str(challenger.id), challenger.name)
+        stats2 = self.data_manager.get_user_stats(guild_id, str(opponent.id), opponent.name)
+        mult1, mult2 = self._calculate_duel_multipliers(stats1.total_score, stats2.total_score)
+
+        # Build invitation embed
+        embed = discord.Embed(
+            title="Trivia Duel Challenge!",
+            description=(
+                f"**{challenger.display_name}** challenges **{opponent.display_name}** to a trivia duel!\n\n"
+                f"**Rules:**\n"
+                f"- 10 rounds, same question for both players\n"
+                f"- First correct answer wins the round\n"
+                f"- 30s per question, 3-minute overall timer\n"
+                f"- Winner's points added to season score\n\n"
+                f"**Season Multipliers:**\n"
+                f"- {challenger.display_name}: **{mult1:.2f}x** (score: {stats1.total_score})\n"
+                f"- {opponent.display_name}: **{mult2:.2f}x** (score: {stats2.total_score})"
+            ),
+            color=discord.Color.gold()
+        )
+        embed.set_footer(text=f"Only {opponent.display_name} can accept or decline. Expires in 60s.")
+
+        view = DuelChallengeView(self, interaction, challenger, opponent, mult1, mult2, guild_id)
+        await interaction.response.send_message(embed=embed, view=view)
+
+    # ─── Duel flow ───────────────────────────────────────────────────
+
+    async def _start_duel(
+        self, channel: discord.TextChannel, guild_id: str,
+        p1: discord.Member, p2: discord.Member,
+        mult1: float, mult2: float
+    ):
+        duel_id = f"{guild_id}-{p1.id}-{p2.id}"
+        session = DuelSession(
+            duel_id=duel_id,
+            guild_id=guild_id,
+            channel_id=channel.id,
+            player1_id=p1.id,
+            player1_name=p1.display_name,
+            player2_id=p2.id,
+            player2_name=p2.display_name,
+            current_round=0,
+            start_time=time.time(),
+            global_timeout_task=None,
+            current_question=None,
+            completed_rounds=[],
+            player1_score=0,
+            player2_score=0,
+            player1_multiplier=mult1,
+            player2_multiplier=mult2,
+        )
+        self.active_duels[duel_id] = session
+
+        # Global 3-minute timer
+        session.global_timeout_task = asyncio.create_task(
+            self._duel_global_timeout(duel_id)
+        )
+
+        embed = discord.Embed(
+            title="Duel Starting!",
+            description=f"**{p1.display_name}** vs **{p2.display_name}**\nFirst correct answer wins each round. Get ready!",
+            color=discord.Color.green()
+        )
+        await channel.send(embed=embed)
+        await asyncio.sleep(2)
+        await self._next_duel_round(duel_id)
+
+    async def _next_duel_round(self, duel_id: str):
+        if duel_id not in self.active_duels:
+            return
+        duel = self.active_duels[duel_id]
+        if not duel.is_active:
+            return
+
+        if duel.current_round >= 10:
+            await self._end_duel(duel_id)
+            return
+
+        channel = self.bot.get_channel(duel.channel_id)
+        if not channel:
+            await self._end_duel(duel_id)
+            return
+
+        # Fetch a question
+        provider = self._select_random_provider()
+        question = await self._fetch_question_with_fallback(
+            provider=provider,
+            unified_category=None,
+            difficulty=None,
+            guild_id=duel.guild_id,
+            user_id=str(duel.player1_id),
+        )
+        if not question:
+            await channel.send("Could not fetch a question. Ending duel.")
+            await self._end_duel(duel_id)
+            return
+
+        # Shuffle options
+        options = question.incorrect_answers + [question.correct_answer]
+        random.shuffle(options)
+        correct_letter = chr(65 + options.index(question.correct_answer))
+
+        duel.current_round += 1
+        dq = DuelQuestion(
+            question=question,
+            correct_letter=correct_letter,
+            options=options,
+            round_number=duel.current_round,
+            start_time=time.time(),
+        )
+        duel.current_question = dq
+
+        # Per-question timeout (30s)
+        dq.timeout_task = asyncio.create_task(
+            self._duel_question_timeout(duel_id, duel.current_round)
+        )
+
+        # Build embed
+        global_remaining = max(0, 180 - (time.time() - duel.start_time))
+        option_text = "\n".join([f"**{chr(65+i)}.** {opt}" for i, opt in enumerate(options)])
+        diff_emoji = {"easy": "🟢", "medium": "🟡", "hard": "🔴"}
+        d_emoji = diff_emoji.get(question.difficulty, "🟡")
+
+        embed = discord.Embed(
+            title=f"Round {duel.current_round}/10",
+            description=f"**{question.question}**\n\n{option_text}",
+            color=discord.Color.blurple()
+        )
+        embed.add_field(
+            name="Score",
+            value=f"{duel.player1_name}: **{duel.player1_score}** | {duel.player2_name}: **{duel.player2_score}**",
+            inline=True
+        )
+        embed.add_field(name="Difficulty", value=f"{d_emoji} {question.difficulty.title()}", inline=True)
+        embed.set_footer(text=f"First correct answer wins! 30s per question | Duel time remaining: {int(global_remaining)}s")
+
+        await channel.send(embed=embed)
+
+    async def _handle_duel_answer(self, duel: DuelSession, user_id: int, answer: str, message: discord.Message):
+        lock = self._get_duel_lock(duel.guild_id)
+        async with lock:
+            if not duel.is_active or not duel.current_question:
+                return
+            dq = duel.current_question
+            is_p1 = user_id == duel.player1_id
+
+            # Already answered?
+            if is_p1 and dq.player1_answer is not None:
+                return
+            if not is_p1 and dq.player2_answer is not None:
+                return
+
+            answer_time = time.time() - dq.start_time
+            is_correct = answer == dq.correct_letter
+
+            if is_p1:
+                dq.player1_answer = answer
+                dq.player1_time = answer_time
+            else:
+                dq.player2_answer = answer
+                dq.player2_time = answer_time
+
+            # Resolve immediately if correct answer OR both have answered
+            if is_correct:
+                await self._resolve_duel_round(duel)
+            elif dq.player1_answer is not None and dq.player2_answer is not None:
+                await self._resolve_duel_round(duel)
+
+    async def _resolve_duel_round(self, duel: DuelSession):
+        dq = duel.current_question
+        if dq is None or not duel.is_active:
+            return
+        # Clear immediately to prevent re-entry
+        duel.current_question = None
+
+        # Cancel per-question timeout
+        if dq.timeout_task and not dq.timeout_task.done():
+            dq.timeout_task.cancel()
+
+        p1_correct = dq.player1_answer == dq.correct_letter if dq.player1_answer else False
+        p2_correct = dq.player2_answer == dq.correct_letter if dq.player2_answer else False
+
+        difficulty = Difficulty(dq.question.difficulty)
+        p1_points = 0
+        p2_points = 0
+        round_winner = None
+
+        if p1_correct and p2_correct:
+            # Both correct — faster player wins
+            if dq.player1_time <= dq.player2_time:
+                p1_points, _ = ScoreCalculator.calculate_final_score(difficulty, dq.player1_time, True, 0, False)
+                round_winner = duel.player1_id
+            else:
+                p2_points, _ = ScoreCalculator.calculate_final_score(difficulty, dq.player2_time, True, 0, False)
+                round_winner = duel.player2_id
+        elif p1_correct:
+            p1_points, _ = ScoreCalculator.calculate_final_score(difficulty, dq.player1_time, True, 0, False)
+            round_winner = duel.player1_id
+        elif p2_correct:
+            p2_points, _ = ScoreCalculator.calculate_final_score(difficulty, dq.player2_time, True, 0, False)
+            round_winner = duel.player2_id
+        # else: both wrong or timed out — no points
+
+        duel.player1_score += p1_points
+        duel.player2_score += p2_points
+
+        round_result = DuelRound(
+            round_number=dq.round_number,
+            question_text=dq.question.question,
+            correct_answer=dq.question.correct_answer,
+            difficulty=dq.question.difficulty,
+            player1_answer=dq.player1_answer,
+            player1_correct=p1_correct,
+            player1_time=dq.player1_time,
+            player1_points=p1_points,
+            player2_answer=dq.player2_answer,
+            player2_correct=p2_correct,
+            player2_time=dq.player2_time,
+            player2_points=p2_points,
+            round_winner=round_winner,
+        )
+        duel.completed_rounds.append(round_result)
+
+        # Post round result
+        channel = self.bot.get_channel(duel.channel_id)
+        if channel:
+            await channel.send(embed=self._build_round_result_embed(duel, round_result))
+
+        # Check if duel should end
+        if duel.current_round >= 10 or (time.time() - duel.start_time) >= 180:
+            await self._end_duel(duel.duel_id)
+        else:
+            await asyncio.sleep(3)
+            if duel.is_active:
+                await self._next_duel_round(duel.duel_id)
+
+    def _build_round_result_embed(self, duel: DuelSession, rnd: DuelRound) -> discord.Embed:
+        if rnd.round_winner == duel.player1_id:
+            winner_text = f"**{duel.player1_name}** wins the round!"
+            color = discord.Color.green()
+        elif rnd.round_winner == duel.player2_id:
+            winner_text = f"**{duel.player2_name}** wins the round!"
+            color = discord.Color.green()
+        else:
+            winner_text = "No winner this round."
+            color = discord.Color.light_grey()
+
+        def fmt_answer(ans, correct, t, points):
+            if ans is None:
+                return "—"
+            mark = "Correct" if correct else "Wrong"
+            pts = f"+{points}" if points > 0 else str(points)
+            return f"**{ans}** ({mark}) — {t:.1f}s — {pts} pts"
+
+        embed = discord.Embed(
+            title=f"Round {rnd.round_number} Result",
+            description=f"Correct answer: **{rnd.correct_answer}**\n{winner_text}",
+            color=color,
+        )
+        embed.add_field(
+            name=duel.player1_name,
+            value=fmt_answer(rnd.player1_answer, rnd.player1_correct, rnd.player1_time, rnd.player1_points),
+            inline=True,
+        )
+        embed.add_field(
+            name=duel.player2_name,
+            value=fmt_answer(rnd.player2_answer, rnd.player2_correct, rnd.player2_time, rnd.player2_points),
+            inline=True,
+        )
+        embed.set_footer(
+            text=f"Score — {duel.player1_name}: {duel.player1_score} | {duel.player2_name}: {duel.player2_score}"
+        )
+        return embed
+
+    async def _end_duel(self, duel_id: str):
+        if duel_id not in self.active_duels:
+            return
+        duel = self.active_duels[duel_id]
+        if not duel.is_active:
+            return
+        duel.is_active = False
+
+        # Cancel timers
+        if duel.global_timeout_task and not duel.global_timeout_task.done():
+            duel.global_timeout_task.cancel()
+        if duel.current_question and duel.current_question.timeout_task and not duel.current_question.timeout_task.done():
+            duel.current_question.timeout_task.cancel()
+
+        # Winner determined by raw score (more correct answers = win)
+        if duel.player1_score > duel.player2_score:
+            winner_id = duel.player1_id
+            winner_name = duel.player1_name
+            winner_raw = duel.player1_score
+            winner_mult = duel.player1_multiplier
+        elif duel.player2_score > duel.player1_score:
+            winner_id = duel.player2_id
+            winner_name = duel.player2_name
+            winner_raw = duel.player2_score
+            winner_mult = duel.player2_multiplier
+        else:
+            winner_id = None
+            winner_name = None
+            winner_raw = 0
+            winner_mult = 1.0
+
+        # Multiplier only affects the season reward, not who wins
+        season_pts = int(winner_raw * winner_mult) if winner_id else 0
+
+        # Apply season score — only winner gets points
+        if winner_id is not None:
+            user_stats = self.data_manager.get_user_stats(
+                duel.guild_id, str(winner_id), winner_name
+            )
+            user_stats.total_score += season_pts
+            self.data_manager.save_server_data(duel.guild_id)
+
+        # Build summary embed
+        channel = self.bot.get_channel(duel.channel_id)
+        if channel:
+            await channel.send(embed=self._build_duel_summary_embed(
+                duel, winner_name, winner_raw, winner_mult, season_pts
+            ))
+
+        self.active_duels.pop(duel_id, None)
+
+    def _build_duel_summary_embed(
+        self, duel: DuelSession, winner_name: Optional[str],
+        winner_raw: int, winner_mult: float, season_pts: int
+    ) -> discord.Embed:
+        if winner_name:
+            title = f"Duel Over — {winner_name} Wins!"
+            color = discord.Color.gold()
+        else:
+            title = "Duel Over — It's a Tie!"
+            color = discord.Color.light_grey()
+
+        # Count rounds won
+        p1_rounds = sum(1 for r in duel.completed_rounds if r.round_winner == duel.player1_id)
+        p2_rounds = sum(1 for r in duel.completed_rounds if r.round_winner == duel.player2_id)
+
+        desc = (
+            f"**{duel.player1_name}:** {duel.player1_score} pts ({p1_rounds} rounds won) — {duel.player1_multiplier:.2f}x multiplier\n"
+            f"**{duel.player2_name}:** {duel.player2_score} pts ({p2_rounds} rounds won) — {duel.player2_multiplier:.2f}x multiplier\n\n"
+        )
+
+        if winner_name:
+            desc += (
+                f"**{winner_name}** earns {winner_raw} x{winner_mult:.2f} = "
+                f"**+{season_pts}** to season score!\n"
+            )
+        else:
+            desc += "Tie — no season score change.\n"
+
+        # Round-by-round breakdown
+        breakdown = ""
+        for rnd in duel.completed_rounds:
+            if rnd.round_winner == duel.player1_id:
+                icon = f"**{duel.player1_name}**"
+            elif rnd.round_winner == duel.player2_id:
+                icon = f"**{duel.player2_name}**"
+            else:
+                icon = "Draw"
+            breakdown += f"R{rnd.round_number}: {icon} — {rnd.correct_answer} ({rnd.difficulty})\n"
+
+        embed = discord.Embed(title=title, description=desc, color=color)
+        if breakdown:
+            embed.add_field(name="Round Breakdown", value=breakdown, inline=False)
+        return embed
+
+    async def _duel_global_timeout(self, duel_id: str):
+        try:
+            await asyncio.sleep(180)
+            if duel_id not in self.active_duels:
+                return
+            duel = self.active_duels[duel_id]
+            lock = self._get_duel_lock(duel.guild_id)
+            async with lock:
+                if not duel.is_active:
+                    return
+                if duel.current_question:
+                    await self._resolve_duel_round(duel)
+                else:
+                    await self._end_duel(duel_id)
+        except asyncio.CancelledError:
+            pass
+
+    async def _duel_question_timeout(self, duel_id: str, round_number: int):
+        try:
+            await asyncio.sleep(QUESTION_TIMEOUT)
+            if duel_id not in self.active_duels:
+                return
+            duel = self.active_duels[duel_id]
+            lock = self._get_duel_lock(duel.guild_id)
+            async with lock:
+                if not duel.is_active or not duel.current_question:
+                    return
+                if duel.current_question.round_number != round_number:
+                    return
+                await self._resolve_duel_round(duel)
+        except asyncio.CancelledError:
+            pass
+
+
+class DuelChallengeView(discord.ui.View):
+    def __init__(self, cog: TriviaCog, interaction: discord.Interaction,
+                 challenger: discord.Member, opponent: discord.Member,
+                 mult1: float, mult2: float, guild_id: str):
+        super().__init__(timeout=60)
+        self.cog = cog
+        self.original_interaction = interaction
+        self.challenger = challenger
+        self.opponent = opponent
+        self.mult1 = mult1
+        self.mult2 = mult2
+        self.guild_id = guild_id
+        self.responded = False
+
+    @discord.ui.button(label="Accept", style=discord.ButtonStyle.green)
+    async def accept_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.opponent.id:
+            await interaction.response.send_message("Only the challenged player can accept.", ephemeral=True)
+            return
+        if self.responded:
+            return
+        self.responded = True
+        self.stop()
+
+        await interaction.response.edit_message(
+            embed=discord.Embed(
+                title="Challenge Accepted!",
+                description=f"{self.opponent.display_name} accepted the duel!",
+                color=discord.Color.green()
+            ),
+            view=None,
+        )
+
+        await self.cog._start_duel(
+            interaction.channel, self.guild_id,
+            self.challenger, self.opponent,
+            self.mult1, self.mult2,
+        )
+
+    @discord.ui.button(label="Decline", style=discord.ButtonStyle.red)
+    async def decline_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.opponent.id:
+            await interaction.response.send_message("Only the challenged player can decline.", ephemeral=True)
+            return
+        if self.responded:
+            return
+        self.responded = True
+        self.stop()
+
+        await interaction.response.edit_message(
+            embed=discord.Embed(
+                title="Challenge Declined",
+                description=f"{self.opponent.display_name} declined the duel.",
+                color=discord.Color.red()
+            ),
+            view=None,
+        )
+
+    async def on_timeout(self):
+        if self.responded:
+            return
+        self.responded = True
+        try:
+            msg = await self.original_interaction.original_response()
+            await msg.edit(
+                embed=discord.Embed(
+                    title="Challenge Expired",
+                    description=f"{self.opponent.display_name} didn't respond in time.",
+                    color=discord.Color.greyple()
+                ),
+                view=None,
+            )
+        except Exception:
+            pass

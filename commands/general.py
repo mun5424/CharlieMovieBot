@@ -446,10 +446,20 @@ def setup(bot):
             name="🧠 TRIVIA",
             value=(
                 "`/trivia` - start a trivia question\n"
+                "`/trivia_duel <user>` - 1v1 trivia duel\n"
                 "`/trivia_leaderboard` - view top players\n"
                 "`/trivia_stats` - view your stats\n"
                 "`/trivia_scoring` - how scoring works\n"
                 "`/hall_of_fame` - best performances"
+            ),
+            inline=False
+        )
+
+        # Handhelds section
+        embed.add_field(
+            name="🕹️ HANDHELDS",
+            value=(
+                "`/handheld <name>` - look up a handheld device"
             ),
             inline=False
         )

@@ -57,12 +57,12 @@ def get_season_info():
 
 
 def _get_season_name(data_manager, guild_id):
-    """Generate a season name. Uses custom title if set, otherwise defaults to month/year."""
-    hof_data = data_manager.get_hall_of_fame(guild_id)
-    season_number = len(hof_data) + 1
+    """Generate a season name. Uses custom title as-is if set, otherwise defaults to 'Season N - Month Year'."""
     custom_title = data_manager.get_season_title(guild_id)
     if custom_title:
-        return f"Season {season_number} - {custom_title}"
+        return custom_title
+    hof_data = data_manager.get_hall_of_fame(guild_id)
+    season_number = len(hof_data) + 1
     now = datetime.datetime.now(PACIFIC_TZ)
     return f"Season {season_number} - {now.strftime('%B %Y')}"
 
