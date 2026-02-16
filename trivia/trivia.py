@@ -1648,7 +1648,7 @@ class TriviaCog(commands.Cog):
 
         embed = discord.Embed(
             title=f"⚔️ Round {rnd.round_number} Result",
-            description=f"{d_emoji} Correct answer: **{rnd.correct_answer}**\n{winner_text}",
+            description=f"{winner_text}\n{d_emoji} Correct answer: **{rnd.correct_answer}**",
             color=color,
         )
         embed.add_field(

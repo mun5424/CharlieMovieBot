@@ -42,11 +42,10 @@ class SF6TriviaManager:
         # "desc" = higher is better (most damage, best advantage)
         self.comparable_properties = {
             "startup": {"display": "startup frames", "order": "asc"},
-            "recovery": {"display": "recovery frames", "order": "asc"},  # Fixed: lower recovery is better
+            "recovery": {"display": "recovery frames", "order": "asc"},
             "damage": {"display": "damage", "order": "desc"},
             "driveGaugeGain": {"display": "Drive Gauge gain", "order": "desc"},
-            "driveGaugeLoss": {"display": "Drive Gauge loss", "order": "asc"},
-            "superGaugeGain": {"display": "Super Gauge gain", "order": "desc"},
+            "driveGaugeLoss": {"display": "Drive Gauge cost", "order": "asc"},
             "onHit": {"display": "on hit advantage", "order": "desc"},
             "onBlock": {"display": "on block advantage", "order": "desc"}
         }
@@ -266,13 +265,21 @@ class SF6TriviaManager:
                     correct_value = move_data[0][property_name]
                 else:  # Slowest startup (highest number)
                     question_stem = f"Which character's {move_type} has the slowest startup?"
-                    correct_char = move_data[-1]["character"] 
+                    correct_char = move_data[-1]["character"]
                     correct_value = move_data[-1][property_name]
-            elif property_name in ["damage", "driveGaugeGain"]:
+            elif property_name == "driveGaugeGain":
+                question_stem = f"Which character's {move_type} gains the most Drive Gauge?"
+                correct_char = move_data[0]["character"]
+                correct_value = move_data[0][property_name]
+            elif property_name == "driveGaugeLoss":
+                question_stem = f"Which character's {move_type} costs the most Drive Gauge?"
+                correct_char = move_data[0]["character"]
+                correct_value = move_data[0][property_name]
+            elif property_name == "damage":
                 question_stem = f"Which character's {move_type} has the highest {prop_info['display']}?"
                 correct_char = move_data[0]["character"]
                 correct_value = move_data[0][property_name]
-            elif property_name in ["recovery", "driveGaugeLoss"]:
+            elif property_name == "recovery":
                 question_stem = f"Which character's {move_type} has the lowest {prop_info['display']}?"
                 correct_char = move_data[0]["character"]
                 correct_value = move_data[0][property_name]
@@ -336,7 +343,7 @@ class SF6TriviaManager:
         conn = sqlite3.connect(self.db_path)
         try:
             properties = ["damage", "onHit", "onBlock", "active", "recovery",
-                        "driveGaugeGain", "driveGaugeLoss", "superGaugeGain"]
+                        "driveGaugeGain", "driveGaugeLoss"]
             prop = random.choice(properties)
 
             # Query moves with a valid property value
@@ -410,9 +417,9 @@ class SF6TriviaManager:
             
             property_extremes = {
                 "startup": {"query": "MIN", "description": "fastest startup"},
-                "recovery": {"query": "MAX", "description": "slowest recovery"}, 
+                "recovery": {"query": "MAX", "description": "slowest recovery"},
                 "damage": {"query": "MAX", "description": "highest damage"},
-                "driveGaugeGain": {"query": "MAX", "description": "highest Drive Gauge gain"},
+                "driveGaugeGain": {"query": "MAX", "description": "most Drive Gauge gain"},
             }
             
             prop_name = random.choice(list(property_extremes.keys()))
@@ -567,8 +574,7 @@ class SF6TriviaManager:
             # Find moves with meaningful gauge properties (not 0 or null)
             gauge_types = [
                 ("driveGaugeGain", "Drive Gauge gain", "DESC"),
-                ("driveGaugeLoss", "Drive Gauge loss", "ASC"), 
-                ("superGaugeGain", "Super Gauge gain", "DESC")
+                ("driveGaugeLoss", "Drive Gauge cost", "ASC"),
             ]
             
             gauge_prop, gauge_display, sort_order = random.choice(gauge_types)
@@ -1062,7 +1068,7 @@ class SF6TriviaManager:
                 return value_str in ['D', 'KD']  # Known special values
         
         # For gauge fields, allow negative values but not zero
-        if field_name in ['driveGaugeGain', 'driveGaugeLoss', 'superGaugeGain']:
+        if field_name in ['driveGaugeGain', 'driveGaugeLoss']:
             try:
                 num_val = int(value_str)
                 return num_val != 0  # Allow negative but not zero
@@ -1137,7 +1143,7 @@ class SF6TriviaManager:
             selected = random.sample(candidates, min(3, len(candidates)))
             return [str(x) for x in selected]
         
-        elif question_type in ['driveGaugeGain', 'driveGaugeLoss', 'superGaugeGain']:
+        elif question_type in ['driveGaugeGain', 'driveGaugeLoss']:
             # Gauge values - these vary significantly, so use more sophisticated generation
             base_val = abs(correct_num)
             
