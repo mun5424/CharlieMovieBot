@@ -93,12 +93,12 @@ def _get_all_guild_ids_with_data(data_manager):
 
 def _build_standings_text(leaderboard, limit=5):
     """Build formatted standings text from leaderboard data"""
-    medals = ["👑", "🥈", "🥉", "4️⃣", "5️⃣"]
+    medals = ["👑", "🥈", "🥉"]
     text = ""
     for i, (user_id, stats) in enumerate(leaderboard[:limit]):
         accuracy = (stats.correct_answers / stats.questions_answered * 100) if stats.questions_answered > 0 else 0
         medal = medals[i] if i < len(medals) else f"#{i+1}"
-        text += f"{medal} **{stats.username}** - {stats.total_score:,} pts ({accuracy:.0f}%)\n"
+        text += f"{medal} **{stats.username}** — {stats.total_score:,} pts · {accuracy:.0f}% · 🔥 {stats.best_streak} streak\n"
     return text
 
 
@@ -166,22 +166,58 @@ async def _perform_season_reset(data_manager, today):
 
             # 2. Build announcement embed (before reset, so standings are still available)
             leaderboard = data_manager.get_server_leaderboard(guild_id, 5)
+            all_users = data_manager.load_server_data(guild_id)
 
-            embed = discord.Embed(
-                title="🏆 SEASON COMPLETE! 🏆",
-                description=f"**{season_name}** has concluded!\n"
-                            f"All scores have been archived to the Hall of Fame.",
-                color=discord.Color.gold()
-            )
+            custom_title = data_manager.get_season_title(guild_id)
+            if custom_title:
+                embed = discord.Embed(
+                    title=f"🏆 {custom_title} 🏆",
+                    description="The season has concluded! All scores have been archived to the Hall of Fame.",
+                    color=discord.Color.gold()
+                )
+            else:
+                embed = discord.Embed(
+                    title="🏆 SEASON COMPLETE! 🏆",
+                    description=f"**{season_name}** has concluded!\n"
+                                f"All scores have been archived to the Hall of Fame.",
+                    color=discord.Color.gold()
+                )
 
             if leaderboard:
                 standings_text = _build_standings_text(leaderboard)
-                embed.add_field(name="🏅 Final Standings", value=standings_text, inline=False)
+                embed.add_field(name="👑 Final Standings", value=standings_text, inline=False)
+
+            # Season highlights
+            if all_users:
+                total_questions = sum(s.questions_answered for s in all_users.values())
+                total_players = len(all_users)
+
+                best_accuracy_user = max(
+                    all_users.values(),
+                    key=lambda s: (s.correct_answers / s.questions_answered) if s.questions_answered > 0 else 0
+                )
+                best_accuracy = (best_accuracy_user.correct_answers / best_accuracy_user.questions_answered * 100) if best_accuracy_user.questions_answered > 0 else 0
+
+                best_streak_user = max(all_users.values(), key=lambda s: s.best_streak)
+
+                fastest_user = min(
+                    (s for s in all_users.values() if s.avg_response_time > 0),
+                    key=lambda s: s.avg_response_time,
+                    default=None
+                )
+
+                highlights = f"🧠 **{total_questions}** questions answered by **{total_players}** players\n"
+                highlights += f"🎯 Highest accuracy: **{best_accuracy_user.username}** ({best_accuracy:.0f}%)\n"
+                highlights += f"🔥 Longest streak: **{best_streak_user.username}** ({best_streak_user.best_streak})"
+                if fastest_user:
+                    highlights += f"\n⚡ Fastest avg response: **{fastest_user.username}** ({fastest_user.avg_response_time:.1f}s)"
+
+                embed.add_field(name="📈 Season Highlights", value=highlights, inline=False)
 
             next_reset = get_next_reset_date(today)
             embed.add_field(
                 name="🆕 New Season",
-                value="A new season has begun! All scores have been reset.\n"
+                value="A new season has begun! Scores have been reset.\n"
                       "Use `/trivia` to start building your new legacy!",
                 inline=False
             )
