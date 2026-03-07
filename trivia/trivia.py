@@ -485,16 +485,7 @@ class TriviaCog(commands.Cog):
         choices = []
         for cat in all_options:
             if current.lower() in cat.lower():
-                # Get emoji for display, but value is always plain text
-                if cat == "Street Fighter 6":
-                    emoji = "🎮"
-                else:
-                    try:
-                        emoji = get_category_emoji(UnifiedCategory(cat))
-                    except ValueError:
-                        emoji = "❓"
-                # name = what user sees (with emoji), value = what's sent (plain text)
-                choices.append(app_commands.Choice(name=f"{emoji} {cat}", value=cat))
+                choices.append(app_commands.Choice(name=cat, value=cat))
 
         return choices[:25]
 
@@ -731,7 +722,7 @@ class TriviaCog(commands.Cog):
 
             # Apply timeout penalty
             penalty = SCORING_CONFIG["penalties"]["timeout"]
-            self.data_manager.update_user_stats(guild_id, str(user_id), active_q.difficulty, False, QUESTION_TIMEOUT, penalty)
+            self.data_manager.update_user_stats(guild_id, str(user_id), active_q.difficulty, False, QUESTION_TIMEOUT, penalty, category=active_q.question_data.unified_category.value)
             user_stats = self.data_manager.get_user_stats(guild_id, str(user_id), "Unknown")
 
             # Update message
@@ -828,7 +819,7 @@ class TriviaCog(commands.Cog):
                 self._cleanup_question(guild_id, user_id)
 
                 # Update stats
-                self.data_manager.update_user_stats(guild_id, str(user_id), active_q.difficulty, is_correct, response_time, score_change)
+                self.data_manager.update_user_stats(guild_id, str(user_id), active_q.difficulty, is_correct, response_time, score_change, category=active_q.question_data.unified_category.value)
                 updated_stats = self.data_manager.get_user_stats(guild_id, str(user_id), message.author.name)
 
                 # Send response
@@ -945,8 +936,12 @@ class TriviaCog(commands.Cog):
         else:
             suffix = {1: "st", 2: "nd", 3: "rd"}.get(user_rank % 10, "th")
 
+        if days_until == 0:
+            reset_text = "🕒 Heads up: Trivia season resets **today at noon**!"
+        else:
+            reset_text = f"🕒 Heads up: Trivia season resets in **{days_until}** days."
         embed = discord.Embed(
-            description=f"🕒 Heads up: Trivia season resets in **{days_until}** days. "
+            description=f"{reset_text} "
                         f"You are **{user_rank}{suffix}** on the current standings!",
             color=discord.Color.light_grey()
         )
@@ -1077,7 +1072,10 @@ class TriviaCog(commands.Cog):
         # Season reset info in footer
         from services.trivia_season import get_season_info
         next_reset, days_until = get_season_info()
-        footer_text = f"Season resets {next_reset.strftime('%B %d, %Y')} at 12 PM PT ({days_until} days left)"
+        if days_until == 0:
+            footer_text = "Season resets today at 12 PM PT!"
+        else:
+            footer_text = f"Season resets {next_reset.strftime('%B %d, %Y')} at 12 PM PT ({days_until} days left)"
 
         embed.description = header + podium_text + remaining_text
         embed.set_footer(text=footer_text)
@@ -1283,10 +1281,95 @@ class TriviaCog(commands.Cog):
         from services.trivia_season import get_season_info
         _, days_until = get_season_info()
 
+        if days_until == 0:
+            reset_msg = "It will be used when the season resets **today at noon**."
+        else:
+            reset_msg = f"It will be used when the season resets in **{days_until}** days."
         await interaction.response.send_message(
-            f"Season title set to **{title}**. "
-            f"It will be used when the season resets in **{days_until}** days."
+            f"Season title set to **{title}**. {reset_msg}"
         )
+
+    # ─── Trivia Stats ────────────────────────────────────────────────
+
+    @app_commands.command(name="trivia_stats", description="View your trivia stats by category")
+    @app_commands.describe(category="Choose a category to see detailed stats (or leave blank for overview)")
+    @app_commands.autocomplete(category=autocomplete_category)
+    async def trivia_stats(self, interaction: discord.Interaction, category: str = None):
+        """Show trivia stats broken down by category"""
+        guild_id = self.get_guild_id(interaction)
+        user_id = str(interaction.user.id)
+        user_stats = self.data_manager.get_user_stats(guild_id, user_id, interaction.user.display_name)
+
+        if user_stats.questions_answered == 0:
+            await interaction.response.send_message("You haven't answered any trivia questions yet!", ephemeral=True)
+            return
+
+        cat_stats = user_stats.category_stats or {}
+
+        if category:
+            # Specific category view
+            if category not in cat_stats or cat_stats[category]["total"] == 0:
+                await interaction.response.send_message(f"You haven't answered any **{category}** questions yet!", ephemeral=True)
+                return
+
+            cs = cat_stats[category]
+            accuracy = (cs["correct"] / cs["total"] * 100) if cs["total"] > 0 else 0
+
+            try:
+                cat_emoji = get_category_emoji(UnifiedCategory(category))
+            except ValueError:
+                cat_emoji = "❓"
+
+            embed = discord.Embed(
+                title=f"{cat_emoji} {category} — Your Stats",
+                color=discord.Color.blue()
+            )
+            embed.description = (
+                f"❓ **{cs['total']}** played · ✅ **{cs['correct']}** correct · 🎯 **{accuracy:.1f}%**\n"
+                f"💰 **{cs['score']:,}** pts"
+            )
+
+            from services.trivia_season import get_season_info
+            _, days_until = get_season_info()
+            if days_until == 0:
+                embed.set_footer(text="Season resets today at 12 PM PT!")
+            else:
+                embed.set_footer(text=f"Season resets in {days_until} days")
+
+            await interaction.response.send_message(embed=embed)
+        else:
+            # Overview - all categories
+            if not cat_stats:
+                await interaction.response.send_message(
+                    "No per-category stats recorded yet. Play some trivia and your stats will start tracking!",
+                    ephemeral=True
+                )
+                return
+
+            # Sort categories by total questions descending
+            sorted_cats = sorted(cat_stats.items(), key=lambda x: x[1]["total"], reverse=True)
+
+            lines = []
+            for cat_name, cs in sorted_cats:
+                if cs["total"] == 0:
+                    continue
+                accuracy = (cs["correct"] / cs["total"] * 100) if cs["total"] > 0 else 0
+                try:
+                    cat_emoji = get_category_emoji(UnifiedCategory(cat_name))
+                except ValueError:
+                    cat_emoji = "❓"
+                lines.append(f"{cat_emoji} **{cat_name}** — {cs['correct']}/{cs['total']} · {accuracy:.0f}% · {cs['score']:,} pts")
+
+            embed = discord.Embed(
+                title="📊 Your Trivia Stats",
+                description="\n".join(lines),
+                color=discord.Color.blue()
+            )
+
+            total_acc = (user_stats.correct_answers / user_stats.questions_answered * 100) if user_stats.questions_answered > 0 else 0
+            embed.set_footer(text=f"Total: {user_stats.questions_answered} questions · {total_acc:.1f}% accuracy · {user_stats.total_score:,} pts")
+
+            await interaction.response.send_message(embed=embed)
 
     # ─── Duel helpers ────────────────────────────────────────────────
 

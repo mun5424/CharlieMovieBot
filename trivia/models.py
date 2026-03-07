@@ -12,8 +12,9 @@ class UserStats:
     best_streak: int = 0
     avg_response_time: float = 0.0
     difficulty_stats: Dict[str, Dict[str, int]] = None
+    category_stats: Dict[str, Dict[str, int]] = None
     seen_question_hashes: set = None  # Set of question_hash+user_id combinations
-    
+
     def __post_init__(self):
         if self.difficulty_stats is None:
             self.difficulty_stats = {
@@ -21,6 +22,8 @@ class UserStats:
                 "medium": {"correct": 0, "total": 0},
                 "hard": {"correct": 0, "total": 0}
             }
+        if self.category_stats is None:
+            self.category_stats = {}
         if self.seen_question_hashes is None:
             self.seen_question_hashes = set()
 

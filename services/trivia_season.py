@@ -49,8 +49,11 @@ def get_season_info():
     """Get current season info for milestone reminders.
 
     Returns (next_reset_date, days_until_reset).
+    days_until_reset is 0 on reset day (before the reset runs at noon).
     """
     today = datetime.datetime.now(PACIFIC_TZ).date()
+    if today.day == SEASON_RESET_DAY:
+        return today, 0
     next_reset = get_next_reset_date(today)
     days_until = (next_reset - today).days
     return next_reset, days_until

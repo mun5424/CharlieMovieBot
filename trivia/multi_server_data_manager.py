@@ -30,8 +30,9 @@ class UserStats:
     best_streak: int = 0
     avg_response_time: float = 0.0
     difficulty_stats: Dict[str, Dict[str, int]] = None
+    category_stats: Dict[str, Dict[str, int]] = None
     seen_question_hashes: set = None  # Set of question_hash+user_id combinations
-    
+
     def __post_init__(self):
         if self.difficulty_stats is None:
             self.difficulty_stats = {
@@ -39,6 +40,8 @@ class UserStats:
                 "medium": {"correct": 0, "total": 0},
                 "hard": {"correct": 0, "total": 0}
             }
+        if self.category_stats is None:
+            self.category_stats = {}
         if self.seen_question_hashes is None:
             self.seen_question_hashes = set()
 
@@ -212,30 +215,31 @@ class MultiServerDataManager:
         
         return server_stats[user_id]
     
-    def update_user_stats(self, guild_id: str, user_id: str, difficulty: Difficulty, 
-                         is_correct: bool, response_time: float, score_change: int):
+    def update_user_stats(self, guild_id: str, user_id: str, difficulty: Difficulty,
+                         is_correct: bool, response_time: float, score_change: int,
+                         category: str = None):
         """Update user statistics for a specific server"""
         server_stats = self.load_server_data(guild_id)
-        
+
         if user_id not in server_stats:
             logger.warning(f"User {user_id} not found in server {guild_id} during update")
             return
-        
+
         stats = server_stats[user_id]
-        
+
         # Update basic stats
         stats.questions_answered += 1
         stats.total_score += score_change
-        
+
         # Prevent negative scores - reset to 0 if below zero
         if stats.total_score < 0:
             logger.debug(f"User {user_id} score went below zero ({stats.total_score}), resetting to 0")
             stats.total_score = 0
-        
+
         # Update difficulty stats
         diff_str = difficulty.value
         stats.difficulty_stats[diff_str]["total"] += 1
-        
+
         if is_correct:
             stats.correct_answers += 1
             stats.current_streak += 1
@@ -243,14 +247,23 @@ class MultiServerDataManager:
             stats.difficulty_stats[diff_str]["correct"] += 1
         else:
             stats.current_streak = 0
-        
+
+        # Update category stats
+        if category:
+            if category not in stats.category_stats:
+                stats.category_stats[category] = {"correct": 0, "total": 0, "score": 0}
+            stats.category_stats[category]["total"] += 1
+            stats.category_stats[category]["score"] += score_change
+            if is_correct:
+                stats.category_stats[category]["correct"] += 1
+
         # Update average response time
         total_time = stats.avg_response_time * (stats.questions_answered - 1) + response_time
         stats.avg_response_time = total_time / stats.questions_answered
-        
+
         # Schedule save
         self.save_server_data(guild_id)
-        
+
         logger.debug(f"Updated stats for {user_id} in server {guild_id}: score={stats.total_score}, streak={stats.current_streak}")
     
     def get_server_leaderboard(self, guild_id: str, limit: int = 10) -> list:
