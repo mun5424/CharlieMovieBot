@@ -592,7 +592,7 @@ def setup_reminder(bot):
     bot_instance = bot
     check_todays_tournament.start()  # runs daily at 2 PM PT
     check_custom_reminders.start()   # runs daily at 1 PM PT
-    # check_dodgers_and_notify.start()  # runs daily at 11 AM PT
+    check_dodgers_and_notify.start()  # runs daily at 11 AM PT
 
     # Register cleanup handler for the shared session
     if hasattr(bot, 'add_shutdown_handler'):
