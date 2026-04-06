@@ -8,6 +8,12 @@ from discord import app_commands
 from clients.tmdb import search_movie_async
 from commands.autocomplete import movie_search_autocomplete, AUTOCOMPLETE_LIMIT
 
+def format_stars(score) -> str:
+    """Generate repeated ⭐ emojis for a score, rounding down for decimals."""
+    count = int(score)
+    score_text = count if score == int(score) else score
+    return "⭐" * count + f" {score_text}/10"
+
 # Import database functions
 from db import (
     get_movie_reviews as _get_movie_reviews,
@@ -747,9 +753,6 @@ def setup(bot):
                     "❌ Score must be a number between 1 and 10 (e.g., 7.5).", ephemeral=True
                 )
 
-            # Format score for display (remove .0 for whole numbers)
-            score_display = int(score_value) if score_value == int(score_value) else score_value
-
             # Defer before doing database work to avoid interaction timeout
             await interaction.response.defer()
 
@@ -770,7 +773,7 @@ def setup(bot):
                 description=self.review_text.value,
                 color=0x2ecc71
             )
-            embed.set_author(name=f"{interaction.user.display_name} - ⭐ {score_display}/10")
+            embed.set_author(name=f"{interaction.user.display_name} - {format_stars(score_value)}")
 
             if result == "updated":
                 await interaction.followup.send(
@@ -806,15 +809,12 @@ def setup(bot):
 
             embeds = []
             for review in page_reviews:
-                score = review['score']
-                score_text = int(score) if score == int(score) else score
-
                 embed = discord.Embed(
                     title=f"📝 {self.movie_title} ({self.movie_year})",
                     description=review['review_text'],
                     color=0x9b59b6
                 )
-                embed.set_author(name=f"{review['username']} - ⭐ {score_text}/10")
+                embed.set_author(name=f"{review['username']} - {format_stars(review['score'])}")
                 embeds.append(embed)
 
             return embeds
@@ -870,14 +870,12 @@ def setup(bot):
             if len(reviews) <= ReviewPaginationView.REVIEWS_PER_PAGE:
                 embeds = []
                 for review in reviews:
-                    score = review['score']
-                    score_text = int(score) if score == int(score) else score
                     embed = discord.Embed(
                         title=f"📝 {self.movie_title} ({self.movie_year})",
                         description=review['review_text'],
                         color=0x9b59b6
                     )
-                    embed.set_author(name=f"{review['username']} - ⭐ {score_text}/10")
+                    embed.set_author(name=f"{review['username']} - {format_stars(review['score'])}")
                     embeds.append(embed)
                 await interaction.response.send_message(embeds=embeds)
             else:
@@ -907,7 +905,7 @@ def setup(bot):
         if user_review:
             embed = discord.Embed(
                 title=f"📝 Your existing review for {movie['title']} ({movie['year']})",
-                description=f"**Score:** {user_review['score']}/10\n\n{user_review['review_text']}",
+                description=f"**Score:** {format_stars(user_review['score'])}\n\n{user_review['review_text']}",
                 color=0xf39c12
             )
             embed.set_footer(text="Click 'Write Review' below to update your review")
@@ -937,15 +935,11 @@ def setup(bot):
         movie_title = review.get("movie_title", "Unknown Movie")
         movie_year = review.get("movie_year", "")
 
-        # Format score
-        score = review["score"]
-        score_text = int(score) if score == int(score) else score
-
         embed = discord.Embed(
             title=f"🎲 {movie_title} ({movie_year})",
             description=review["review_text"],
             color=0xe91e63
         )
-        embed.set_author(name=f"{review['username']} - ⭐ {score_text}/10")
+        embed.set_author(name=f"{review['username']} - {format_stars(review['score'])}")
 
         await interaction.followup.send(embed=embed)
