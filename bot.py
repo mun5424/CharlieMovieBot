@@ -209,7 +209,15 @@ class BotManager:
             except Exception as e:
                 self.logger.error(f"❌ Failed to load trivia season scheduler: {e}")
 
-            # Add other components here as needed
+            # Load USCIS case tracker (DMs bot owner on status changes)
+            try:
+                from services.uscis_tracker import setup_uscis_tracker
+                setup_uscis_tracker(self.bot)
+                self.logger.info("✅ USCIS case tracker loaded")
+            except ImportError:
+                self.logger.info("ℹ️ USCIS case tracker not available")
+            except Exception as e:
+                self.logger.warning(f"⚠️ USCIS case tracker not available: {e}")
 
         except Exception as e:
             self.logger.error(f"❌ Error loading additional components: {e}")
