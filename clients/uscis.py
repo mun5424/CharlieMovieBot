@@ -49,15 +49,18 @@ class UscisClient:
             if not self._token:
                 await self._refresh_auth_token()
 
+            url = f"{API_BASE}/case/{receipt}"
             headers = {
                 "Authorization": f"Bearer {self._token}",
                 "Accept": "application/json",
                 "Origin": "https://www.mycaseshub.com",
             }
 
+            logger.debug(f"[USCIS] GET {url} (token starts with: {self._token[:20]}...)")
+
             async with aiohttp.ClientSession() as session:
                 async with session.get(
-                    f"{API_BASE}/case/{receipt}",
+                    url,
                     headers=headers,
                     timeout=aiohttp.ClientTimeout(total=20),
                 ) as resp:
