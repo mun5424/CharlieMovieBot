@@ -56,7 +56,7 @@ class UscisClient:
                 "Origin": "https://www.mycaseshub.com",
             }
 
-            logger.debug(f"[USCIS] GET {url} (token starts with: {self._token[:20]}...)")
+            logger.info(f"[USCIS] GET {url} (token starts with: {self._token[:20] if self._token else 'None'}...)")
 
             async with aiohttp.ClientSession() as session:
                 async with session.get(
