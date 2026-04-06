@@ -81,9 +81,13 @@ async def poll_uscis_cases():
         try:
             data = await uscis_client.get_case_status(receipt)
 
-            # Extract status — adjust keys based on actual API response shape
-            current_status = data.get("case_status", data.get("status", "Unknown"))
-            detail = data.get("case_status_desc", data.get("description", ""))
+            # MyCasesHub response — may be nested under "data"
+            inner = data.get("data", data)
+            current_status = inner.get("caseStatus", inner.get("status", "Unknown"))
+            form_type = inner.get("formType", "")
+            detail = inner.get("description", inner.get("statusText", ""))
+            if form_type:
+                detail = f"**Form:** {form_type}\n{detail}"
 
             previous_status = await _get_last_status(receipt)
             await _save_status(receipt, current_status, detail)
