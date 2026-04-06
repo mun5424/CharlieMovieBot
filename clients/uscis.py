@@ -57,7 +57,7 @@ class UscisClient:
 
             async with aiohttp.ClientSession() as session:
                 async with session.get(
-                    f"{API_BASE}/cases/{receipt}",
+                    f"{API_BASE}/case/{receipt}",
                     headers=headers,
                     timeout=aiohttp.ClientTimeout(total=20),
                 ) as resp:
