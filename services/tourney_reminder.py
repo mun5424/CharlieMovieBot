@@ -450,10 +450,12 @@ async def check_custom_reminders():
             embed.add_field(name="🔗 **Sign Up Link:** ", value=reminder["link"], inline=False)
 
             if days_until == 3:
-                embed.set_footer(text="**TODAY WILL BE THE LAST DAY TO SIGN UP!** ")
+                footer = reminder.get("footer_3", "**TODAY WILL BE THE LAST DAY TO SIGN UP!** ")
+                embed.set_footer(text=footer)
 
             if days_until == 0:
-                embed.set_footer(text="**TOURNAMENT WILL START AT 7PM TODAY. LOCK IN 🔒** ")
+                footer = reminder.get("footer_0", "**TOURNAMENT WILL START AT 7PM TODAY. LOCK IN 🔒** ")
+                embed.set_footer(text=footer)
 
             for channel_id in config.TOURNEY_CHANNEL_IDS:
                 channel = bot_instance.get_channel(channel_id)
