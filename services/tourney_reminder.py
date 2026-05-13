@@ -66,6 +66,7 @@ def get_scheduled_time(hour: int, minute: int = 0) -> datetime.time:
 # Scheduled times (DST-aware with Python 3.9+)
 SCHEDULED_TIME_2PM = get_scheduled_time(14, 0)
 SCHEDULED_TIME_1PM = get_scheduled_time(13, 0)
+SCHEDULED_TIME_1045AM = get_scheduled_time(10, 45)
 SCHEDULED_TIME_11AM = get_scheduled_time(11, 0)
 
 
@@ -529,6 +530,189 @@ async def check_dodgers_game():
         import traceback
         logger.error(f"[Dodgers] Full traceback: {traceback.format_exc()}")
         return None  # Fixed the return value
+    
+
+# Habit burger double play deal 
+DODGERS_TEAM_ID = 119
+HABIT_PROMO_START = datetime.date(2026, 3, 26)
+HABIT_PROMO_END = datetime.date(2026, 9, 27)
+
+
+def _safe_int(value, default=0):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _is_final_game(game: dict) -> bool:
+    status = game.get("status", {})
+    return (
+        status.get("detailedState") == "Final"
+        or status.get("abstractGameState") == "Final"
+        or status.get("codedGameState") == "F"
+    )
+
+
+async def _fetch_mlb_live_feed(game_pk: int):
+    """Fetch MLB live feed/boxscore for a game."""
+    url = f"https://statsapi.mlb.com/api/v1.1/game/{game_pk}/feed/live"
+
+    session = await get_session()
+    async with session.get(url) as response:
+        if response.status != 200:
+            logger.error(f"[Habit] HTTP {response.status} fetching live feed for gamePk={game_pk}")
+            return None
+
+        return await response.json()
+
+
+def _count_dodgers_double_plays_from_live_feed(live_data: dict) -> int:
+    """
+    Count double plays turned by the Dodgers.
+
+    Since this promo only matters for Dodgers HOME games, Dodgers defense happens
+    in the TOP half of innings. Primary source is team fielding stats, with a
+    play-by-play fallback.
+    """
+    if not live_data:
+        return 0
+
+    # Primary: official boxscore team fielding stat
+    try:
+        fielding = (
+            live_data
+            .get("liveData", {})
+            .get("boxscore", {})
+            .get("teams", {})
+            .get("home", {})
+            .get("teamStats", {})
+            .get("fielding", {})
+        )
+
+        double_plays = _safe_int(fielding.get("doublePlays"), 0)
+        if double_plays > 0:
+            return double_plays
+    except Exception as e:
+        logger.warning(f"[Habit] Could not read boxscore doublePlays: {e}")
+
+    # Fallback: inspect play-by-play descriptions during top half innings
+    double_play_count = 0
+    all_plays = (
+        live_data
+        .get("liveData", {})
+        .get("plays", {})
+        .get("allPlays", [])
+    )
+
+    for play in all_plays:
+        about = play.get("about", {})
+        result = play.get("result", {})
+
+        # Dodgers are home, so they are fielding during top halves.
+        if about.get("halfInning") != "top":
+            continue
+
+        event_type = str(result.get("eventType", "")).lower()
+        event = str(result.get("event", "")).lower()
+        description = str(result.get("description", "")).lower()
+
+        if (
+            "double_play" in event_type
+            or "double play" in event
+            or "double play" in description
+        ):
+            double_play_count += 1
+
+    return double_play_count
+
+
+async def check_dodgers_double_play():
+    """
+    Check if the Dodgers turned at least one double play during a home regular-season game yesterday.
+
+    Returns:
+        int: number of double plays if there was a qualifying home game
+        0: home game happened, but no double play
+        None: no qualifying home game / promo out of date / unable to verify
+    """
+    try:
+        yesterday = datetime.datetime.now(PACIFIC_TZ) - datetime.timedelta(days=1)
+        yesterday_date = yesterday.date()
+        date_str = yesterday.strftime("%Y-%m-%d")
+
+        # Habit promo has an explicit 2026 regular-season window.
+        if not (HABIT_PROMO_START <= yesterday_date <= HABIT_PROMO_END):
+            logger.info(f"[Habit] {date_str} is outside Habit Dodgers promo window.")
+            return None
+
+        url = (
+            "https://statsapi.mlb.com/api/v1/schedule"
+            f"?sportId=1&teamId={DODGERS_TEAM_ID}"
+            f"&startDate={date_str}&endDate={date_str}"
+        )
+
+        session = await get_session()
+        async with session.get(url) as response:
+            if response.status != 200:
+                logger.error(f"[Habit] HTTP {response.status} from MLB schedule API")
+                return None
+
+            data = await response.json()
+
+        if not data.get("dates"):
+            logger.info(f"[Habit] No Dodgers games found for {date_str}")
+            return None
+
+        games = data["dates"][0].get("games", [])
+        saw_qualifying_home_game = False
+        total_double_plays = 0
+
+        for game in games:
+            teams = game.get("teams", {})
+            home_team_id = teams.get("home", {}).get("team", {}).get("id")
+            game_type = game.get("gameType")
+
+            # Habit requires Dodgers regular-season HOME game.
+            if home_team_id != DODGERS_TEAM_ID:
+                continue
+
+            if game_type != "R":
+                logger.info(f"[Habit] Dodgers home game on {date_str} was not regular season. gameType={game_type}")
+                continue
+
+            if not _is_final_game(game):
+                logger.info(f"[Habit] Dodgers home game on {date_str} is not final yet.")
+                continue
+
+            saw_qualifying_home_game = True
+
+            game_pk = game.get("gamePk")
+            if not game_pk:
+                logger.warning(f"[Habit] Missing gamePk for Dodgers home game on {date_str}")
+                continue
+
+            live_data = await _fetch_mlb_live_feed(game_pk)
+            double_plays = _count_dodgers_double_plays_from_live_feed(live_data)
+            total_double_plays += double_plays
+
+            logger.info(f"[Habit] Dodgers turned {double_plays} double play(s) on {date_str}, gamePk={game_pk}")
+
+        if not saw_qualifying_home_game:
+            logger.info(f"[Habit] No qualifying Dodgers regular-season home game on {date_str}")
+            return None
+
+        return total_double_plays
+
+    except aiohttp.ClientError as e:
+        logger.error(f"[Habit] Network error checking Dodgers double play: {e}")
+        return None
+    except Exception as e:
+        logger.error(f"[Habit] Unexpected error: {type(e).__name__}: {str(e)}")
+        import traceback
+        logger.error(f"[Habit] Full traceback: {traceback.format_exc()}")
+        return None
+    
 
 
 @tasks.loop(time=SCHEDULED_TIME_11AM)
@@ -589,11 +773,74 @@ async def check_dodgers_and_notify():
         logger.info("[Dodgers] No home games yesterday. No Panda Express deal to check.")
 
 
+# ping Habit burger deal at 10:45 AM
+@tasks.loop(time=SCHEDULED_TIME_1045AM)
+async def check_habit_and_notify():
+    """Check if Dodgers turned a double play at home yesterday and send Habit notification at 10:45 AM PT"""
+    if bot_instance is None:
+        logger.warning("[Habit] Bot instance not set. Cannot send notifications.")
+        return
+
+    today = datetime.datetime.now(PACIFIC_TZ).date()
+    logger.info(f"[Habit] Running daily check at 10:45 AM PT on {today}")
+
+    habit_double_plays = await check_dodgers_double_play()
+
+    if habit_double_plays and habit_double_plays > 0:
+        logger.info(f"[Habit] Double play confirmed! Sending Habit notifications. Count={habit_double_plays}")
+
+        double_play_text = "double play" if habit_double_plays == 1 else "double plays"
+
+        embed = discord.Embed(
+            title="🍔 HABIT BURGER DOUBLE PLAY DEAL TODAY! 🍔",
+            description=(
+                f"**The Dodgers turned {habit_double_plays} {double_play_text} at home last night!**\n"
+                "Use the MyHabit app to get a FREE Double Char with a qualifying $8+ purchase! ⚾"
+            ),
+            color=0x005A9C
+        )
+
+        embed.add_field(
+            name="🍔 **How to Redeem**",
+            value=(
+                "Use code `DODGERS26` in your MyHabit account to get a "
+                "**free Double Char with a qualifying $8+ purchase**.\n\n"
+                "Valid today only at participating LA-area Habit Burger locations."
+            ),
+            inline=False
+        )
+
+        embed.set_footer(text="Habit deal triggers after a Dodgers HOME double play, win or lose!")
+
+        habit_channel_ids = getattr(config, "HABIT_CHANNEL_IDS", config.PANDA_CHANNEL_IDS)
+        habit_channel_roles = getattr(config, "HABIT_CHANNEL_ROLES", config.PANDA_CHANNEL_ROLES)
+
+        for channel_id in habit_channel_ids:
+            channel = bot_instance.get_channel(channel_id)
+            if channel:
+                try:
+                    role_id = habit_channel_roles.get(channel_id)
+                    role_mention = f"<@&{role_id}>" if role_id else ""
+
+                    await channel.send(content=role_mention, embed=embed)
+                    logger.info(f"[Habit] Notification sent to channel {channel_id}")
+                except Exception as e:
+                    logger.error(f"[Habit] Error sending to channel {channel_id}: {e}")
+            else:
+                logger.warning(f"[Habit] Channel {channel_id} not found")
+
+    elif habit_double_plays == 0:
+        logger.info("[Habit] Dodgers had a qualifying home game yesterday, but no double plays.")
+    else:
+        logger.info("[Habit] No qualifying Habit Burger deal found for yesterday.")
+
+
 def setup_reminder(bot):
     global bot_instance
     bot_instance = bot
     check_todays_tournament.start()  # runs daily at 2 PM PT
     check_custom_reminders.start()   # runs daily at 1 PM PT
+    check_habit_and_notify.start()    # runs daily at 10:45 AM PT
     check_dodgers_and_notify.start()  # runs daily at 11 AM PT
 
     # Register cleanup handler for the shared session
