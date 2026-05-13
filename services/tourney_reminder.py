@@ -567,36 +567,49 @@ async def _fetch_mlb_live_feed(game_pk: int):
         return await response.json()
 
 
-def _count_dodgers_double_plays_from_live_feed(live_data: dict) -> int:
+def _count_dodgers_double_plays_from_live_feed(live_data: dict, dodgers_side: str = "home") -> int:
     """
     Count double plays turned by the Dodgers.
 
-    Since this promo only matters for Dodgers HOME games, Dodgers defense happens
-    in the TOP half of innings. Primary source is team fielding stats, with a
-    play-by-play fallback.
+    MLB boxscore JSON does not appear to expose teamStats.fielding.doublePlays.
+    Instead, use the opponent batting team's groundIntoDoublePlay as the primary boxscore signal.
+
+    For Dodgers home games:
+        Dodgers defense = away team's batting groundIntoDoublePlay
+
+    For Dodgers away games, if ever needed:
+        Dodgers defense = home team's batting groundIntoDoublePlay
     """
     if not live_data:
         return 0
 
-    # Primary: official boxscore team fielding stat
     try:
-        fielding = (
+        boxscore_teams = (
             live_data
             .get("liveData", {})
             .get("boxscore", {})
             .get("teams", {})
-            .get("home", {})
-            .get("teamStats", {})
-            .get("fielding", {})
         )
 
-        double_plays = _safe_int(fielding.get("doublePlays"), 0)
-        if double_plays > 0:
-            return double_plays
-    except Exception as e:
-        logger.warning(f"[Habit] Could not read boxscore doublePlays: {e}")
+        opponent_side = "away" if dodgers_side == "home" else "home"
 
-    # Fallback: inspect play-by-play descriptions during top half innings
+        opponent_batting = (
+            boxscore_teams
+            .get(opponent_side, {})
+            .get("teamStats", {})
+            .get("batting", {})
+        )
+
+        gidp = _safe_int(opponent_batting.get("groundIntoDoublePlay"), 0)
+
+        if gidp > 0:
+            return gidp
+
+    except Exception as e:
+        logger.warning(f"[Habit] Could not read opponent groundIntoDoublePlay: {e}")
+
+    # Fallback: inspect play-by-play descriptions.
+    # This can catch non-ground-ball double plays if MLB labels them clearly.
     double_play_count = 0
     all_plays = (
         live_data
@@ -605,12 +618,13 @@ def _count_dodgers_double_plays_from_live_feed(live_data: dict) -> int:
         .get("allPlays", [])
     )
 
+    target_half = "top" if dodgers_side == "home" else "bottom"
+
     for play in all_plays:
         about = play.get("about", {})
         result = play.get("result", {})
 
-        # Dodgers are home, so they are fielding during top halves.
-        if about.get("halfInning") != "top":
+        if about.get("halfInning") != target_half:
             continue
 
         event_type = str(result.get("eventType", "")).lower()
@@ -693,7 +707,7 @@ async def check_dodgers_double_play():
                 continue
 
             live_data = await _fetch_mlb_live_feed(game_pk)
-            double_plays = _count_dodgers_double_plays_from_live_feed(live_data)
+            double_plays = _count_dodgers_double_plays_from_live_feed(live_data, dodgers_side="home")
             total_double_plays += double_plays
 
             logger.info(f"[Habit] Dodgers turned {double_plays} double play(s) on {date_str}, gamePk={game_pk}")
