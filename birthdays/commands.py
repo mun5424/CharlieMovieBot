@@ -192,10 +192,20 @@ class BirthdayCog(commands.Cog):
 
 
 
-
 async def setup(bot: commands.Bot, db_path: str = "bot.db") -> None:
     store = BirthdayStore(db_path)
 
     await store.initialize()
-    await bot.add_cog(BirthdayCog(bot, store))
-    await bot.add_cog(BirthdayReminderCog(bot, store))
+
+    birthday_cog = BirthdayCog(bot, store)
+    reminder_cog = BirthdayReminderCog(bot, store)
+
+    await bot.add_cog(birthday_cog)
+    await bot.add_cog(reminder_cog)
+
+    print(
+        "[Birthday] Setup complete. "
+        f"BirthdayCog loaded={bot.get_cog('BirthdayCog') is not None} | "
+        f"BirthdayReminderCog loaded={bot.get_cog('BirthdayReminderCog') is not None} | "
+        f"Reminder task running={reminder_cog.announce_birthdays.is_running()}"
+    )
