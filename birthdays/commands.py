@@ -23,30 +23,40 @@ def format_birthday(month: int, day: int) -> str:
     return f"{calendar.month_name[month]} {day}"
 
 
-def parse_birthday(value: str) -> tuple[int, int]:
+def parse_birthday(month_value: str, day_value: str) -> tuple[int, int]:
     """
-    Parse an MM/DD birthday value.
+    Parse and validate birthday month/day values.
 
     The year 2000 is used for validation so February 29 is accepted.
     """
-    normalized = value.strip().replace("-", "/").replace(".", "/")
-    parts = normalized.split("/")
+    month_text = month_value.strip()
+    day_text = day_value.strip()
 
-    if len(parts) != 2:
-        raise ValueError("Birthday must use MM/DD format.")
+    if not month_text.isdigit() or not day_text.isdigit():
+        raise ValueError("Month and day must both be numbers.")
+
+    month = int(month_text)
+    day = int(day_text)
+
+    if not 1 <= month <= 12:
+        raise ValueError("Month must be between 1 and 12.")
+
+    if not 1 <= day <= 31:
+        raise ValueError("Day must be between 1 and 31.")
 
     try:
-        month = int(parts[0])
-        day = int(parts[1])
         datetime.date(2000, month, day)
     except ValueError as exc:
-        raise ValueError("Please enter a valid birthday in MM/DD format.") from exc
+        month_name = calendar.month_name[month]
+        raise ValueError(
+            f"{month_name} does not have a valid day {day}."
+        ) from exc
 
     return month, day
 
 
 class BirthdayModal(discord.ui.Modal):
-    """One-field birthday signup form."""
+    """Two-field birthday signup form."""
 
     def __init__(
         self,
@@ -57,28 +67,42 @@ class BirthdayModal(discord.ui.Modal):
 
         self.store = store
 
-        default_value = None
-        if existing is not None:
-            default_value = f"{existing.month:02d}/{existing.day:02d}"
+        default_month = str(existing.month) if existing is not None else None
+        default_day = str(existing.day) if existing is not None else None
 
-        self.birthday_input = discord.ui.TextInput(
-            label="Birthday",
-            placeholder="MM/DD, for example 05/27",
-            default=default_value,
-            min_length=3,
-            max_length=5,
+        self.month_input = discord.ui.TextInput(
+            label="Month (1-12)",
+            placeholder="Example: 5 for May",
+            default=default_month,
+            min_length=1,
+            max_length=2,
             required=True,
         )
 
-        self.add_item(self.birthday_input)
+        self.day_input = discord.ui.TextInput(
+            label="Day (1-31)",
+            placeholder="Example: 27",
+            default=default_day,
+            min_length=1,
+            max_length=2,
+            required=True,
+        )
+
+        self.add_item(self.month_input)
+        self.add_item(self.day_input)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         try:
-            month, day = parse_birthday(str(self.birthday_input.value))
-        except ValueError:
+            month, day = parse_birthday(
+                str(self.month_input.value),
+                str(self.day_input.value),
+            )
+        except ValueError as exc:
             await interaction.response.send_message(
-                "That date is not valid. Please run `/birthday` again and "
-                "enter your birthday as `MM/DD`, for example `05/27`.",
+                (
+                    f"❌ **Invalid birthday:** {exc}\n"
+                    "Please run `/birthday` again and enter a valid month and day."
+                ),
                 ephemeral=True,
             )
             return
