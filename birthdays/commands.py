@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import calendar
+import datetime
 
 import discord
 from discord import app_commands
@@ -13,119 +14,87 @@ from .reminder import BirthdayReminderCog
 
 
 def format_birthday(month: int, day: int) -> str:
+    """Format a stored birthday for display."""
     return f"{calendar.month_name[month]} {day}"
 
 
-class MonthSelect(discord.ui.Select):
-    def __init__(self, selected_month: int | None = None) -> None:
-        options = [
-            discord.SelectOption(
-                label=calendar.month_name[month],
-                value=str(month),
-                default=month == selected_month,
-            )
-            for month in range(1, 13)
-        ]
-        super().__init__(
-            placeholder="Choose your birth month…",
-            min_values=1,
-            max_values=1,
-            options=options,
-        )
+def parse_birthday(value: str) -> tuple[int, int]:
+    """
+    Parse an MM/DD birthday value.
 
-    async def callback(self, interaction: discord.Interaction) -> None:
-        assert isinstance(self.view, BirthdayPickerView)
-        await self.view.select_month(interaction, int(self.values[0]))
+    The year 2000 is used for validation so February 29 is accepted.
+    """
+    normalized = value.strip().replace("-", "/").replace(".", "/")
+    parts = normalized.split("/")
 
+    if len(parts) != 2:
+        raise ValueError("Birthday must use MM/DD format.")
 
-class DaySelect(discord.ui.Select):
-    def __init__(self, start_day: int, end_day: int) -> None:
-        options = [
-            discord.SelectOption(label=str(day), value=str(day))
-            for day in range(start_day, end_day + 1)
-        ]
-        super().__init__(
-            placeholder=f"Choose day {start_day}–{end_day}…",
-            min_values=1,
-            max_values=1,
-            options=options,
-        )
+    try:
+        month = int(parts[0])
+        day = int(parts[1])
+        datetime.date(2000, month, day)
+    except ValueError as exc:
+        raise ValueError("Please enter a valid birthday in MM/DD format.") from exc
 
-    async def callback(self, interaction: discord.Interaction) -> None:
-        assert isinstance(self.view, BirthdayPickerView)
-        await self.view.submit_birthday(interaction, int(self.values[0]))
+    return month, day
 
 
-class BirthdayPickerView(discord.ui.View):
+class BirthdayModal(discord.ui.Modal):
+    """One-field birthday signup form."""
+
     def __init__(
         self,
         store: BirthdayStore,
-        owner_id: int,
         existing: BirthdayRecord | None = None,
     ) -> None:
-        super().__init__(timeout=180)
+        super().__init__(title="Set your birthday", timeout=180)
+
         self.store = store
-        self.owner_id = owner_id
-        self.selected_month = existing.month if existing else None
-        self._render_controls()
 
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id == self.owner_id:
-            return True
+        default_value = None
+        if existing is not None:
+            default_value = f"{existing.month:02d}/{existing.day:02d}"
 
-        await interaction.response.send_message(
-            "This birthday picker belongs to another user.",
-            ephemeral=True,
-        )
-        return False
-
-    def _render_controls(self) -> None:
-        self.clear_items()
-        self.add_item(MonthSelect(self.selected_month))
-
-        if self.selected_month is None:
-            return
-
-        final_day = calendar.monthrange(2000, self.selected_month)[1]
-        self.add_item(DaySelect(1, min(15, final_day)))
-        if final_day > 15:
-            self.add_item(DaySelect(16, final_day))
-
-    async def select_month(self, interaction: discord.Interaction, month: int) -> None:
-        self.selected_month = month
-        self._render_controls()
-        await interaction.response.edit_message(
-            content=(
-                f"Month selected: **{calendar.month_name[month]}**. "
-                "Now choose the day below."
-            ),
-            view=self,
+        self.birthday_input = discord.ui.TextInput(
+            label="Birthday",
+            placeholder="MM/DD, for example 05/27",
+            default=default_value,
+            min_length=3,
+            max_length=5,
+            required=True,
         )
 
-    async def submit_birthday(self, interaction: discord.Interaction, day: int) -> None:
-        if self.selected_month is None:
+        self.add_item(self.birthday_input)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        try:
+            month, day = parse_birthday(str(self.birthday_input.value))
+        except ValueError:
             await interaction.response.send_message(
-                "Choose your birth month first.",
+                "That date is not valid. Please run `/birthday` again and "
+                "enter your birthday as `MM/DD`, for example `05/27`.",
                 ephemeral=True,
             )
             return
 
         updated = await self.store.upsert_birthday(
             interaction.user.id,
-            self.selected_month,
+            month,
             day,
         )
-        verb = "updated" if updated else "submitted"
-        birthday = format_birthday(self.selected_month, day)
-        self.stop()
 
-        await interaction.response.edit_message(
-            content=(
+        verb = "updated" if updated else "submitted"
+        birthday = format_birthday(month, day)
+
+        await interaction.response.send_message(
+            (
                 f"🎂 Your birthday has been {verb}: **{birthday}**.\n"
-                "Only one birthday is stored per user. Running `/birthday` again "
-                "will update your saved date."
+                "Only one birthday is stored per user. Running `/birthday` "
+                "again will update your saved date.\n\n"
+                "Your birthday will only be announced publicly on the saved date."
             ),
-            view=None,
+            ephemeral=True,
         )
 
 
@@ -134,27 +103,21 @@ class BirthdayCog(commands.Cog):
         self.bot = bot
         self.store = store
 
-    @app_commands.command(name="birthday", description="Set or update your birthday")
+    @app_commands.command(
+        name="birthday",
+        description="Set or update your birthday",
+    )
     async def birthday(self, interaction: discord.Interaction) -> None:
         existing = await self.store.get_birthday(interaction.user.id)
-        if existing is None:
-            prompt = "Pick your birthday. Your birth year is not stored."
-        else:
-            saved = format_birthday(existing.month, existing.day)
-            prompt = (
-                f"Your saved birthday is **{saved}**. "
-                "Pick a new date below to update it."
-            )
 
-        await interaction.response.send_message(
-            prompt,
-            view=BirthdayPickerView(self.store, interaction.user.id, existing),
-            ephemeral=True,
+        await interaction.response.send_modal(
+            BirthdayModal(self.store, existing)
         )
 
 
 async def setup(bot: commands.Bot, db_path: str = "bot.db") -> None:
     store = BirthdayStore(db_path)
+
     await store.initialize()
     await bot.add_cog(BirthdayCog(bot, store))
     await bot.add_cog(BirthdayReminderCog(bot, store))

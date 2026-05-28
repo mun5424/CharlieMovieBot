@@ -21,7 +21,7 @@ from .db import BirthdayStore
 logger = logging.getLogger(__name__)
 
 PACIFIC_TZ = ZoneInfo("America/Los_Angeles")
-BIRTHDAY_ANNOUNCEMENT_TIME = datetime.time(hour=18, minute=48, tzinfo=PACIFIC_TZ)
+BIRTHDAY_ANNOUNCEMENT_TIME = datetime.time(hour=19, minute=00, tzinfo=PACIFIC_TZ)
 BIRTHDAY_DEALS_FILE = Path(__file__).with_name("birthday_deals.json")
 
 
@@ -153,6 +153,13 @@ class BirthdayReminderCog(commands.Cog):
                 channel_id,
             )
 
+            logger.info(
+                "[Birthday] Channel %s has %s unannounced birthday(s) for %s.",
+                channel_id,
+                len(birthdays),
+                today,
+            )
+
             if not birthdays:
                 continue
 
@@ -274,10 +281,28 @@ class BirthdayReminderCog(commands.Cog):
     async def announce_birthdays(self) -> None:
         today = datetime.datetime.now(PACIFIC_TZ).date()
 
-        logger.info("[Birthday] Running 10 AM PT birthday check for %s.", today)
+        logger.info(
+            "[Birthday] Running scheduled birthday check for %s at %s PT.",
+            today,
+            BIRTHDAY_ANNOUNCEMENT_TIME.strftime("%I:%M %p"),
+        )
 
-        await self.send_birthdays_for_date(today)
+        sent_count = await self.send_birthdays_for_date(today)
 
+        logger.info(
+            "[Birthday] Birthday check complete for %s. Posted %s announcement(s).",
+            today,
+            sent_count,
+        )
+
+    @announce_birthdays.error
+    async def announce_birthdays_error(self, error: BaseException) -> None:
+        logger.error(
+            "[Birthday] Scheduled birthday task crashed: %s",
+            error,
+            exc_info=(type(error), error, error.__traceback__),
+        )
+        
     @announce_birthdays.before_loop
     async def before_announce_birthdays(self) -> None:
         await self.bot.wait_until_ready()
