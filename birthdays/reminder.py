@@ -21,7 +21,7 @@ from .db import BirthdayStore
 logger = logging.getLogger(__name__)
 
 PACIFIC_TZ = ZoneInfo("America/Los_Angeles")
-BIRTHDAY_ANNOUNCEMENT_TIME = datetime.time(hour=12, minute=23, tzinfo=PACIFIC_TZ)
+BIRTHDAY_ANNOUNCEMENT_TIME = datetime.time(hour=10, minute=0, tzinfo=PACIFIC_TZ)
 BIRTHDAY_DEALS_FILE = Path(__file__).with_name("birthday_deals.json")
 
 
@@ -273,10 +273,18 @@ class BirthdayReminderCog(commands.Cog):
                         ):
                             member = None
 
-                if member is not None:
-                    mention = member.mention
-                    display_name = member.display_name
-                    avatar_url = str(member.display_avatar.url)
+                if member is None:
+                    logger.info(
+                        "[Birthday] Skipping user %s in channel %s because they are not "
+                        "a member of that guild.",
+                        birthday.user_id,
+                        channel_id,
+                    )
+                    continue
+
+                mention = member.mention
+                display_name = member.display_name
+                avatar_url = str(member.display_avatar.url)
 
                 embed = build_birthday_embed(
                     display_name=display_name,
