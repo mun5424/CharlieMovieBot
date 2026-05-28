@@ -58,6 +58,7 @@ class BotManager:
             from trivia.trivia import TriviaCog
             from handhelds import commands as handhelds_commands
             from twitch import setup as twitch_setup
+            from birthdays import commands as birthday_commands
 
             # Load traditional commands
             general.setup(self.bot)
@@ -81,6 +82,11 @@ class BotManager:
             # Load handhelds cog
             await handhelds_commands.setup(self.bot)
             self.logger.info("✅ Handhelds cog loaded")
+
+            # Load birthday sign-up picker (uses bot.db for storage)
+            await birthday_commands.setup(self.bot, db_path="bot.db")
+            self.logger.info("✅ Birthday tracker loaded")
+
 
             # Load Twitch notifications (uses bot.db for storage)
             try:
