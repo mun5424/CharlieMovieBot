@@ -21,7 +21,7 @@ from .db import BirthdayStore
 logger = logging.getLogger(__name__)
 
 PACIFIC_TZ = ZoneInfo("America/Los_Angeles")
-BIRTHDAY_ANNOUNCEMENT_TIME = datetime.time(hour=10, minute=0, tzinfo=PACIFIC_TZ)
+BIRTHDAY_ANNOUNCEMENT_TIME = datetime.time(hour=11, minute=51, tzinfo=PACIFIC_TZ)
 BIRTHDAY_DEALS_FILE = Path(__file__).with_name("birthday_deals.json")
 
 
@@ -145,11 +145,18 @@ class BirthdayReminderCog(commands.Cog):
         self.bot = bot
         self.store = store
         self._send_lock = asyncio.Lock()
+        self._startup_log_task: asyncio.Task[None] | None = None
 
         self.announce_birthdays.start()
+        self._startup_log_task = asyncio.create_task(
+            self._log_schedule_after_ready()
+        )
 
     def cog_unload(self) -> None:
         self.announce_birthdays.cancel()
+
+        if self._startup_log_task is not None:
+            self._startup_log_task.cancel()
 
     async def _log_schedule_after_ready(self) -> None:
         await self.bot.wait_until_ready()
@@ -233,6 +240,7 @@ class BirthdayReminderCog(commands.Cog):
             for birthday in birthdays:
                 mention = f"<@{birthday.user_id}>"
                 display_name = "Birthday Demon"
+                avatar_url: str | None = None
 
                 guild = getattr(channel, "guild", None)
                 member: discord.Member | None = None
