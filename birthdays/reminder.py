@@ -21,7 +21,7 @@ from .db import BirthdayStore
 logger = logging.getLogger(__name__)
 
 PACIFIC_TZ = ZoneInfo("America/Los_Angeles")
-BIRTHDAY_ANNOUNCEMENT_TIME = datetime.time(hour=12, minute=19, tzinfo=PACIFIC_TZ)
+BIRTHDAY_ANNOUNCEMENT_TIME = datetime.time(hour=12, minute=20, tzinfo=PACIFIC_TZ)
 BIRTHDAY_DEALS_FILE = Path(__file__).with_name("birthday_deals.json")
 
 
@@ -187,7 +187,7 @@ class BirthdayReminderCog(commands.Cog):
             self.announce_birthdays.next_iteration,
         )
 
-        async def send_birthdays_for_date(
+    async def send_birthdays_for_date(
         self,
         today: datetime.date | None = None,
     ) -> int:
