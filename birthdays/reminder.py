@@ -93,12 +93,11 @@ def build_birthday_embed(
     safe_display_name = discord.utils.escape_markdown(display_name)
 
     embed = discord.Embed(
-        title=f"🎂 It's @{safe_display_name}'s Birthday Today! 🎂",
+        title=f"🎂 It's {safe_display_name}'s Birthday Today! 🎂",
         description=(
-            f"Let's take a moment to wish **@{safe_display_name}** "
+            f"Let's take a moment to wish **{safe_display_name}** "
             "a happy birthday!\n\n"
-            "🎉 **To celebrate, here are birthday deals "
-            "they can check out today!** 🎉"
+            "🎉 **To celebrate, here are your birthday deals today! ** 🎉"
         ),
         color=0xFF8FCB,
     )
@@ -113,28 +112,15 @@ def build_birthday_embed(
             inline=False,
         )
 
-        if second_group:
-            embed.add_field(
-                name="🍩 More Birthday Rewards",
-                value=format_deal_lines(second_group),
-                inline=False,
-            )
-
         embed.add_field(
-            name="Important eligibility note",
-            value=(
-                "*Eligibility varies. Some rewards require advance "
-                "signup, a prior purchase, a purchase on redemption, "
-                "or participating locations. Check the linked reward "
-                "program before heading out.*"
-            ),
+            value=format_deal_lines(second_group),
             inline=False,
         )
 
     embed.set_footer(
         text=(
-            "Sign up your birthday using /birthday • "
-            "The bot only announces birthdays on the saved date • "
+            "Sign up your birthday using /birthday. "
+            "The bot only announces birthdays on the saved date. "
             "Signup messages are visible only to you"
         )
     )
