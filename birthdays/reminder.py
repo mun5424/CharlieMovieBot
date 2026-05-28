@@ -103,17 +103,24 @@ def build_birthday_embed(
     )
 
     if birthday_deals:
-        first_group = birthday_deals[:6]
-        second_group = birthday_deals[6:]
+        first_group = birthday_deals[:5]
+        second_group = birthday_deals[5:]
 
         embed.add_field(
-            name="🍔 Birthday Meals & Treats",
+            name="🍔 Birthday Meals",
             value=format_deal_lines(first_group),
             inline=False,
         )
 
         embed.add_field(
+            name="🍭 Birthday Treats",
             value=format_deal_lines(second_group),
+            inline=False,
+        )
+        
+        embed.add_field(
+            name="🌟 Dont forget to check your restaurant apps for existing member rewards! ",
+            value="",
             inline=False,
         )
 

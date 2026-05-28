@@ -10,6 +10,41 @@
     "url": "https://www.redrobin.com/rewards"
   },
   {
+    "restaurant": "Jimmy John's",
+    "reward": "Regular sandwich",
+    "url": "https://www.jimmyjohns.com/rewards"
+  },
+  {
+    "restaurant": "TOGO'S",
+    "reward": "$10 birthday reward*",
+    "url": "https://togos.com/rewards/"
+  },
+  {
+    "restaurant": "Firehouse Subs",
+    "reward": "Medium sub with $1 purchase",
+    "url": "https://www.firehousesubs.com/firehouse-rewards"
+  },
+  {
+    "restaurant": "Chick-fil-A",
+    "reward": "Cookie or brownie for base members",
+    "url": "https://www.chick-fil-a.com/customer-support/chick-fil-a-one-membership-program/creating-and-managing-your-account/what-is-the-birthday-reward-for-each-membership-tier"
+  },
+  {
+    "restaurant": "Chipotle",
+    "reward": "Chips, guac, queso, or fountain drink",
+    "url": "https://www.chipotle.com/rewards"
+  },
+  {
+    "restaurant": "Krispy Kreme",
+    "reward": "free glazed donut or a set of small donuts",
+    "url": "https://www.krispykreme.com/account/create-account"
+  },
+  {
+    "restaurant": "BJ's Restaurant & Brewhouse",
+    "reward": "Free Pizookie®",
+    "url": "https://www.bjsrestaurants.com/rewards"
+  },
+  {
     "restaurant": "Olive Garden",
     "reward": "Complimentary dessert when dining in",
     "url": "https://www.olivegarden.com/customer-service/join-eclub"
@@ -20,43 +55,8 @@
     "url": "https://lucillesbbq.com/eclub"
   },
   {
-    "restaurant": "TOGO'S",
-    "reward": "$10 birthday reward*",
-    "url": "https://togos.com/rewards/"
-  },
-  {
-    "restaurant": "BJ's Restaurant & Brewhouse",
-    "reward": "Free Pizookie®",
-    "url": "https://www.bjsrestaurants.com/rewards"
-  },
-  {
     "restaurant": "Del Taco",
     "reward": "Regular-sized shake with purchase",
     "url": "https://deltaco.com/delyeahrewards.html"
-  },
-  {
-    "restaurant": "Chick-fil-A",
-    "reward": "Cookie or brownie for base members",
-    "url": "https://www.chick-fil-a.com/customer-support/chick-fil-a-one-membership-program/creating-and-managing-your-account/what-is-the-birthday-reward-for-each-membership-tier"
-  },
-  {
-    "restaurant": "Firehouse Subs",
-    "reward": "Medium sub with $1 purchase",
-    "url": "https://www.firehousesubs.com/firehouse-rewards"
-  },
-  {
-    "restaurant": "Chipotle",
-    "reward": "Chips, guac, queso, or fountain drink",
-    "url": "https://www.chipotle.com/rewards"
-  },
-  {
-    "restaurant": "Jimmy John's",
-    "reward": "Regular sandwich",
-    "url": "https://www.jimmyjohns.com/rewards"
-  },
-  {
-    "restaurant": "Krispy Kreme",
-    "reward": "Birthday reward — check account for current offer",
-    "url": "https://www.krispykreme.com/account/create-account"
   }
 ]
