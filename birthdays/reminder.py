@@ -21,7 +21,7 @@ from .db import BirthdayStore
 logger = logging.getLogger(__name__)
 
 PACIFIC_TZ = ZoneInfo("America/Los_Angeles")
-BIRTHDAY_ANNOUNCEMENT_TIME = datetime.time(hour=12, minute=13, tzinfo=PACIFIC_TZ)
+BIRTHDAY_ANNOUNCEMENT_TIME = datetime.time(hour=12, minute=19, tzinfo=PACIFIC_TZ)
 BIRTHDAY_DEALS_FILE = Path(__file__).with_name("birthday_deals.json")
 
 
@@ -120,7 +120,7 @@ def build_birthday_embed(
         
         embed.add_field(
             name="🌟 Dont forget to check your restaurant apps for existing member rewards! ",
-            value="",
+            value="You might have already signed up for a number of them. ",
             inline=False,
         )
 
@@ -187,6 +187,141 @@ class BirthdayReminderCog(commands.Cog):
             self.announce_birthdays.next_iteration,
         )
 
+        async def send_birthdays_for_date(
+        self,
+        today: datetime.date | None = None,
+    ) -> int:
+        """Send birthdays due today and return the number of member pings posted."""
+        today = today or datetime.datetime.now(PACIFIC_TZ).date()
+
+        async with self._send_lock:
+            return await self._send_birthdays_locked(today)
+
+    async def _send_birthdays_locked(self, today: datetime.date) -> int:
+        channel_ids = getattr(config, "BIRTHDAY_CHANNEL_IDS", [])
+
+        if not channel_ids:
+            logger.warning(
+                "[Birthday] No BIRTHDAY_CHANNEL_IDS configured; skipping %s.",
+                today,
+            )
+            return 0
+
+        birthday_deals = load_birthday_deals()
+
+        if not birthday_deals:
+            logger.warning(
+                "[Birthday] No valid birthday deals loaded; "
+                "birthday announcements will still be posted without deals."
+            )
+
+        sent_members = 0
+
+        for channel_id in channel_ids:
+            channel = self.bot.get_channel(channel_id)
+
+            if channel is None:
+                try:
+                    channel = await self.bot.fetch_channel(channel_id)
+                except (
+                    discord.NotFound,
+                    discord.Forbidden,
+                    discord.HTTPException,
+                ) as exc:
+                    logger.warning(
+                        "[Birthday] Cannot access channel %s: %s",
+                        channel_id,
+                        exc,
+                    )
+                    continue
+
+            birthdays = await self.store.get_unannounced_birthdays(
+                today.month,
+                today.day,
+                today,
+                channel_id,
+            )
+
+            logger.warning(
+                "[Birthday] Channel %s has %s unannounced birthday(s) for %s.",
+                channel_id,
+                len(birthdays),
+                today,
+            )
+
+            if not birthdays:
+                continue
+
+            for birthday in birthdays:
+                mention = f"<@{birthday.user_id}>"
+                display_name = "Birthday Demon"
+                avatar_url: str | None = None
+
+                guild = getattr(channel, "guild", None)
+                member: discord.Member | None = None
+
+                if guild is not None:
+                    member = guild.get_member(birthday.user_id)
+
+                    if member is None:
+                        try:
+                            member = await guild.fetch_member(birthday.user_id)
+                        except (
+                            discord.NotFound,
+                            discord.Forbidden,
+                            discord.HTTPException,
+                        ):
+                            member = None
+
+                if member is not None:
+                    mention = member.mention
+                    display_name = member.display_name
+                    avatar_url = str(member.display_avatar.url)
+
+                embed = build_birthday_embed(
+                    display_name=display_name,
+                    birthday_deals=birthday_deals,
+                    avatar_url=avatar_url,
+                )
+
+                try:
+                    await channel.send(
+                        content=mention,
+                        embed=embed,
+                        allowed_mentions=discord.AllowedMentions(
+                            users=True,
+                            roles=False,
+                            everyone=False,
+                        ),
+                    )
+
+                    await self.store.mark_announced(
+                        today,
+                        channel_id,
+                        [birthday.user_id],
+                    )
+
+                    sent_members += 1
+
+                    logger.warning(
+                        "[Birthday] Posted birthday ping for user %s "
+                        "in channel %s for %s.",
+                        birthday.user_id,
+                        channel_id,
+                        today,
+                    )
+
+                except discord.HTTPException as exc:
+                    logger.error(
+                        "[Birthday] Failed posting birthday for user %s "
+                        "in channel %s: %s",
+                        birthday.user_id,
+                        channel_id,
+                        exc,
+                    )
+
+        return sent_members
+
     @tasks.loop(time=BIRTHDAY_ANNOUNCEMENT_TIME)
     async def announce_birthdays(self) -> None:
         now = datetime.datetime.now(PACIFIC_TZ)
@@ -203,4 +338,12 @@ class BirthdayReminderCog(commands.Cog):
         logger.warning(
             "[Birthday] Scheduled task completed. Sent %s birthday announcement(s).",
             sent_count,
+        )
+
+    @announce_birthdays.error
+    async def announce_birthdays_error(self, error: BaseException) -> None:
+        logger.error(
+            "[Birthday] Scheduled birthday task crashed: %s",
+            error,
+            exc_info=(type(error), error, error.__traceback__),
         )
