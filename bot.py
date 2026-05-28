@@ -195,6 +195,17 @@ class BotManager:
             except Exception as e:
                 self.logger.warning(f"⚠️ Failed to pre-warm IGDB session: {e}")
 
+            # Load birthday reminder scheduler after bot is ready
+            try:
+                from birthdays.commands import setup_reminder as setup_birthday_reminder
+
+                await setup_birthday_reminder(self.bot, db_path="bot.db")
+                self.logger.info("✅ Birthday reminder scheduler loaded")
+            except ImportError:
+                self.logger.info("ℹ️ Birthday reminder scheduler not available")
+            except Exception as e:
+                self.logger.error(f"❌ Failed to load birthday reminder scheduler: {e}")
+
             # Load tournament reminder if available
             try:
                 from services.tourney_reminder import setup_reminder

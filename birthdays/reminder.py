@@ -21,7 +21,7 @@ from .db import BirthdayStore
 logger = logging.getLogger(__name__)
 
 PACIFIC_TZ = ZoneInfo("America/Los_Angeles")
-BIRTHDAY_ANNOUNCEMENT_TIME = datetime.time(hour=12, minute=6, tzinfo=PACIFIC_TZ)
+BIRTHDAY_ANNOUNCEMENT_TIME = datetime.time(hour=12, minute=13, tzinfo=PACIFIC_TZ)
 BIRTHDAY_DEALS_FILE = Path(__file__).with_name("birthday_deals.json")
 
 
@@ -176,19 +176,11 @@ class BirthdayReminderCog(commands.Cog):
             self._startup_log_task.cancel()
 
     async def _log_schedule_after_ready(self) -> None:
-        logger.warning(
-            "[Birthday] Startup logger waiting for Discord ready state. "
-            "bot_ready=%s",
-            self.bot.is_ready(),
-        )
-
-        await self.bot.wait_until_ready()
+        await asyncio.sleep(1)
 
         logger.warning(
-            "[Birthday] Startup logger passed Discord ready state. "
-            "bot_ready=%s | current_pt=%s | configured_time=%s | "
-            "task_running=%s | next_iteration=%s",
-            self.bot.is_ready(),
+            "[Birthday] Reminder cog loaded. Current PT time=%s | "
+            "configured time=%s | task_running=%s | next_iteration=%s",
             datetime.datetime.now(PACIFIC_TZ).isoformat(),
             BIRTHDAY_ANNOUNCEMENT_TIME.isoformat(),
             self.announce_birthdays.is_running(),
@@ -211,21 +203,4 @@ class BirthdayReminderCog(commands.Cog):
         logger.warning(
             "[Birthday] Scheduled task completed. Sent %s birthday announcement(s).",
             sent_count,
-        )
-
-    @announce_birthdays.before_loop
-    async def before_announce_birthdays(self) -> None:
-        logger.warning(
-            "[Birthday] announce_birthdays before_loop entered. "
-            "Waiting for Discord ready state. bot_ready=%s",
-            self.bot.is_ready(),
-        )
-
-        await self.bot.wait_until_ready()
-
-        logger.warning(
-            "[Birthday] announce_birthdays before_loop passed. "
-            "bot_ready=%s | next_iteration=%s",
-            self.bot.is_ready(),
-            self.announce_birthdays.next_iteration,
         )
