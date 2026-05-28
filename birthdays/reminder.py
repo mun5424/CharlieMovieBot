@@ -21,7 +21,7 @@ from .db import BirthdayStore
 logger = logging.getLogger(__name__)
 
 PACIFIC_TZ = ZoneInfo("America/Los_Angeles")
-BIRTHDAY_ANNOUNCEMENT_TIME = datetime.time(hour=12, minute=05, tzinfo=PACIFIC_TZ)
+BIRTHDAY_ANNOUNCEMENT_TIME = datetime.time(hour=12, minute=6, tzinfo=PACIFIC_TZ)
 BIRTHDAY_DEALS_FILE = Path(__file__).with_name("birthday_deals.json")
 
 
