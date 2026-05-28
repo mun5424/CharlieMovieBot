@@ -6,11 +6,16 @@ import calendar
 import datetime
 
 import discord
+import config
 from discord import app_commands
 from discord.ext import commands
 
 from .db import BirthdayRecord, BirthdayStore
-from .reminder import BirthdayReminderCog
+from .reminder import (
+    BirthdayReminderCog,
+    build_birthday_embed,
+    load_birthday_deals,
+)
 
 
 def format_birthday(month: int, day: int) -> str:
@@ -113,6 +118,55 @@ class BirthdayCog(commands.Cog):
         await interaction.response.send_modal(
             BirthdayModal(self.store, existing)
         )
+
+
+    @app_commands.command(
+        name="birthdaytest",
+        description="Preview the birthday announcement embed",
+    )
+    @app_commands.guild_only()
+    async def birthdaytest(self, interaction: discord.Interaction) -> None:
+        admin_user_id = getattr(config, "BIRTHDAY_ADMIN_USER_ID", None)
+
+        if admin_user_id is None:
+            await interaction.response.send_message(
+                "Birthday test command is not configured. "
+                "Set `BIRTHDAY_ADMIN_USER_ID` in `config.py`.",
+                ephemeral=True,
+            )
+            return
+
+        if interaction.user.id != int(admin_user_id):
+            await interaction.response.send_message(
+                "You do not have access to this command.",
+                ephemeral=True,
+            )
+            return
+
+        birthday_deals = load_birthday_deals()
+        display_name = getattr(
+            interaction.user,
+            "display_name",
+            interaction.user.name,
+        )
+
+        embed = build_birthday_embed(
+            display_name=display_name,
+            birthday_deals=birthday_deals,
+            avatar_url=str(interaction.user.display_avatar.url),
+        )
+
+        await interaction.response.send_message(
+            content=(
+                f"{interaction.user.mention} "
+                "*(preview only — no public ping was sent)*"
+            ),
+            embed=embed,
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+
 
 
 async def setup(bot: commands.Bot, db_path: str = "bot.db") -> None:

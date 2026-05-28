@@ -21,7 +21,7 @@ from .db import BirthdayStore
 logger = logging.getLogger(__name__)
 
 PACIFIC_TZ = ZoneInfo("America/Los_Angeles")
-BIRTHDAY_ANNOUNCEMENT_TIME = datetime.time(hour=19, minute=13, tzinfo=PACIFIC_TZ)
+BIRTHDAY_ANNOUNCEMENT_TIME = datetime.time(hour=10, minute=0, tzinfo=PACIFIC_TZ)
 BIRTHDAY_DEALS_FILE = Path(__file__).with_name("birthday_deals.json")
 
 
@@ -82,6 +82,67 @@ def format_deal_lines(deals: list[dict[str, str]]) -> str:
         f"• **{deal['restaurant']}** — [{deal['reward']}]({deal['url']})"
         for deal in deals
     )
+
+
+def build_birthday_embed(
+    display_name: str,
+    birthday_deals: list[dict[str, str]],
+    avatar_url: str | None = None,
+) -> discord.Embed:
+    """Build the public birthday celebration embed or an ephemeral preview."""
+    safe_display_name = discord.utils.escape_markdown(display_name)
+
+    embed = discord.Embed(
+        title=f"🎂 It's @{safe_display_name}'s Birthday Today! 🎂",
+        description=(
+            f"Let's take a moment to wish **@{safe_display_name}** "
+            "a happy birthday!\n\n"
+            "🎉 **To celebrate, here are birthday deals "
+            "they can check out today!** 🎉"
+        ),
+        color=0xFF8FCB,
+    )
+
+    if birthday_deals:
+        first_group = birthday_deals[:6]
+        second_group = birthday_deals[6:]
+
+        embed.add_field(
+            name="🍔 Birthday Meals & Treats",
+            value=format_deal_lines(first_group),
+            inline=False,
+        )
+
+        if second_group:
+            embed.add_field(
+                name="🍩 More Birthday Rewards",
+                value=format_deal_lines(second_group),
+                inline=False,
+            )
+
+        embed.add_field(
+            name="Important eligibility note",
+            value=(
+                "*Eligibility varies. Some rewards require advance "
+                "signup, a prior purchase, a purchase on redemption, "
+                "or participating locations. Check the linked reward "
+                "program before heading out.*"
+            ),
+            inline=False,
+        )
+
+    embed.set_footer(
+        text=(
+            "Sign up your birthday using /birthday • "
+            "The bot only announces birthdays on the saved date • "
+            "Signup messages are visible only to you"
+        )
+    )
+
+    if avatar_url is not None:
+        embed.set_thumbnail(url=avatar_url)
+
+    return embed
 
 
 class BirthdayReminderCog(commands.Cog):
@@ -198,59 +259,14 @@ class BirthdayReminderCog(commands.Cog):
 
                 if member is not None:
                     mention = member.mention
-                    display_name = discord.utils.escape_markdown(
-                        member.display_name
-                    )
+                    display_name = member.display_name
+                    avatar_url = str(member.display_avatar.url)
 
-                embed = discord.Embed(
-                    title=f"🎂 It's @{display_name}'s Birthday Today! 🎂",
-                    description=(
-                        f"Let's take a moment to wish **@{display_name}** "
-                        "a happy birthday!\n\n"
-                        "🎉 **To celebrate, here are birthday deals "
-                        "they can check out today!** 🎉"
-                    ),
-                    color=0xFF8FCB,
+                embed = build_birthday_embed(
+                    display_name=display_name,
+                    birthday_deals=birthday_deals,
+                    avatar_url=avatar_url,
                 )
-
-                if birthday_deals:
-                    first_group = birthday_deals[:6]
-                    second_group = birthday_deals[6:]
-
-                    embed.add_field(
-                        name="🍔 Birthday Meals & Treats",
-                        value=format_deal_lines(first_group),
-                        inline=False,
-                    )
-
-                    if second_group:
-                        embed.add_field(
-                            name="🍩 More Birthday Rewards",
-                            value=format_deal_lines(second_group),
-                            inline=False,
-                        )
-
-                    embed.add_field(
-                        name="Important eligibility note",
-                        value=(
-                            "*Eligibility varies. Some rewards require advance "
-                            "signup, a prior purchase, a purchase on redemption, "
-                            "or participating locations. Check the linked reward "
-                            "program before heading out.*"
-                        ),
-                        inline=False,
-                    )
-
-                embed.set_footer(
-                    text=(
-                        "Sign up your birthday using /birthday • "
-                        "The bot only announces birthdays on the saved date • "
-                        "Signup messages are visible only to you"
-                    )
-                )
-
-                if member is not None:
-                    embed.set_thumbnail(url=member.display_avatar.url)
 
                 try:
                     await channel.send(
