@@ -21,7 +21,7 @@ from .db import BirthdayStore
 logger = logging.getLogger(__name__)
 
 PACIFIC_TZ = ZoneInfo("America/Los_Angeles")
-BIRTHDAY_ANNOUNCEMENT_TIME = datetime.time(hour=19, minute=4, tzinfo=PACIFIC_TZ)
+BIRTHDAY_ANNOUNCEMENT_TIME = datetime.time(hour=19, minute=13, tzinfo=PACIFIC_TZ)
 BIRTHDAY_DEALS_FILE = Path(__file__).with_name("birthday_deals.json")
 
 
@@ -96,6 +96,19 @@ class BirthdayReminderCog(commands.Cog):
 
     def cog_unload(self) -> None:
         self.announce_birthdays.cancel()
+
+    async def _log_schedule_after_ready(self) -> None:
+        await self.bot.wait_until_ready()
+        await asyncio.sleep(1)
+
+        logger.warning(
+            "[Birthday] Reminder cog loaded. Current PT time=%s | "
+            "configured time=%s | task_running=%s | next_iteration=%s",
+            datetime.datetime.now(PACIFIC_TZ).isoformat(),
+            BIRTHDAY_ANNOUNCEMENT_TIME.isoformat(),
+            self.announce_birthdays.is_running(),
+            self.announce_birthdays.next_iteration,
+        )
 
     async def send_birthdays_for_date(
         self,
@@ -279,19 +292,19 @@ class BirthdayReminderCog(commands.Cog):
 
     @tasks.loop(time=BIRTHDAY_ANNOUNCEMENT_TIME)
     async def announce_birthdays(self) -> None:
-        today = datetime.datetime.now(PACIFIC_TZ).date()
+        now = datetime.datetime.now(PACIFIC_TZ)
+        today = now.date()
 
-        logger.info(
-            "[Birthday] Running scheduled birthday check for %s at %s PT.",
+        logger.warning(
+            "[Birthday] Scheduled task fired at %s PT for %s.",
+            now.strftime("%I:%M:%S %p"),
             today,
-            BIRTHDAY_ANNOUNCEMENT_TIME.strftime("%I:%M %p"),
         )
 
         sent_count = await self.send_birthdays_for_date(today)
 
-        logger.info(
-            "[Birthday] Birthday check complete for %s. Posted %s announcement(s).",
-            today,
+        logger.warning(
+            "[Birthday] Scheduled task completed. Sent %s birthday announcement(s).",
             sent_count,
         )
 
