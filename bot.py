@@ -59,6 +59,7 @@ class BotManager:
             from handhelds import commands as handhelds_commands
             from twitch import setup as twitch_setup
             from birthdays import commands as birthday_commands
+            from blackjack import cog as blackjack_commands 
 
             # Load traditional commands
             general.setup(self.bot)
@@ -87,6 +88,9 @@ class BotManager:
             await birthday_commands.setup(self.bot, db_path="bot.db")
             self.logger.info("✅ Birthday tracker loaded")
 
+            # Load blackjack game
+            await blackjack_commands.setup(self.bot, db_path="bot.db")
+            self.logger.info("✅ Blackjack loaded")
 
             # Load Twitch notifications (uses bot.db for storage)
             try:

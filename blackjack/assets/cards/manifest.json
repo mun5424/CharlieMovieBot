@@ -1,0 +1,30 @@
+{
+  "format": "RankSuit.png",
+  "examples": [
+    "AS.png",
+    "10H.png",
+    "JD.png",
+    "KC.png"
+  ],
+  "suits": {
+    "S": "spades",
+    "H": "hearts",
+    "D": "diamonds",
+    "C": "clubs"
+  },
+  "rank_mapping": {
+    "1": "A",
+    "11": "J",
+    "12": "Q",
+    "13": "K"
+  },
+  "default_back": "back.png",
+  "included_extras": {
+    "Back-B.png": "blackjack/assets/cards/back.png",
+    "Back-R.png": "blackjack/assets/cards/back_red.png",
+    "X-B.png": "blackjack/assets/cards/joker_black.png",
+    "X-R.png": "blackjack/assets/cards/joker_red.png"
+  },
+  "renamed_cards_count": 52,
+  "total_png_count": 56
+}
