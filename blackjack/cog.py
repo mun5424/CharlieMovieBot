@@ -74,7 +74,7 @@ def timeout_for_game(game: BlackjackGame | None) -> int:
 def timeout_text_for_game(game: BlackjackGame) -> str:
     if game.phase == "insurance":
         return f"Auto-skips insurance in {INSURANCE_TIMEOUT_SECONDS} seconds."
-    return 
+    return ""
 
 
 class BlackjackView(discord.ui.View):
@@ -444,7 +444,7 @@ class BlackjackCog(commands.Cog):
             elif game.phase == "finished":
                 note_parts.append(await self.settle_finished_game(interaction.user.id, game))
             else:
-                note_parts.append(f"Choose an action. Auto-stands in {PLAYER_ACTION_TIMEOUT_SECONDS} seconds.")
+                note_parts.append(f"Choose an action.")
 
             embed, file, view = await self.build_response(key, note=" ".join(note_parts))
             # discord.py's send_message/followup.send treat an explicitly-passed
