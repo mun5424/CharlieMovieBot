@@ -372,6 +372,14 @@ class BlackjackCog(commands.Cog):
             existing_game = await self.load_active_game(key)
             refund_note = self.pop_corrupt_refund_note(key)
             if existing_game and existing_game.phase == "finished":
+                # Best-effort: if that hand's final edit_message/table_message.edit
+                # never went through (e.g. a transient Discord API failure), its
+                # message may still show live buttons even though the hand is fully
+                # settled. Strip them now, in the background, so that old message
+                # can't later be clicked and mistaken for a still-active hand once
+                # this new one takes over the key. Fire-and-forget so a slow/failed
+                # Discord call here never delays this interaction's own response.
+                asyncio.create_task(self.disable_stale_message(key, existing_game))
                 await self.cleanup_game_and_db(key)
                 existing_game = None
 
@@ -525,7 +533,16 @@ class BlackjackCog(commands.Cog):
             await self.save_active_game(key)
             embed, file, view = await self.build_response(key, note=note)
             finished = game.phase == "finished"
-            await interaction.response.edit_message(embed=embed, attachments=[file], view=view)
+            try:
+                await interaction.response.edit_message(embed=embed, attachments=[file], view=view)
+            except discord.HTTPException as exc:
+                print(f"Blackjack action edit failed for key={key}: {exc}")
+                # The action itself was already applied and saved above (and, if
+                # finished, already settled/paid out) - only the Discord-side
+                # confirmation failed. Leave the game in memory (uncleaned) so the
+                # next click on this same message can recover and render the real
+                # state, matching handle_timeout's recovery behavior below.
+                return
             if interaction.message:
                 game.message_id = interaction.message.id
             if view and interaction.message:
@@ -562,6 +579,28 @@ class BlackjackCog(commands.Cog):
         self.game_messages[key] = fetched
         return fetched
 
+    async def disable_stale_message(self, key: tuple[int, int], game: BlackjackGame) -> None:
+        """Best-effort: strip buttons from a finished hand's message in case its real
+        final edit never went through. Runs detached (fire-and-forget) after a new
+        hand may already have taken over `key`, so this deliberately never touches
+        self.game_messages/self.games - it only knows the old game's channel/message
+        ids, fetched directly, to avoid clobbering the new hand's cached message."""
+        if not game.channel_id or not game.message_id:
+            return
+
+        channel = self.bot.get_channel(game.channel_id)
+        if channel is None:
+            try:
+                channel = await self.bot.fetch_channel(game.channel_id)
+            except (discord.HTTPException, discord.ClientException):
+                return
+
+        try:
+            message = await channel.fetch_message(game.message_id)
+            await message.edit(view=None)
+        except (discord.HTTPException, AttributeError):
+            pass
+
     async def handle_shortcut_action(self, message: discord.Message, key: tuple[int, int], action: str) -> None:
         async with self.lock_for(key):
             game = await self.load_active_game(key)
@@ -589,7 +628,14 @@ class BlackjackCog(commands.Cog):
 
             embed, file, view = await self.build_response(key, note=note)
             finished = game.phase == "finished"
-            await table_message.edit(embed=embed, attachments=[file], view=view)
+            try:
+                await table_message.edit(embed=embed, attachments=[file], view=view)
+            except discord.HTTPException as exc:
+                print(f"Blackjack shortcut edit failed for key={key}: {exc}")
+                # Same as handle_action: the action was already applied and saved
+                # above, so leave the game recoverable via the next click instead of
+                # desyncing the message from the real, already-persisted state.
+                return
             game.message_id = table_message.id
             if view:
                 view.message = table_message
