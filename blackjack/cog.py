@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import random
 from datetime import datetime
 from pathlib import Path
@@ -15,6 +16,8 @@ from .db import BlackjackDB
 from .game import BlackjackGame, PlayerHand
 from .renderer import CardRenderer, money
 from .shoe import MIN_CARDS_TO_START_HAND, RESHUFFLE_AT_REMAINING_CARDS, SingleDeckShoe
+
+logger = logging.getLogger(__name__)
 
 MIN_BET_CENTS = 1_000
 DAILY_BONUS_CENTS = 10_000
@@ -93,6 +96,36 @@ class BlackjackView(discord.ui.View):
             await interaction.response.send_message("This blackjack hand belongs to someone else.", ephemeral=True)
             return False
         return True
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception, item: discord.ui.Item) -> None:
+        # discord.py's default View.on_error only prints to stderr, which this bot's
+        # logging setup does not capture into logs/bot.log (only the `logging` module
+        # output is captured there). Route it through `logging` so button-click
+        # failures are actually visible, and try to leave the user with a response
+        # instead of a silently-failed interaction.
+        game = self.cog.games.get(self.key)
+        logger.exception(
+            "Blackjack button error: key=%s item=%s message_id=%s game_message_id=%s game_phase=%s",
+            self.key,
+            getattr(item, "label", item),
+            getattr(interaction.message, "id", None),
+            getattr(game, "message_id", None),
+            getattr(game, "phase", None),
+            exc_info=error,
+        )
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    "Something went wrong handling that click. Please try again or start a new hand with `/blackjack`.",
+                    ephemeral=True,
+                )
+            else:
+                await interaction.followup.send(
+                    "Something went wrong handling that click. Please try again or start a new hand with `/blackjack`.",
+                    ephemeral=True,
+                )
+        except discord.HTTPException:
+            pass
 
     def sync_buttons(self, balance_cents: int) -> None:
         game = self.cog.games.get(self.key)
@@ -293,7 +326,7 @@ class BlackjackCog(commands.Cog):
         try:
             game = self.game_from_active_state(state)
         except Exception as exc:
-            print(f"Blackjack active-game state could not be restored for key={key}: {exc}")
+            logger.error("Blackjack active-game state could not be restored for key=%s: %s", key, exc, exc_info=exc)
             await self.delete_active_game_for_key(key)
             await self.refund_unrestorable_game(key, state)
             return None
@@ -323,7 +356,7 @@ class BlackjackCog(commands.Cog):
         if staked > 0:
             await self.db.add_balance(user_id, staked, "blackjack_corrupt_state_refund")
             self.corrupt_state_refunds[key] = staked
-            print(f"Blackjack refunded {staked} cents to user_id={user_id} after unrestorable hand state.")
+            logger.warning("Blackjack refunded %s cents to user_id=%s after unrestorable hand state.", staked, user_id)
 
     def pop_corrupt_refund_note(self, key: tuple[int, int]) -> str | None:
         refunded = self.corrupt_state_refunds.pop(key, 0)
@@ -506,13 +539,27 @@ class BlackjackCog(commands.Cog):
         except (discord.Forbidden, discord.NotFound, discord.HTTPException):
             pass
 
-        await self.handle_shortcut_action(message, key, action)
+        try:
+            await self.handle_shortcut_action(message, key, action)
+        except Exception:
+            # on_message errors go through discord.py's generic Client.on_error,
+            # which (like View.on_error) only prints to stderr by default and is
+            # not captured by this bot's logging setup. Log it properly here so a
+            # shortcut-triggered crash is actually visible in logs/bot.log.
+            logger.exception("Blackjack shortcut error: key=%s action=%s", key, action)
 
     async def handle_action(self, interaction: discord.Interaction, key: tuple[int, int], action: str) -> None:
         async with self.lock_for(key):
             game = await self.load_active_game(key)
 
             if not game:
+                logger.warning(
+                    "Blackjack 'not game' on action=%s: key=%s clicked_message_id=%s db_state_present=%s",
+                    action,
+                    key,
+                    getattr(interaction.message, "id", None),
+                    (await self.db.get_active_game(key[0])) is not None,
+                )
                 reason = self.pop_corrupt_refund_note(key) or (
                     "This blackjack hand is no longer active due to timeout."
                 )
@@ -520,6 +567,16 @@ class BlackjackCog(commands.Cog):
                 return
 
             if interaction.message and game.message_id and interaction.message.id != game.message_id:
+                logger.warning(
+                    "Blackjack message_id mismatch on action=%s: key=%s clicked_message_id=%s "
+                    "current_game_message_id=%s game_phase=%s view_version=%s",
+                    action,
+                    key,
+                    interaction.message.id,
+                    game.message_id,
+                    game.phase,
+                    self.view_versions.get(key),
+                )
                 await self.expire_stale_interaction(
                     interaction,
                     "This is an older blackjack table. Use the newest blackjack message or start a new hand.",
@@ -546,7 +603,7 @@ class BlackjackCog(commands.Cog):
             try:
                 await interaction.response.edit_message(embed=embed, attachments=[file], view=view)
             except discord.HTTPException as exc:
-                print(f"Blackjack action edit failed for key={key}: {exc}")
+                logger.warning("Blackjack action edit failed for key=%s: %s", key, exc, exc_info=exc)
                 # The action itself was already applied and saved above (and, if
                 # finished, already settled/paid out) - only the Discord-side
                 # confirmation failed. Leave the game in memory (uncleaned) so the
@@ -570,20 +627,23 @@ class BlackjackCog(commands.Cog):
             return cached
 
         if not game.channel_id or not game.message_id:
+            logger.warning("resolve_table_message: key=%s has no channel_id/message_id to resolve from", key)
             return None
 
         channel = self.bot.get_channel(game.channel_id)
         if channel is None:
             try:
                 channel = await self.bot.fetch_channel(game.channel_id)
-            except (discord.HTTPException, discord.ClientException):
+            except (discord.HTTPException, discord.ClientException) as exc:
+                logger.warning("resolve_table_message: key=%s fetch_channel(%s) failed: %s", key, game.channel_id, exc)
                 return None
 
         try:
             fetched = await channel.fetch_message(game.message_id)
-        except (discord.HTTPException, AttributeError):
+        except (discord.HTTPException, AttributeError) as exc:
             # AttributeError covers channel types (e.g. category/forum channels) that
             # don't implement fetch_message at all.
+            logger.warning("resolve_table_message: key=%s fetch_message(%s) failed: %s", key, game.message_id, exc)
             return None
 
         self.game_messages[key] = fetched
@@ -641,7 +701,7 @@ class BlackjackCog(commands.Cog):
             try:
                 await table_message.edit(embed=embed, attachments=[file], view=view)
             except discord.HTTPException as exc:
-                print(f"Blackjack shortcut edit failed for key={key}: {exc}")
+                logger.warning("Blackjack shortcut edit failed for key=%s: %s", key, exc, exc_info=exc)
                 # Same as handle_action: the action was already applied and saved
                 # above, so leave the game recoverable via the next click instead of
                 # desyncing the message from the real, already-persisted state.
@@ -776,7 +836,7 @@ class BlackjackCog(commands.Cog):
             try:
                 await message.edit(embed=embed, attachments=[file], view=view)
             except discord.HTTPException as exc:
-                print(f"Blackjack timeout edit failed for key={key}, version={version}: {exc}")
+                logger.warning("Blackjack timeout edit failed for key=%s, version=%s: %s", key, version, exc, exc_info=exc)
                 # Leave the finished game in memory so the next stale button click can
                 # recover and render the final result instead of showing an active table.
                 return
@@ -949,12 +1009,12 @@ class BlackjackCog(commands.Cog):
             return "🛡️ Insurance"
         return "🃏 Blackjack"
 
-    def active_description_for_game(self, game: BlackjackGame) -> str:
+    def active_description_for_game(self, game: BlackjackGame) -> str | None:
         if game.phase == "insurance":
             return "Dealer shows an Ace. Would you like insurance?"
         if len(game.hands) > 1:
-            return f"Your move — playing Hand {game.active_hand_index + 1} of {len(game.hands)}."
-        return "Your move."
+            return f"Playing Hand {game.active_hand_index + 1} of {len(game.hands)}."
+        return None
 
     def active_actions_text_for_game(self, game: BlackjackGame) -> str:
         if game.phase == "insurance":
@@ -976,7 +1036,7 @@ class BlackjackCog(commands.Cog):
         else:
             bet_text = money(game.hands[0].bet_cents) if game.hands else money(game.bet_cents)
 
-        return f"{text}\nYour Bet: {bet_text}"
+        return f"{text} Your Bet: {bet_text}"
 
     def embed_color_for_game(self, game: BlackjackGame) -> discord.Color:
         if game.phase == "insurance":
@@ -1016,7 +1076,7 @@ class BlackjackCog(commands.Cog):
 
         embed = discord.Embed(title=title, description=description, color=self.embed_color_for_game(game))
         if game.phase != "finished":
-            embed.add_field(name="Status", value=self.active_status_text(note, game), inline=False)
+            embed.add_field(name="​", value=self.active_status_text(note, game), inline=False)
             embed.add_field(name="Available Actions", value=self.active_actions_text_for_game(game), inline=False)
             embed.set_footer(text=f"Action timer: {PLAYER_ACTION_TIMEOUT_SECONDS}s • Insurance timer: {INSURANCE_TIMEOUT_SECONDS}s • {RULES_TEXT}")
         else:
