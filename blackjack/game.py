@@ -63,6 +63,7 @@ class BlackjackGame:
     channel_id: int
     bet_cents: int
     lucky_blackjack: bool
+    player_label: str = "Player"
     deck: list[Card] = field(default_factory=new_single_deck)
     dealer: list[Card] = field(default_factory=list)
     hands: list[PlayerHand] = field(default_factory=list)
@@ -85,12 +86,14 @@ class BlackjackGame:
         bet_cents: int,
         lucky_blackjack: bool,
         deck: list[Card] | None = None,
+        player_label: str = "Player",
     ) -> "BlackjackGame":
         game = cls(
             user_id=user_id,
             channel_id=channel_id,
             bet_cents=bet_cents,
             lucky_blackjack=lucky_blackjack,
+            player_label=player_label,
             deck=deck if deck is not None else new_single_deck(),
         )
 

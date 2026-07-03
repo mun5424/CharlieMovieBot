@@ -48,7 +48,7 @@ ACTION_ALIASES: dict[str, str] = {
 }
 
 SHORTCUT_HELP = "Shortcuts: H=Hit • S=Stand • D=Double • Y/P=Split • I=Insurance • N=No Insurance"
-RULES_TEXT = "**Single Deck • Dealer hits soft 17 • Insurance pays 2:1 • $10 minimum**"
+RULES_TEXT = "Single Deck • Dealer hits soft 17 • Insurance pays 2:1 • $10 minimum"
 
 
 def today_key() -> str:
@@ -255,12 +255,19 @@ class BlackjackCog(commands.Cog):
             await self.db.add_balance(interaction.user.id, -bet_cents, "blackjack_bet")
 
             lucky = current_hour() in lucky_hours_for_day(day)
+            player_label = (
+                getattr(interaction.user, "display_name", None)
+                or getattr(interaction.user, "global_name", None)
+                or interaction.user.name
+                or "Player"
+            )
             game = BlackjackGame.start(
                 user_id=interaction.user.id,
                 channel_id=interaction.channel_id or 0,
                 bet_cents=bet_cents,
                 lucky_blackjack=lucky,
                 deck=shoe.deck,
+                player_label=player_label,
             )
             self.games[key] = game
 
@@ -536,6 +543,9 @@ class BlackjackCog(commands.Cog):
         return " • ".join(details)
 
     def display_name_for_game(self, game: BlackjackGame) -> str:
+        if getattr(game, "player_label", None):
+            return str(game.player_label)
+
         channel = self.bot.get_channel(game.channel_id) if game.channel_id else None
         guild = getattr(channel, "guild", None)
         if guild is not None:
@@ -549,14 +559,100 @@ class BlackjackCog(commands.Cog):
 
         return "Player"
 
+    def finished_title_for_game(self, game: BlackjackGame) -> str:
+        net = game.settlement_net_cents
+        net_text = money(abs(net))
+        player_blackjack = any(hand.is_blackjack for hand in game.hands)
+        dealer_bust = game.dealer_value > 21 and any(not hand.busted and hand.value <= 21 for hand in game.hands)
+        all_player_hands_busted = all(hand.busted or hand.value > 21 for hand in game.hands)
+
+        if net == 0:
+            return "🤝 PUSH"
+        if player_blackjack and net > 0:
+            return "♠️ BLACKJACK! ♠️"
+        if all_player_hands_busted:
+            return f"💀 BUST — LOSE {net_text}"
+        if dealer_bust and net > 0:
+            return f"💥 DEALER BUSTS — WIN {net_text}"
+        if net > 0:
+            return f"🏆 YOU WIN {net_text}"
+        return f"💀 DEALER WINS — LOSE {net_text}"
+
+    def finished_description_for_game(self, game: BlackjackGame, *, deck_note: str = "") -> str:
+        net = game.settlement_net_cents
+        net_text = money(abs(net))
+        player_blackjack = any(hand.is_blackjack for hand in game.hands)
+        dealer_bust = game.dealer_value > 21 and any(not hand.busted and hand.value <= 21 for hand in game.hands)
+        all_player_hands_busted = all(hand.busted or hand.value > 21 for hand in game.hands)
+
+        if net == 0:
+            lines = ["Your bet has been returned."]
+        elif player_blackjack and net > 0:
+            lines = [f"Natural 21 on the deal. You win {net_text}."]
+        elif all_player_hands_busted:
+            lines = [f"You went over 21 and lose {net_text}."]
+        elif dealer_bust and net > 0:
+            lines = [f"The dealer busted out. You win {net_text}."]
+        elif net > 0:
+            lines = [f"Your hand beats the dealer. You win {net_text}."]
+        else:
+            lines = [f"The dealer wins this hand. You lose {net_text}."]
+
+        details = self.format_hand_details(game)
+        if details:
+            lines.extend(["", details])
+        if deck_note:
+            lines.extend(["", deck_note])
+        return "\n".join(lines)
+    def active_title_for_game(self, game: BlackjackGame) -> str:
+        if game.phase == "insurance":
+            return "🛡️ Insurance"
+        return "🃏 Blackjack"
+
+    def active_description_for_game(self, game: BlackjackGame) -> str:
+        if game.phase == "insurance":
+            return "Dealer shows an Ace. Would you like insurance?"
+        if len(game.hands) > 1:
+            return f"Your move — playing Hand {game.active_hand_index + 1} of {len(game.hands)}."
+        return "Your move."
+
+    def active_actions_text_for_game(self, game: BlackjackGame) -> str:
+        if game.phase == "insurance":
+            return "Buttons: **Insurance** or **No Insurance** • Shortcuts: **I** / **N**"
+        hand = game.active_hand
+        actions = ["**H** Hit", "**S** Stand"]
+        if hand.can_double:
+            actions.append("**D** Double")
+        if not game.did_split and hand.can_split:
+            actions.append("**Y/P** Split")
+        return " • ".join(actions)
+
+    def active_status_text(self, note: str, game: BlackjackGame) -> str:
+        text = (note or "").strip()
+        auto_line = timeout_text_for_game(game)
+        text = text.replace(auto_line, "").strip()
+        text = text.replace("  ", " ")
+        return text or ("Waiting for your decision." if game.phase != "insurance" else "Insurance decision pending.")
+
     def embed_color_for_game(self, game: BlackjackGame) -> discord.Color:
+        if game.phase == "insurance":
+            return discord.Color.orange()
         if game.phase != "finished":
-            return discord.Color.orange() if game.phase == "insurance" else discord.Color.green()
-        if game.settlement_net_cents > 0:
+            return discord.Color.blue()
+
+        net = game.settlement_net_cents
+        player_blackjack = any(hand.is_blackjack for hand in game.hands)
+        dealer_bust = game.dealer_value > 21 and any(not hand.busted and hand.value <= 21 for hand in game.hands)
+
+        if net == 0:
+            return discord.Color.light_grey()
+        if player_blackjack and net > 0:
             return discord.Color.gold()
-        if game.settlement_net_cents < 0:
-            return discord.Color.red()
-        return discord.Color.light_grey()
+        if dealer_bust and net > 0:
+            return discord.Color.orange()
+        if net > 0:
+            return discord.Color.green()
+        return discord.Color.red()
 
     async def build_response(self, key: tuple[int, int], *, note: str) -> tuple[discord.Embed, discord.File, BlackjackView | None]:
         game = self.games[key]
@@ -567,15 +663,21 @@ class BlackjackCog(commands.Cog):
         image = self.renderer.render_png(game, note=note, shoe=shoe, player_name=player_name)
         file = discord.File(image, filename="blackjack_table.png")
 
-        title = "♠️ Blackjack! ♠️" if game.phase == "finished" else "♠️ Blackjack"
-        embed = discord.Embed(title=title, description=note.strip(), color=self.embed_color_for_game(game))
-        embed.add_field(name=RULES_TEXT, value="​", inline=False)
-        embed.set_footer(
-            text=(
-                f"Insurance timer: {INSURANCE_TIMEOUT_SECONDS}s • Action timer: {PLAYER_ACTION_TIMEOUT_SECONDS}s. "
-                f"{SHORTCUT_HELP}"
-            )
-        )
+        if game.phase == "finished":
+            title = self.finished_title_for_game(game)
+            description = self.finished_description_for_game(game)
+        else:
+            title = self.active_title_for_game(game)
+            description = self.active_description_for_game(game)
+
+        embed = discord.Embed(title=title, description=description, color=self.embed_color_for_game(game))
+        if game.phase != "finished":
+            embed.add_field(name="Status", value=self.active_status_text(note, game), inline=False)
+            embed.add_field(name="Available Actions", value=self.active_actions_text_for_game(game), inline=False)
+            embed.set_footer(text=f"Action timer: {PLAYER_ACTION_TIMEOUT_SECONDS}s • Insurance timer: {INSURANCE_TIMEOUT_SECONDS}s • {RULES_TEXT}")
+        else:
+            embed.set_footer(text=RULES_TEXT)
+
         embed.set_image(url="attachment://blackjack_table.png")
 
         view = None
