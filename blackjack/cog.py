@@ -190,6 +190,7 @@ class BlackjackCog(commands.Cog):
         self.locks: dict[tuple[int, int], asyncio.Lock] = {}
         self.game_messages: dict[tuple[int, int], discord.Message] = {}
         self.view_versions: dict[tuple[int, int], int] = {}
+        self.active_views: dict[tuple[int, int], BlackjackView] = {}
         self.finished_cleanup_tasks: dict[tuple[int, int], asyncio.Task] = {}
         self.shoes: dict[int, SingleDeckShoe] = {}
         self.corrupt_state_refunds: dict[tuple[int, int], int] = {}
@@ -221,7 +222,21 @@ class BlackjackCog(commands.Cog):
             task.cancel()
         self.games.pop(key, None)
         self.game_messages.pop(key, None)
-        self.view_versions.pop(key, None)
+        old_view = self.active_views.pop(key, None)
+        if old_view is not None:
+            old_view.stop()
+        # view_versions is intentionally NOT reset here. Each BlackjackView starts
+        # its own independent timeout timer at construction and is never explicitly
+        # cancelled when superseded (aside from the .stop() above, added after this
+        # bug was found), so an old view's timer can still be pending when this key
+        # gets reused for a brand new hand. If the version counter reset to 0 here,
+        # a new hand's first view would restart at version 1 - the exact same value
+        # a quickly-finished previous hand's only view would have had - so a stale
+        # timeout from hand N could coincidentally pass the staleness check
+        # (self.view_versions[key] != version) for hand N+1 and get misapplied to
+        # it, corrupting its message_id. Keeping this counter monotonic per key for
+        # the process's lifetime guarantees no two views for the same key ever
+        # share a version number, regardless of the .stop() calls below.
 
     async def delete_active_game_for_key(self, key: tuple[int, int]) -> None:
         await self.db.delete_active_game(key[0])
@@ -1072,11 +1087,16 @@ class BlackjackCog(commands.Cog):
             description = self.finished_description_for_game(game, balance_cents=balance)
         else:
             title = self.active_title_for_game(game)
-            description = self.active_description_for_game(game)
+            # Fold the status text (note + bet) directly into the description
+            # instead of a separate "Status" field - Discord always reserves a
+            # line for a field's name, even a blank one, which showed up as an
+            # unwanted gap between the title and this text.
+            context = self.active_description_for_game(game)
+            status = self.active_status_text(note, game)
+            description = f"{context}\n{status}" if context else status
 
         embed = discord.Embed(title=title, description=description, color=self.embed_color_for_game(game))
         if game.phase != "finished":
-            embed.add_field(name="​", value=self.active_status_text(note, game), inline=False)
             embed.add_field(name="Available Actions", value=self.active_actions_text_for_game(game), inline=False)
             embed.set_footer(text=f"Action timer: {PLAYER_ACTION_TIMEOUT_SECONDS}s • Insurance timer: {INSURANCE_TIMEOUT_SECONDS}s • {RULES_TEXT}")
         else:
@@ -1084,9 +1104,19 @@ class BlackjackCog(commands.Cog):
 
         embed.set_image(url="attachment://blackjack_table.png")
 
+        # Whenever we're about to replace the view attached to this key's message
+        # (or stop attaching one at all, because the hand finished), stop the
+        # previous view so its independent 30s timeout timer can never fire again.
+        # Without this, a stale view's timeout could still land after this key has
+        # moved on to a different hand entirely.
+        old_view = self.active_views.pop(key, None)
+        if old_view is not None:
+            old_view.stop()
+
         view = None
         if game.phase != "finished":
             view = BlackjackView(self, key, balance, self.bump_view_version(key))
+            self.active_views[key] = view
 
         return embed, file, view
 
