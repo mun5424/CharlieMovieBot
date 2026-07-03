@@ -159,6 +159,7 @@ class BlackjackCog(commands.Cog):
         self.view_versions: dict[tuple[int, int], int] = {}
         self.finished_cleanup_tasks: dict[tuple[int, int], asyncio.Task] = {}
         self.shoes: dict[int, SingleDeckShoe] = {}
+        self.corrupt_state_refunds: dict[tuple[int, int], int] = {}
 
     async def cog_load(self) -> None:
         await self.db.init()
@@ -294,9 +295,41 @@ class BlackjackCog(commands.Cog):
         except Exception as exc:
             print(f"Blackjack active-game state could not be restored for key={key}: {exc}")
             await self.delete_active_game_for_key(key)
+            await self.refund_unrestorable_game(key, state)
             return None
         self.games[key] = game
         return game
+
+    async def refund_unrestorable_game(self, key: tuple[int, int], state: dict) -> None:
+        """A persisted hand that can't be reconstructed must not silently keep the player's bet."""
+        if state.get("settled"):
+            # settle() already credited this hand's payout before the state became
+            # unreadable (it's kept around briefly for the finished-game grace period
+            # / until the next /blackjack call) - refunding again would double-pay.
+            return
+
+        # key[0] is the trusted user id this row was looked up by; don't trust a
+        # possibly-corrupt "user_id" field inside the state we're already recovering from.
+        user_id = key[0]
+
+        try:
+            staked = sum(int(hand.get("bet_cents", 0)) for hand in state.get("hands", []))
+            staked += int(state.get("insurance_bet_cents", 0))
+            if staked <= 0:
+                staked = int(state.get("bet_cents", 0) or 0)
+        except Exception:
+            staked = int(state.get("bet_cents", 0) or 0)
+
+        if staked > 0:
+            await self.db.add_balance(user_id, staked, "blackjack_corrupt_state_refund")
+            self.corrupt_state_refunds[key] = staked
+            print(f"Blackjack refunded {staked} cents to user_id={user_id} after unrestorable hand state.")
+
+    def pop_corrupt_refund_note(self, key: tuple[int, int]) -> str | None:
+        refunded = self.corrupt_state_refunds.pop(key, 0)
+        if not refunded:
+            return None
+        return f"Your previous blackjack hand's saved data was corrupted and could not be resumed. {money(refunded)} was refunded to your balance."
 
     async def shoe_for_user(self, user_id: int) -> SingleDeckShoe:
         shoe = self.shoes.get(user_id)
@@ -337,6 +370,7 @@ class BlackjackCog(commands.Cog):
         key = self.key_for(interaction)
         async with self.lock_for(key):
             existing_game = await self.load_active_game(key)
+            refund_note = self.pop_corrupt_refund_note(key)
             if existing_game and existing_game.phase == "finished":
                 await self.cleanup_game_and_db(key)
                 existing_game = None
@@ -392,6 +426,8 @@ class BlackjackCog(commands.Cog):
             await self.save_active_game(key)
 
             note_parts: list[str] = []
+            if refund_note:
+                note_parts.append(refund_note)
             if shuffled_before_hand:
                 note_parts.append("Fresh single deck shuffled.")
 
@@ -431,8 +467,15 @@ class BlackjackCog(commands.Cog):
             return
 
         key = self.key_for_message(message)
-        game = self.games.get(key)
-        if not game or game.phase == "finished":
+        async with self.lock_for(key):
+            game = await self.load_active_game(key)
+
+        if not game:
+            note = self.pop_corrupt_refund_note(key)
+            if note:
+                await self.send_shortcut_error(message, note)
+            return
+        if game.phase == "finished":
             return
 
         # Shortcuts only work in the channel where the hand was started.
@@ -452,10 +495,10 @@ class BlackjackCog(commands.Cog):
             game = await self.load_active_game(key)
 
             if not game:
-                await self.expire_stale_interaction(
-                    interaction,
-                    "This blackjack hand is no longer active. This usually means the bot restarted or the hand timed out.",
+                reason = self.pop_corrupt_refund_note(key) or (
+                    "This blackjack hand is no longer active. This usually means the bot restarted or the hand timed out."
                 )
+                await self.expire_stale_interaction(interaction, reason)
                 return
 
             if interaction.message and game.message_id and interaction.message.id != game.message_id:
@@ -493,6 +536,32 @@ class BlackjackCog(commands.Cog):
             else:
                 await self.save_active_game(key)
 
+    async def resolve_table_message(self, key: tuple[int, int], game: BlackjackGame) -> discord.Message | None:
+        """Find the live table message, refetching it if the bot restarted and lost the in-memory cache."""
+        cached = self.game_messages.get(key)
+        if cached is not None:
+            return cached
+
+        if not game.channel_id or not game.message_id:
+            return None
+
+        channel = self.bot.get_channel(game.channel_id)
+        if channel is None:
+            try:
+                channel = await self.bot.fetch_channel(game.channel_id)
+            except (discord.HTTPException, discord.ClientException):
+                return None
+
+        try:
+            fetched = await channel.fetch_message(game.message_id)
+        except (discord.HTTPException, AttributeError):
+            # AttributeError covers channel types (e.g. category/forum channels) that
+            # don't implement fetch_message at all.
+            return None
+
+        self.game_messages[key] = fetched
+        return fetched
+
     async def handle_shortcut_action(self, message: discord.Message, key: tuple[int, int], action: str) -> None:
         async with self.lock_for(key):
             game = await self.load_active_game(key)
@@ -504,12 +573,20 @@ class BlackjackCog(commands.Cog):
                 await self.send_shortcut_error(message, note)
                 return
 
-            table_message = self.game_messages.get(key)
+            # Persist immediately so any money already moved by this action (e.g. a
+            # double or split debit) is never lost, even if the table message below
+            # can't be located or edited.
+            await self.save_active_game(key)
+
+            table_message = await self.resolve_table_message(key, game)
             if table_message is None:
-                await self.send_shortcut_error(message, "I could not find the blackjack table message to update.")
+                await self.send_shortcut_error(
+                    message,
+                    "Your action was applied, but I could not find the blackjack table message to update it. "
+                    "Check the table with the newest blackjack message, or click its buttons instead.",
+                )
                 return
 
-            await self.save_active_game(key)
             embed, file, view = await self.build_response(key, note=note)
             finished = game.phase == "finished"
             await table_message.edit(embed=embed, attachments=[file], view=view)
@@ -616,7 +693,15 @@ class BlackjackCog(commands.Cog):
                 return
 
             game = await self.load_active_game(key)
-            if not game or game.phase == "finished":
+            if not game:
+                note = self.pop_corrupt_refund_note(key)
+                if note:
+                    try:
+                        await message.channel.send(note, delete_after=15)
+                    except discord.HTTPException:
+                        pass
+                return
+            if game.phase == "finished":
                 return
 
             if game.phase == "insurance":
