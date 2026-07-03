@@ -64,6 +64,7 @@ class BlackjackGame:
     bet_cents: int
     lucky_blackjack: bool
     player_label: str = "Player"
+    message_id: int = 0
     deck: list[Card] = field(default_factory=new_single_deck)
     dealer: list[Card] = field(default_factory=list)
     hands: list[PlayerHand] = field(default_factory=list)

@@ -291,6 +291,7 @@ class BlackjackCog(commands.Cog):
                 await interaction.response.send_message(embed=embed, file=file, view=view)
                 msg = await interaction.original_response()
 
+            game.message_id = msg.id
             if view:
                 view.message = msg
                 self.game_messages[key] = msg
@@ -328,19 +329,28 @@ class BlackjackCog(commands.Cog):
     async def handle_action(self, interaction: discord.Interaction, key: tuple[int, int], action: str) -> None:
         async with self.lock_for(key):
             game = self.games.get(key)
-            if not game or game.phase == "finished":
-                # The Discord message can still have old enabled buttons if a previous
-                # finishing edit failed or the bot restarted. Disable the stale buttons
-                # so the user is not stuck clicking dead controls forever.
-                if interaction.message:
-                    try:
-                        await interaction.message.edit(view=None)
-                    except discord.HTTPException:
-                        pass
-                await interaction.response.send_message(
-                    "That blackjack hand is already over. Start a new hand with `/blackjack`.",
-                    ephemeral=True,
+
+            if not game:
+                await self.expire_stale_interaction(
+                    interaction,
+                    "This blackjack hand is no longer active. This usually means the bot restarted or the hand timed out.",
                 )
+                return
+
+            if interaction.message and game.message_id and interaction.message.id != game.message_id:
+                await self.expire_stale_interaction(
+                    interaction,
+                    "This is an older blackjack table. Use the newest blackjack message or start a new hand.",
+                )
+                return
+
+            if game.phase == "finished":
+                # If a timeout already finished the hand but the timeout edit failed,
+                # recover by rendering the final result now instead of leaving the
+                # message looking playable.
+                embed, file, _ = await self.build_response(key, note="")
+                await interaction.response.edit_message(embed=embed, attachments=[file], view=None)
+                self.cleanup_game(key)
                 return
 
             success, note = await self.apply_action_locked(key, interaction.user.id, action)
@@ -351,6 +361,8 @@ class BlackjackCog(commands.Cog):
             embed, file, view = await self.build_response(key, note=note)
             finished = game.phase == "finished"
             await interaction.response.edit_message(embed=embed, attachments=[file], view=view)
+            if interaction.message:
+                game.message_id = interaction.message.id
             if view and interaction.message:
                 view.message = interaction.message
                 self.game_messages[key] = interaction.message
@@ -376,6 +388,7 @@ class BlackjackCog(commands.Cog):
             embed, file, view = await self.build_response(key, note=note)
             finished = game.phase == "finished"
             await table_message.edit(embed=embed, attachments=[file], view=view)
+            game.message_id = table_message.id
             if view:
                 view.message = table_message
                 self.game_messages[key] = table_message
@@ -444,6 +457,31 @@ class BlackjackCog(commands.Cog):
         except discord.HTTPException:
             pass
 
+    def stale_hand_embed(self, reason: str) -> discord.Embed:
+        embed = discord.Embed(
+            title="⌛ Blackjack hand expired",
+            description=f"{reason}\n\nStart a new hand with `/blackjack`.",
+            color=discord.Color.dark_grey(),
+        )
+        embed.set_footer(text=RULES_TEXT)
+        return embed
+
+    async def expire_stale_interaction(self, interaction: discord.Interaction, reason: str) -> None:
+        embed = self.stale_hand_embed(reason)
+        try:
+            await interaction.response.edit_message(embed=embed, attachments=[], view=None)
+        except discord.HTTPException:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    "That blackjack hand is no longer active. Start a new hand with `/blackjack`.",
+                    ephemeral=True,
+                )
+            else:
+                await interaction.followup.send(
+                    "That blackjack hand is no longer active. Start a new hand with `/blackjack`.",
+                    ephemeral=True,
+                )
+
     async def handle_timeout(self, key: tuple[int, int], message: discord.Message, version: int) -> None:
         async with self.lock_for(key):
             # Ignore stale timeouts from an old View that was replaced after a player action.
@@ -468,7 +506,15 @@ class BlackjackCog(commands.Cog):
 
             embed, file, view = await self.build_response(key, note=note)
             finished = game.phase == "finished"
-            await message.edit(embed=embed, attachments=[file], view=view)
+            try:
+                await message.edit(embed=embed, attachments=[file], view=view)
+            except discord.HTTPException as exc:
+                print(f"Blackjack timeout edit failed for key={key}, version={version}: {exc}")
+                # Leave the finished game in memory so the next stale button click can
+                # recover and render the final result instead of showing an active table.
+                return
+
+            game.message_id = message.id
             if view:
                 view.message = message
                 self.game_messages[key] = message
@@ -628,6 +674,7 @@ class BlackjackCog(commands.Cog):
         if deck_note:
             lines.extend(["", deck_note])
         return "\n".join(lines)
+        
     def active_title_for_game(self, game: BlackjackGame) -> str:
         if game.phase == "insurance":
             return "🛡️ Insurance"
