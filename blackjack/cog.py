@@ -294,6 +294,8 @@ class BlackjackCog(commands.Cog):
             if view:
                 view.message = msg
                 self.game_messages[key] = msg
+            elif game.phase == "finished":
+                self.cleanup_game(key)
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
@@ -327,7 +329,18 @@ class BlackjackCog(commands.Cog):
         async with self.lock_for(key):
             game = self.games.get(key)
             if not game or game.phase == "finished":
-                await interaction.response.send_message("That blackjack hand is already over.", ephemeral=True)
+                # The Discord message can still have old enabled buttons if a previous
+                # finishing edit failed or the bot restarted. Disable the stale buttons
+                # so the user is not stuck clicking dead controls forever.
+                if interaction.message:
+                    try:
+                        await interaction.message.edit(view=None)
+                    except discord.HTTPException:
+                        pass
+                await interaction.response.send_message(
+                    "That blackjack hand is already over. Start a new hand with `/blackjack`.",
+                    ephemeral=True,
+                )
                 return
 
             success, note = await self.apply_action_locked(key, interaction.user.id, action)
@@ -336,10 +349,13 @@ class BlackjackCog(commands.Cog):
                 return
 
             embed, file, view = await self.build_response(key, note=note)
+            finished = game.phase == "finished"
             await interaction.response.edit_message(embed=embed, attachments=[file], view=view)
             if view and interaction.message:
                 view.message = interaction.message
                 self.game_messages[key] = interaction.message
+            if finished:
+                self.cleanup_game(key)
 
     async def handle_shortcut_action(self, message: discord.Message, key: tuple[int, int], action: str) -> None:
         async with self.lock_for(key):
@@ -358,10 +374,13 @@ class BlackjackCog(commands.Cog):
                 return
 
             embed, file, view = await self.build_response(key, note=note)
+            finished = game.phase == "finished"
             await table_message.edit(embed=embed, attachments=[file], view=view)
             if view:
                 view.message = table_message
                 self.game_messages[key] = table_message
+            if finished:
+                self.cleanup_game(key)
 
     async def apply_action_locked(self, key: tuple[int, int], user_id: int, action: str) -> tuple[bool, str]:
         """Apply a blackjack action while the caller already holds this game's lock."""
@@ -448,10 +467,13 @@ class BlackjackCog(commands.Cog):
                 note += " " + timeout_text_for_game(game)
 
             embed, file, view = await self.build_response(key, note=note)
+            finished = game.phase == "finished"
             await message.edit(embed=embed, attachments=[file], view=view)
             if view:
                 view.message = message
                 self.game_messages[key] = message
+            if finished:
+                self.cleanup_game(key)
 
     async def settle_finished_game(self, user_id: int, game: BlackjackGame) -> str:
         first_settlement = not game.settled
@@ -601,15 +623,11 @@ class BlackjackCog(commands.Cog):
         details = self.format_hand_details(game)
         if details:
             lines.extend(["", details])
-
         if balance_cents is not None:
             lines.extend(["", f"Balance: **{money(balance_cents)}**"])
-
         if deck_note:
             lines.extend(["", deck_note])
-
         return "\n".join(lines)
-        
     def active_title_for_game(self, game: BlackjackGame) -> str:
         if game.phase == "insurance":
             return "🛡️ Insurance"
@@ -689,8 +707,6 @@ class BlackjackCog(commands.Cog):
         view = None
         if game.phase != "finished":
             view = BlackjackView(self, key, balance, self.bump_view_version(key))
-        else:
-            self.cleanup_game(key)
 
         return embed, file, view
 
