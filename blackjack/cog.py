@@ -578,7 +578,7 @@ class BlackjackCog(commands.Cog):
             return f"🏆 YOU WIN {net_text}"
         return f"💀 DEALER WINS — LOSE {net_text}"
 
-    def finished_description_for_game(self, game: BlackjackGame, *, deck_note: str = "") -> str:
+    def finished_description_for_game(self, game: BlackjackGame, *, balance_cents: int | None = None, deck_note: str = "",) -> str:
         net = game.settlement_net_cents
         net_text = money(abs(net))
         player_blackjack = any(hand.is_blackjack for hand in game.hands)
@@ -601,9 +601,15 @@ class BlackjackCog(commands.Cog):
         details = self.format_hand_details(game)
         if details:
             lines.extend(["", details])
+
+        if balance_cents is not None:
+            lines.extend(["", f"Balance: **{money(balance_cents)}**"])
+
         if deck_note:
             lines.extend(["", deck_note])
+
         return "\n".join(lines)
+        
     def active_title_for_game(self, game: BlackjackGame) -> str:
         if game.phase == "insurance":
             return "🛡️ Insurance"
@@ -665,7 +671,7 @@ class BlackjackCog(commands.Cog):
 
         if game.phase == "finished":
             title = self.finished_title_for_game(game)
-            description = self.finished_description_for_game(game)
+            description = self.finished_description_for_game(game, balance_cents=balance)
         else:
             title = self.active_title_for_game(game)
             description = self.active_description_for_game(game)
