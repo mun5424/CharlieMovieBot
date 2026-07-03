@@ -12,7 +12,7 @@ from discord.ext import commands
 
 from .cards import card_from_code, card_to_code
 from .db import BlackjackDB
-from .game import BlackjackGame
+from .game import BlackjackGame, PlayerHand
 from .renderer import CardRenderer, money
 from .shoe import MIN_CARDS_TO_START_HAND, RESHUFFLE_AT_REMAINING_CARDS, SingleDeckShoe
 
@@ -21,8 +21,9 @@ DAILY_BONUS_CENTS = 10_000
 DEFAULT_DB_PATH = "bot.db"
 TIMEZONE = "America/Los_Angeles"
 LUCKY_HOURS_PER_DAY = 2
-PLAYER_ACTION_TIMEOUT_SECONDS = 30
+PLAYER_ACTION_TIMEOUT_SECONDS = 90
 INSURANCE_TIMEOUT_SECONDS = 10
+FINISHED_GAME_GRACE_SECONDS = 10 * 60
 
 # Exact-message shortcuts for active blackjack hands.
 # These only work when the user types exactly one of these values in the same channel
@@ -156,6 +157,7 @@ class BlackjackCog(commands.Cog):
         self.locks: dict[tuple[int, int], asyncio.Lock] = {}
         self.game_messages: dict[tuple[int, int], discord.Message] = {}
         self.view_versions: dict[tuple[int, int], int] = {}
+        self.finished_cleanup_tasks: dict[tuple[int, int], asyncio.Task] = {}
         self.shoes: dict[int, SingleDeckShoe] = {}
 
     async def cog_load(self) -> None:
@@ -180,9 +182,121 @@ class BlackjackCog(commands.Cog):
         return version
 
     def cleanup_game(self, key: tuple[int, int]) -> None:
+        task = self.finished_cleanup_tasks.pop(key, None)
+        if task and not task.done() and task is not asyncio.current_task():
+            task.cancel()
         self.games.pop(key, None)
         self.game_messages.pop(key, None)
         self.view_versions.pop(key, None)
+
+    async def delete_active_game_for_key(self, key: tuple[int, int]) -> None:
+        await self.db.delete_active_game(key[0])
+
+    async def cleanup_game_and_db(self, key: tuple[int, int]) -> None:
+        self.cleanup_game(key)
+        await self.delete_active_game_for_key(key)
+
+    def schedule_finished_cleanup(self, key: tuple[int, int], game: BlackjackGame) -> None:
+        old_task = self.finished_cleanup_tasks.pop(key, None)
+        if old_task and not old_task.done():
+            old_task.cancel()
+
+        async def cleanup_later() -> None:
+            try:
+                await asyncio.sleep(FINISHED_GAME_GRACE_SECONDS)
+                if self.games.get(key) is game and game.phase == "finished":
+                    self.cleanup_game(key)
+                    await self.delete_active_game_for_key(key)
+            except asyncio.CancelledError:
+                return
+
+        self.finished_cleanup_tasks[key] = asyncio.create_task(cleanup_later())
+
+    def active_game_state(self, game: BlackjackGame) -> dict:
+        return {
+            "user_id": game.user_id,
+            "channel_id": game.channel_id,
+            "bet_cents": game.bet_cents,
+            "lucky_blackjack": game.lucky_blackjack,
+            "player_label": game.player_label,
+            "message_id": game.message_id,
+            "deck": [card_to_code(card) for card in game.deck],
+            "dealer": [card_to_code(card) for card in game.dealer],
+            "hands": [
+                {
+                    "cards": [card_to_code(card) for card in hand.cards],
+                    "bet_cents": hand.bet_cents,
+                    "from_split": hand.from_split,
+                    "stood": hand.stood,
+                    "busted": hand.busted,
+                    "doubled": hand.doubled,
+                }
+                for hand in game.hands
+            ],
+            "active_hand_index": game.active_hand_index,
+            "phase": game.phase,
+            "insurance_bet_cents": game.insurance_bet_cents,
+            "insurance_resolved": game.insurance_resolved,
+            "settled": game.settled,
+            "did_split": game.did_split,
+            "settlement_lines": game.settlement_lines,
+            "settlement_credited_cents": game.settlement_credited_cents,
+            "settlement_net_cents": game.settlement_net_cents,
+        }
+
+    def game_from_active_state(self, state: dict) -> BlackjackGame:
+        return BlackjackGame(
+            user_id=int(state["user_id"]),
+            channel_id=int(state.get("channel_id", 0)),
+            bet_cents=int(state["bet_cents"]),
+            lucky_blackjack=bool(state.get("lucky_blackjack", False)),
+            player_label=str(state.get("player_label") or "Player"),
+            message_id=int(state.get("message_id", 0)),
+            deck=[card_from_code(code) for code in state.get("deck", [])],
+            dealer=[card_from_code(code) for code in state.get("dealer", [])],
+            hands=[
+                PlayerHand(
+                    cards=[card_from_code(code) for code in hand_state.get("cards", [])],
+                    bet_cents=int(hand_state.get("bet_cents", 0)),
+                    from_split=bool(hand_state.get("from_split", False)),
+                    stood=bool(hand_state.get("stood", False)),
+                    busted=bool(hand_state.get("busted", False)),
+                    doubled=bool(hand_state.get("doubled", False)),
+                )
+                for hand_state in state.get("hands", [])
+            ],
+            active_hand_index=int(state.get("active_hand_index", 0)),
+            phase=state.get("phase", "player"),
+            insurance_bet_cents=int(state.get("insurance_bet_cents", 0)),
+            insurance_resolved=bool(state.get("insurance_resolved", False)),
+            settled=bool(state.get("settled", False)),
+            did_split=bool(state.get("did_split", False)),
+            settlement_lines=list(state.get("settlement_lines", [])),
+            settlement_credited_cents=int(state.get("settlement_credited_cents", 0)),
+            settlement_net_cents=int(state.get("settlement_net_cents", 0)),
+        )
+
+    async def save_active_game(self, key: tuple[int, int]) -> None:
+        game = self.games.get(key)
+        if game is None:
+            return
+        await self.db.save_active_game(game.user_id, game.message_id, self.active_game_state(game))
+
+    async def load_active_game(self, key: tuple[int, int]) -> BlackjackGame | None:
+        game = self.games.get(key)
+        if game is not None:
+            return game
+        state = await self.db.get_active_game(key[0])
+        if state is None:
+            return None
+        try:
+            game = self.game_from_active_state(state)
+        except Exception as exc:
+            print(f"Blackjack active-game state could not be restored for key={key}: {exc}")
+            await self.delete_active_game_for_key(key)
+            return None
+        self.games[key] = game
+        return game
 
     async def shoe_for_user(self, user_id: int) -> SingleDeckShoe:
         shoe = self.shoes.get(user_id)
@@ -222,8 +336,13 @@ class BlackjackCog(commands.Cog):
     async def blackjack(self, interaction: discord.Interaction, bet: app_commands.Range[int, 10, 1_000_000] = 10):
         key = self.key_for(interaction)
         async with self.lock_for(key):
-            if key in self.games and self.games[key].phase != "finished":
-                active_channel = self.games[key].channel_id
+            existing_game = await self.load_active_game(key)
+            if existing_game and existing_game.phase == "finished":
+                await self.cleanup_game_and_db(key)
+                existing_game = None
+
+            if existing_game and existing_game.phase != "finished":
+                active_channel = existing_game.channel_id
                 if active_channel:
                     await interaction.response.send_message(
                         f"You already have an active blackjack hand in <#{active_channel}>.",
@@ -270,6 +389,7 @@ class BlackjackCog(commands.Cog):
                 player_label=player_label,
             )
             self.games[key] = game
+            await self.save_active_game(key)
 
             note_parts: list[str] = []
             if shuffled_before_hand:
@@ -292,11 +412,12 @@ class BlackjackCog(commands.Cog):
                 msg = await interaction.original_response()
 
             game.message_id = msg.id
+            await self.save_active_game(key)
             if view:
                 view.message = msg
                 self.game_messages[key] = msg
             elif game.phase == "finished":
-                self.cleanup_game(key)
+                self.schedule_finished_cleanup(key, game)
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
@@ -328,7 +449,7 @@ class BlackjackCog(commands.Cog):
 
     async def handle_action(self, interaction: discord.Interaction, key: tuple[int, int], action: str) -> None:
         async with self.lock_for(key):
-            game = self.games.get(key)
+            game = await self.load_active_game(key)
 
             if not game:
                 await self.expire_stale_interaction(
@@ -350,7 +471,7 @@ class BlackjackCog(commands.Cog):
                 # message looking playable.
                 embed, file, _ = await self.build_response(key, note="")
                 await interaction.response.edit_message(embed=embed, attachments=[file], view=None)
-                self.cleanup_game(key)
+                self.schedule_finished_cleanup(key, game)
                 return
 
             success, note = await self.apply_action_locked(key, interaction.user.id, action)
@@ -358,6 +479,7 @@ class BlackjackCog(commands.Cog):
                 await interaction.response.send_message(note, ephemeral=True)
                 return
 
+            await self.save_active_game(key)
             embed, file, view = await self.build_response(key, note=note)
             finished = game.phase == "finished"
             await interaction.response.edit_message(embed=embed, attachments=[file], view=view)
@@ -367,11 +489,13 @@ class BlackjackCog(commands.Cog):
                 view.message = interaction.message
                 self.game_messages[key] = interaction.message
             if finished:
-                self.cleanup_game(key)
+                self.schedule_finished_cleanup(key, game)
+            else:
+                await self.save_active_game(key)
 
     async def handle_shortcut_action(self, message: discord.Message, key: tuple[int, int], action: str) -> None:
         async with self.lock_for(key):
-            game = self.games.get(key)
+            game = await self.load_active_game(key)
             if not game or game.phase == "finished":
                 return
 
@@ -385,6 +509,7 @@ class BlackjackCog(commands.Cog):
                 await self.send_shortcut_error(message, "I could not find the blackjack table message to update.")
                 return
 
+            await self.save_active_game(key)
             embed, file, view = await self.build_response(key, note=note)
             finished = game.phase == "finished"
             await table_message.edit(embed=embed, attachments=[file], view=view)
@@ -393,7 +518,9 @@ class BlackjackCog(commands.Cog):
                 view.message = table_message
                 self.game_messages[key] = table_message
             if finished:
-                self.cleanup_game(key)
+                self.schedule_finished_cleanup(key, game)
+            else:
+                await self.save_active_game(key)
 
     async def apply_action_locked(self, key: tuple[int, int], user_id: int, action: str) -> tuple[bool, str]:
         """Apply a blackjack action while the caller already holds this game's lock."""
@@ -459,8 +586,8 @@ class BlackjackCog(commands.Cog):
 
     def stale_hand_embed(self, reason: str) -> discord.Embed:
         embed = discord.Embed(
-            title="⌛ Blackjack hand expired",
-            description=f"{reason}\n\nStart a new hand with `/blackjack`.",
+            title="⌛ Blackjack hand unavailable",
+            description=f"{reason}\n\nNo additional money was charged by this click. Start a new hand with `/blackjack`.",
             color=discord.Color.dark_grey(),
         )
         embed.set_footer(text=RULES_TEXT)
@@ -488,7 +615,7 @@ class BlackjackCog(commands.Cog):
             if self.view_versions.get(key) != version:
                 return
 
-            game = self.games.get(key)
+            game = await self.load_active_game(key)
             if not game or game.phase == "finished":
                 return
 
@@ -504,6 +631,7 @@ class BlackjackCog(commands.Cog):
             else:
                 note += " " + timeout_text_for_game(game)
 
+            await self.save_active_game(key)
             embed, file, view = await self.build_response(key, note=note)
             finished = game.phase == "finished"
             try:
@@ -519,7 +647,9 @@ class BlackjackCog(commands.Cog):
                 view.message = message
                 self.game_messages[key] = message
             if finished:
-                self.cleanup_game(key)
+                self.schedule_finished_cleanup(key, game)
+            else:
+                await self.save_active_game(key)
 
     async def settle_finished_game(self, user_id: int, game: BlackjackGame) -> str:
         first_settlement = not game.settled
@@ -700,9 +830,6 @@ class BlackjackCog(commands.Cog):
 
     def active_status_text(self, note: str, game: BlackjackGame) -> str:
         text = (note or "").strip()
-        auto_line = timeout_text_for_game(game)
-        text = text.replace(auto_line, "").strip()
-        text = text.replace("  ", " ")
         return text or ("Waiting for your decision." if game.phase != "insurance" else "Insurance decision pending.")
 
     def embed_color_for_game(self, game: BlackjackGame) -> discord.Color:

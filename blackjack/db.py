@@ -38,6 +38,13 @@ CREATE TABLE IF NOT EXISTS blackjack_shoes (
     last_shuffle_reason TEXT NOT NULL DEFAULT 'new shoe',
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS blackjack_active_games (
+    user_id INTEGER PRIMARY KEY,
+    message_id INTEGER NOT NULL DEFAULT 0,
+    state_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 """
 
 class BlackjackDB:
@@ -185,6 +192,51 @@ class BlackjackDB:
 
             conn.commit()
             return True
+
+    async def save_active_game(self, user_id: int, message_id: int, state: dict) -> None:
+        await asyncio.to_thread(self._save_active_game_sync, user_id, message_id, state)
+
+    def _save_active_game_sync(self, user_id: int, message_id: int, state: dict) -> None:
+        with sqlite3.connect(self.path) as conn:
+            conn.execute(
+                """
+                INSERT INTO blackjack_active_games(user_id, message_id, state_json, updated_at)
+                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    message_id = excluded.message_id,
+                    state_json = excluded.state_json,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (user_id, message_id, json.dumps(state)),
+            )
+            conn.commit()
+
+    async def get_active_game(self, user_id: int) -> dict | None:
+        return await asyncio.to_thread(self._get_active_game_sync, user_id)
+
+    def _get_active_game_sync(self, user_id: int) -> dict | None:
+        with sqlite3.connect(self.path) as conn:
+            row = conn.execute(
+                """
+                SELECT state_json
+                FROM blackjack_active_games
+                WHERE user_id = ?
+                """,
+                (user_id,),
+            ).fetchone()
+
+        if row is None:
+            return None
+        return json.loads(row[0])
+
+    async def delete_active_game(self, user_id: int) -> None:
+        await asyncio.to_thread(self._delete_active_game_sync, user_id)
+
+    def _delete_active_game_sync(self, user_id: int) -> None:
+        with sqlite3.connect(self.path) as conn:
+            conn.execute("DELETE FROM blackjack_active_games WHERE user_id = ?", (user_id,))
+            conn.commit()
+
     async def get_shoe_state(self, user_id: int) -> dict | None:
         return await asyncio.to_thread(self._get_shoe_state_sync, user_id)
 
