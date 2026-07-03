@@ -74,7 +74,7 @@ def timeout_for_game(game: BlackjackGame | None) -> int:
 def timeout_text_for_game(game: BlackjackGame) -> str:
     if game.phase == "insurance":
         return f"Auto-skips insurance in {INSURANCE_TIMEOUT_SECONDS} seconds."
-    return f"Auto-stands in {PLAYER_ACTION_TIMEOUT_SECONDS} seconds."
+    return 
 
 
 class BlackjackView(discord.ui.View):
@@ -514,7 +514,7 @@ class BlackjackCog(commands.Cog):
 
             if not game:
                 reason = self.pop_corrupt_refund_note(key) or (
-                    "This blackjack hand is no longer active. This usually means the bot restarted or the hand timed out."
+                    "This blackjack hand is no longer active due to timeout."
                 )
                 await self.expire_stale_interaction(interaction, reason)
                 return
@@ -706,8 +706,6 @@ class BlackjackCog(commands.Cog):
 
         if game.phase == "finished":
             note += " " + await self.settle_finished_game(user_id, game)
-        else:
-            note += " " + timeout_text_for_game(game)
 
         return True, note
 
