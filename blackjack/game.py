@@ -73,6 +73,8 @@ class BlackjackGame:
     settled: bool = False
     did_split: bool = False
     settlement_lines: list[str] = field(default_factory=list)
+    settlement_credited_cents: int = 0
+    settlement_net_cents: int = 0
 
     @classmethod
     def start(
@@ -204,6 +206,10 @@ class BlackjackGame:
 
         self.phase = "finished"
 
+    @property
+    def total_wagered_cents(self) -> int:
+        return sum(hand.bet_cents for hand in self.hands) + self.insurance_bet_cents
+
     def settle(self) -> int:
         """
         Return total cents to credit back to the player.
@@ -214,6 +220,8 @@ class BlackjackGame:
 
         self.settled = True
         self.settlement_lines.clear()
+        self.settlement_credited_cents = 0
+        self.settlement_net_cents = 0
         credited = 0
 
         if self.insurance_bet_cents:
@@ -254,4 +262,6 @@ class BlackjackGame:
                 credited += hand.bet_cents
                 self.settlement_lines.append(f"{prefix}: push")
 
+        self.settlement_credited_cents = credited
+        self.settlement_net_cents = credited - self.total_wagered_cents
         return credited

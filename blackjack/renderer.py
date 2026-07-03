@@ -8,104 +8,190 @@ from .cards import Card, SUIT_SYMBOLS, hand_value
 from .game import BlackjackGame
 from .shoe import SingleDeckShoe
 
-CARD_W = 120
-CARD_H = 168
-GAP = 18
+CANVAS_W = 900
+MARGIN_X = 44
+SECTION_GAP = 26
+CARD_GAP = 24
+CARD_RATIO = 1.4
+MIN_CARD_W = 72
+MAX_CARD_W = 365
+LABEL_FONT_SIZE = 40
+MAX_LABEL_CHARS = 24
 
 
 class CardRenderer:
     def __init__(self, asset_dir: str | Path | None = None):
         self.asset_dir = Path(asset_dir) if asset_dir else Path(__file__).parent / "assets" / "cards"
 
-    def render_png(self, game: BlackjackGame, *, note: str = "", shoe: SingleDeckShoe | None = None) -> io.BytesIO:
+    def render_png(
+        self,
+        game: BlackjackGame,
+        *,
+        note: str = "",
+        shoe: SingleDeckShoe | None = None,
+        player_name: str = "Player",
+    ) -> io.BytesIO:
+        """Render a mobile-friendly blackjack table.
+
+        The image intentionally focuses on only the dealer cards and player cards.
+        Deck/discard information, table title, and other low-value chrome are omitted
+        so the cards become the hero of the image when viewed on a phone.
+        """
         try:
-            from PIL import Image, ImageDraw, ImageFont
+            from PIL import Image, ImageDraw
         except ImportError as exc:
             raise RuntimeError("Install Pillow to render blackjack card images: pip install Pillow") from exc
 
-        hand_rows = max(1, len(game.hands))
-        height = max(760, 430 + hand_rows * 235)
-        image = Image.new("RGB", (1100, height), (25, 95, 55))
-        draw = ImageDraw.Draw(image)
-        font_big = self._font(36)
-        font_med = self._font(24)
-        font_small = self._font(18)
-
-        draw.text((40, 26), "Blackjack", fill="white", font=font_big)
-        if game.lucky_blackjack:
-            draw.text((250, 36), "Lucky Hour: Blackjack pays 3:2", fill=(255, 230, 120), font=font_med)
-        else:
-            draw.text((250, 36), "Blackjack pays 6:5", fill=(230, 230, 230), font=font_med)
-
-        if shoe is not None:
-            deck_text = f"Single deck: {shoe.cards_remaining} left • {shoe.discard_count} discard"
-            draw.text((760, 36), deck_text, fill=(230, 230, 230), font=font_small)
-
-        if note:
-            draw.text((40, 84), note[:130], fill=(255, 240, 180), font=font_small)
-
         dealer_hidden = game.phase != "finished"
-        dealer_value_text = "?" if dealer_hidden else str(game.dealer_value)
-        draw.text((40, 125), f"Dealer ({dealer_value_text})", fill="white", font=font_med)
-        self._draw_cards(draw, image, game.dealer, x=40, y=165, hide_second=dealer_hidden)
+        rows = self._build_rows(game, dealer_hidden=dealer_hidden, player_name=player_name)
+        card_w, card_h = self._card_size(rows)
 
-        y = 405
-        for idx, hand in enumerate(game.hands):
-            value, soft = hand_value(hand.cards)
-            active = game.phase == "player" and idx == game.active_hand_index
-            label = f"Hand {idx + 1}: {value}{' soft' if soft else ''} — Bet {money(hand.bet_cents)}"
-            if hand.busted:
-                label += " — BUST"
-            elif hand.stood:
-                label += " — STAND"
-            if active:
-                draw.rounded_rectangle((32, y - 10, 1040, y + CARD_H + 52), radius=16, outline=(255, 230, 120), width=4)
-                label = "▶ " + label
-            draw.text((50, y), label, fill="white", font=font_med)
-            self._draw_cards(draw, image, hand.cards, x=50, y=y + 42)
-            y += 235
+        label_h = 52
+        row_h = label_h + card_h + 30
+        height = 34 + len(rows) * row_h + max(0, len(rows) - 1) * SECTION_GAP + 34
+
+        image = Image.new("RGB", (CANVAS_W, height), (25, 95, 55))
+        draw = ImageDraw.Draw(image)
+        font_label = self._font(LABEL_FONT_SIZE)
+
+        y = 34
+        for index, row in enumerate(rows):
+            top = y - 12
+            bottom = y + row_h - 10
+            outline = (255, 230, 120) if row["active"] else (235, 235, 235)
+            width = 5 if row["active"] else 2
+            draw.rounded_rectangle(
+                (MARGIN_X // 2, top, CANVAS_W - MARGIN_X // 2, bottom),
+                radius=22,
+                outline=outline,
+                width=width,
+            )
+
+            draw.text((MARGIN_X, y), row["label"], fill="white", font=font_label)
+            cards_y = y + label_h
+            cards_x = self._centered_cards_x(len(row["cards"]), card_w, card_h, row["hide_second"])
+            self._draw_cards(
+                draw,
+                image,
+                row["cards"],
+                x=cards_x,
+                y=cards_y,
+                card_w=card_w,
+                card_h=card_h,
+                hide_second=row["hide_second"],
+            )
+
+            y += row_h + SECTION_GAP
 
         output = io.BytesIO()
         image.save(output, format="PNG")
         output.seek(0)
         return output
 
-    def _draw_cards(self, draw, canvas, cards: Iterable[Card], *, x: int, y: int, hide_second: bool = False) -> None:
+    def _build_rows(self, game: BlackjackGame, *, dealer_hidden: bool, player_name: str = "Player") -> list[dict[str, object]]:
+        dealer_value_text = "?" if dealer_hidden else str(game.dealer_value)
+        rows: list[dict[str, object]] = [
+            {
+                "label": f"Dealer ({dealer_value_text})",
+                "cards": game.dealer,
+                "hide_second": dealer_hidden,
+                "active": False,
+            }
+        ]
+
+        player_label = self._safe_label(player_name) or "Player"
+        multiple_hands = len(game.hands) > 1
+        for idx, hand in enumerate(game.hands):
+            value, soft = hand_value(hand.cards)
+            active = game.phase == "player" and idx == game.active_hand_index
+            prefix = f"{player_label} Hand {idx + 1}" if multiple_hands else player_label
+            label = f"{prefix} ({value}{' soft' if soft else ''})"
+            if hand.busted:
+                label += " — BUST"
+            elif hand.stood:
+                label += " — STAND"
+            if active:
+                label = "▶ " + label
+
+            rows.append(
+                {
+                    "label": label,
+                    "cards": hand.cards,
+                    "hide_second": False,
+                    "active": active,
+                }
+            )
+
+        return rows
+
+    def _safe_label(self, value: str) -> str:
+        label = " ".join((value or "Player").split())
+        if len(label) <= MAX_LABEL_CHARS:
+            return label
+        return label[: MAX_LABEL_CHARS - 1].rstrip() + "…"
+
+    def _card_size(self, rows: list[dict[str, object]]) -> tuple[int, int]:
+        max_cards = max(1, max(len(row["cards"]) for row in rows))
+        available_w = CANVAS_W - (MARGIN_X * 2)
+        card_w = (available_w - CARD_GAP * (max_cards - 1)) // max_cards
+        card_w = max(MIN_CARD_W, min(MAX_CARD_W, card_w))
+        return int(card_w), int(card_w * CARD_RATIO)
+
+    def _centered_cards_x(self, count: int, card_w: int, card_h: int, hide_second: bool) -> int:
+        total_w = count * card_w + max(0, count - 1) * CARD_GAP
+        return (CANVAS_W - total_w) // 2
+
+    def _draw_cards(
+        self,
+        draw,
+        canvas,
+        cards: Iterable[Card],
+        *,
+        x: int,
+        y: int,
+        card_w: int,
+        card_h: int,
+        hide_second: bool = False,
+    ) -> None:
         for idx, card in enumerate(cards):
             hidden = hide_second and idx == 1
-            card_img = self._card_back() if hidden else self._card_image(card)
-            canvas.paste(card_img, (x + idx * (CARD_W + GAP), y))
+            card_img = self._card_back(card_w, card_h) if hidden else self._card_image(card, card_w, card_h)
+            canvas.paste(card_img, (x + idx * (card_w + CARD_GAP), y), card_img)
 
-    def _card_image(self, card: Card):
+    def _card_image(self, card: Card, card_w: int, card_h: int):
         from PIL import Image, ImageDraw
 
         path = self.asset_dir / card.image_name
         if path.exists():
-            return Image.open(path).convert("RGBA").resize((CARD_W, CARD_H))
+            return Image.open(path).convert("RGBA").resize((card_w, card_h))
 
         # Fallback placeholder if image assets are not installed yet.
-        img = Image.new("RGBA", (CARD_W, CARD_H), "white")
+        img = Image.new("RGBA", (card_w, card_h), "white")
         draw = ImageDraw.Draw(img)
         color = (190, 0, 0) if card.suit in {"H", "D"} else (0, 0, 0)
-        draw.rounded_rectangle((0, 0, CARD_W - 1, CARD_H - 1), radius=12, outline=(20, 20, 20), width=3)
-        font_big = self._font(38)
-        font_small = self._font(24)
-        draw.text((12, 10), card.rank, fill=color, font=font_small)
-        draw.text((12, 38), SUIT_SYMBOLS[card.suit], fill=color, font=font_small)
-        draw.text((CARD_W // 2 - 24, CARD_H // 2 - 28), SUIT_SYMBOLS[card.suit], fill=color, font=font_big)
+        radius = max(12, card_w // 10)
+        border_w = max(3, card_w // 38)
+        draw.rounded_rectangle((0, 0, card_w - 1, card_h - 1), radius=radius, outline=(20, 20, 20), width=border_w)
+        font_big = self._font(max(38, card_w // 3))
+        font_small = self._font(max(24, card_w // 5))
+        draw.text((card_w // 10, card_h // 16), card.rank, fill=color, font=font_small)
+        draw.text((card_w // 10, card_h // 4), SUIT_SYMBOLS[card.suit], fill=color, font=font_small)
+        draw.text((card_w // 2 - card_w // 7, card_h // 2 - card_h // 8), SUIT_SYMBOLS[card.suit], fill=color, font=font_big)
         return img
 
-    def _card_back(self):
+    def _card_back(self, card_w: int, card_h: int):
         from PIL import Image, ImageDraw
 
         path = self.asset_dir / "back.png"
         if path.exists():
-            return Image.open(path).convert("RGBA").resize((CARD_W, CARD_H))
+            return Image.open(path).convert("RGBA").resize((card_w, card_h))
 
-        img = Image.new("RGBA", (CARD_W, CARD_H), (35, 65, 140))
+        img = Image.new("RGBA", (card_w, card_h), (35, 65, 140))
         draw = ImageDraw.Draw(img)
-        draw.rounded_rectangle((0, 0, CARD_W - 1, CARD_H - 1), radius=12, outline="white", width=3)
-        draw.text((34, 66), "CARD", fill="white", font=self._font(20))
+        radius = max(12, card_w // 10)
+        border_w = max(3, card_w // 38)
+        draw.rounded_rectangle((0, 0, card_w - 1, card_h - 1), radius=radius, outline="white", width=border_w)
+        draw.text((card_w // 3, card_h // 2 - 12), "CARD", fill="white", font=self._font(max(20, card_w // 6)))
         return img
 
     def _font(self, size: int):

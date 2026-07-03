@@ -48,6 +48,7 @@ ACTION_ALIASES: dict[str, str] = {
 }
 
 SHORTCUT_HELP = "Shortcuts: H=Hit • S=Stand • D=Double • Y/P=Split • I=Insurance • N=No Insurance"
+RULES_TEXT = "**Single Deck • Dealer hits soft 17 • Insurance pays 2:1 • $10 minimum**"
 
 
 def today_key() -> str:
@@ -264,8 +265,6 @@ class BlackjackCog(commands.Cog):
             self.games[key] = game
 
             note_parts: list[str] = []
-            if bonus_claimed:
-                note_parts.append("Daily bonus +$100 claimed.")
             if shuffled_before_hand:
                 note_parts.append("Fresh single deck shuffled.")
 
@@ -277,8 +276,14 @@ class BlackjackCog(commands.Cog):
                 note_parts.append(f"Choose an action. Auto-stands in {PLAYER_ACTION_TIMEOUT_SECONDS} seconds.")
 
             embed, file, view = await self.build_response(key, note=" ".join(note_parts))
-            await interaction.response.send_message(embed=embed, file=file, view=view)
-            msg = await interaction.original_response()
+            if bonus_claimed:
+                bonus_embed = self.build_daily_bonus_embed(DAILY_BONUS_CENTS)
+                await interaction.response.send_message(embed=bonus_embed)
+                msg = await interaction.followup.send(embed=embed, file=file, view=view, wait=True)
+            else:
+                await interaction.response.send_message(embed=embed, file=file, view=view)
+                msg = await interaction.original_response()
+
             if view:
                 view.message = msg
                 self.game_messages[key] = msg
@@ -455,38 +460,116 @@ class BlackjackCog(commands.Cog):
             reshuffled = shoe.finish_hand(game.cards_in_play())
             await self.save_shoe_for_user(user_id)
             if reshuffled:
-                deck_note = " Deck reached the cut card and was reshuffled for the next hand."
+                deck_note = "\n\n🔄 Deck reached the cut card and was reshuffled for the next hand."
 
-        result = "; ".join(game.settlement_lines) if game.settlement_lines else "Hand finished."
-        return f"{result}. Balance: {money(balance)}.{deck_note}"
+        return self.format_finished_result(game, balance, deck_note=deck_note)
+
+    def build_daily_bonus_embed(self, amount_cents: int) -> discord.Embed:
+        embed = discord.Embed(
+            title="🎁 Your first Blackjack game today!",
+            description=f"You have been awarded **{money(amount_cents)}** before the cards are dealt.",
+            color=discord.Color.gold(),
+        )
+        embed.set_footer(text="Daily bonus resets at midnight PT.")
+        return embed
+
+    def format_finished_result(self, game: BlackjackGame, balance: int, *, deck_note: str = "") -> str:
+        net = game.settlement_net_cents
+        net_text = money(abs(net))
+        player_blackjack = any(hand.is_blackjack for hand in game.hands)
+        dealer_bust = game.dealer_value > 21 and any(not hand.busted and hand.value <= 21 for hand in game.hands)
+        all_player_hands_busted = all(hand.busted or hand.value > 21 for hand in game.hands)
+
+        if net == 0:
+            lines = ["🤝 Push.", "Your bet has been returned."]
+        elif player_blackjack and net > 0:
+            lines = ["♠️ Blackjack! ♠️", f"You win {net_text}."]
+        elif all_player_hands_busted:
+            lines = ["💀 Bust!", f"You lose {net_text}."]
+        elif dealer_bust and net > 0:
+            lines = ["💥 Dealer busts!", f"You win {net_text}."]
+        elif net > 0:
+            lines = ["🏆 You won!", f"You win {net_text}."]
+        else:
+            lines = ["💀 Dealer wins.", f"You lose {net_text}."]
+
+        details = self.format_hand_details(game)
+        if details:
+            lines.extend(["", details])
+
+        lines.append(f"Balance: {money(balance)}")
+        if deck_note:
+            lines.append(deck_note)
+        return "\n".join(lines)
+
+    def format_hand_details(self, game: BlackjackGame) -> str:
+        if len(game.hands) <= 1 and not game.insurance_bet_cents:
+            return ""
+
+        details: list[str] = []
+        if game.insurance_bet_cents:
+            insurance_result = "Insurance won" if game.dealer_has_blackjack else "Insurance lost"
+            details.append(insurance_result)
+
+        if len(game.hands) > 1:
+            dealer_total = game.dealer_value
+            dealer_bust = dealer_total > 21
+            for idx, hand in enumerate(game.hands, start=1):
+                if hand.is_blackjack and game.dealer_has_blackjack:
+                    result = "blackjack push"
+                elif hand.is_blackjack:
+                    result = "blackjack"
+                elif hand.busted or hand.value > 21:
+                    result = "bust"
+                elif game.dealer_has_blackjack:
+                    result = "dealer blackjack"
+                elif dealer_bust:
+                    result = "win"
+                elif hand.value > dealer_total:
+                    result = "win"
+                elif hand.value < dealer_total:
+                    result = "lose"
+                else:
+                    result = "push"
+                details.append(f"Hand {idx}: {result}")
+
+        return " • ".join(details)
+
+    def display_name_for_game(self, game: BlackjackGame) -> str:
+        channel = self.bot.get_channel(game.channel_id) if game.channel_id else None
+        guild = getattr(channel, "guild", None)
+        if guild is not None:
+            member = guild.get_member(game.user_id)
+            if member is not None:
+                return member.display_name
+
+        user = self.bot.get_user(game.user_id)
+        if user is not None:
+            return getattr(user, "display_name", None) or getattr(user, "global_name", None) or user.name
+
+        return "Player"
+
+    def embed_color_for_game(self, game: BlackjackGame) -> discord.Color:
+        if game.phase != "finished":
+            return discord.Color.orange() if game.phase == "insurance" else discord.Color.green()
+        if game.settlement_net_cents > 0:
+            return discord.Color.gold()
+        if game.settlement_net_cents < 0:
+            return discord.Color.red()
+        return discord.Color.light_grey()
 
     async def build_response(self, key: tuple[int, int], *, note: str) -> tuple[discord.Embed, discord.File, BlackjackView | None]:
         game = self.games[key]
         balance = await self.db.get_balance(game.user_id)
         shoe = await self.shoe_for_user(game.user_id)
+        player_name = self.display_name_for_game(game)
 
-        image = self.renderer.render_png(game, note=note, shoe=shoe)
+        image = self.renderer.render_png(game, note=note, shoe=shoe, player_name=player_name)
         file = discord.File(image, filename="blackjack_table.png")
 
-        embed = discord.Embed(title="♠️ Blackjack", description=note, color=discord.Color.green())
-        embed.add_field(name="Balance", value=money(balance), inline=True)
-        embed.add_field(name="Base Bet", value=money(game.bet_cents), inline=True)
-        payout = "3:2 right now" if game.lucky_blackjack else "6:5"
-        embed.add_field(name="Blackjack Payout", value=payout, inline=True)
-        embed.add_field(
-            name="Deck",
-            value=(
-                f"{shoe.cards_remaining} left • {shoe.discard_count} discard • "
-                f"reshuffle at {RESHUFFLE_AT_REMAINING_CARDS}"
-            ),
-            inline=True,
-        )
-        embed.add_field(name="Hands Since Shuffle", value=str(shoe.hands_played), inline=True)
-        embed.add_field(
-            name="Rules",
-            value="Persistent single deck per player • Dealer hits soft 17 • Insurance pays 2:1 • $10 minimum",
-            inline=False,
-        )
+        title = "♠️ Blackjack! ♠️" if game.phase == "finished" else "♠️ Blackjack"
+        embed = discord.Embed(title=title, description=note.strip(), color=self.embed_color_for_game(game))
+        embed.add_field(name=RULES_TEXT, value="​", inline=False)
         embed.set_footer(
             text=(
                 f"Insurance timer: {INSURANCE_TIMEOUT_SECONDS}s • Action timer: {PLAYER_ACTION_TIMEOUT_SECONDS}s. "
