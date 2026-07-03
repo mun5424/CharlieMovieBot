@@ -21,7 +21,7 @@ DAILY_BONUS_CENTS = 10_000
 DEFAULT_DB_PATH = "bot.db"
 TIMEZONE = "America/Los_Angeles"
 LUCKY_HOURS_PER_DAY = 2
-PLAYER_ACTION_TIMEOUT_SECONDS = 90
+PLAYER_ACTION_TIMEOUT_SECONDS = 30
 INSURANCE_TIMEOUT_SECONDS = 10
 FINISHED_GAME_GRACE_SECONDS = 10 * 60
 
@@ -447,12 +447,22 @@ class BlackjackCog(commands.Cog):
                 note_parts.append(f"Choose an action. Auto-stands in {PLAYER_ACTION_TIMEOUT_SECONDS} seconds.")
 
             embed, file, view = await self.build_response(key, note=" ".join(note_parts))
+            # discord.py's send_message/followup.send treat an explicitly-passed
+            # view=None differently from an omitted view (it checks `is not MISSING`,
+            # not truthiness) and crashes with AttributeError: 'NoneType' object has
+            # no attribute 'is_finished'. view is None whenever the hand finishes
+            # instantly (a natural or dealer blackjack dealt before any player
+            # action), so the view kwarg must be omitted entirely in that case.
+            send_kwargs: dict = {"embed": embed, "file": file}
+            if view is not None:
+                send_kwargs["view"] = view
+
             if bonus_claimed:
                 bonus_embed = self.build_daily_bonus_embed(DAILY_BONUS_CENTS)
                 await interaction.response.send_message(embed=bonus_embed)
-                msg = await interaction.followup.send(embed=embed, file=file, view=view, wait=True)
+                msg = await interaction.followup.send(**send_kwargs, wait=True)
             else:
-                await interaction.response.send_message(embed=embed, file=file, view=view)
+                await interaction.response.send_message(**send_kwargs)
                 msg = await interaction.original_response()
 
             game.message_id = msg.id
@@ -961,7 +971,14 @@ class BlackjackCog(commands.Cog):
 
     def active_status_text(self, note: str, game: BlackjackGame) -> str:
         text = (note or "").strip()
-        return text or ("Waiting for your decision." if game.phase != "insurance" else "Insurance decision pending.")
+        text = text or ("Waiting for your decision." if game.phase != "insurance" else "Insurance decision pending.")
+
+        if len(game.hands) > 1:
+            bet_text = " • ".join(f"Hand {idx}: {money(hand.bet_cents)}" for idx, hand in enumerate(game.hands, start=1))
+        else:
+            bet_text = money(game.hands[0].bet_cents) if game.hands else money(game.bet_cents)
+
+        return f"{text}\nYour Bet: {bet_text}"
 
     def embed_color_for_game(self, game: BlackjackGame) -> discord.Color:
         if game.phase == "insurance":
