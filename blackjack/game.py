@@ -18,10 +18,6 @@ def money(cents: int) -> str:
     return f"{sign}${dollars:,}"
 
 
-def payout_6_to_5(bet_cents: int) -> int:
-    return int((Decimal(bet_cents) * Decimal("1.2")).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
-
-
 def payout_3_to_2(bet_cents: int) -> int:
     return int((Decimal(bet_cents) * Decimal("1.5")).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
 
@@ -62,7 +58,6 @@ class BlackjackGame:
     user_id: int
     channel_id: int
     bet_cents: int
-    lucky_blackjack: bool
     player_label: str = "Player"
     message_id: int = 0
     deck: list[Card] = field(default_factory=new_single_deck)
@@ -77,6 +72,8 @@ class BlackjackGame:
     settlement_lines: list[str] = field(default_factory=list)
     settlement_credited_cents: int = 0
     settlement_net_cents: int = 0
+    hand_results: list[str] = field(default_factory=list)
+    busts_prevented: int = 0
 
     @classmethod
     def start(
@@ -85,7 +82,6 @@ class BlackjackGame:
         user_id: int,
         channel_id: int,
         bet_cents: int,
-        lucky_blackjack: bool,
         deck: list[Card] | None = None,
         player_label: str = "Player",
     ) -> "BlackjackGame":
@@ -93,7 +89,6 @@ class BlackjackGame:
             user_id=user_id,
             channel_id=channel_id,
             bet_cents=bet_cents,
-            lucky_blackjack=lucky_blackjack,
             player_label=player_label,
             deck=deck if deck is not None else new_single_deck(),
         )
@@ -171,7 +166,11 @@ class BlackjackGame:
             self.advance_hand_or_finish()
 
     def stand(self) -> None:
-        self.active_hand.stood = True
+        hand = self.active_hand
+        if 12 <= hand.value <= 16:
+            # Standing on a stiff hand instead of hitting into likely bust range.
+            self.busts_prevented += 1
+        hand.stood = True
         self.advance_hand_or_finish()
 
     def double(self) -> None:
@@ -226,6 +225,7 @@ class BlackjackGame:
         self.settlement_lines.clear()
         self.settlement_credited_cents = 0
         self.settlement_net_cents = 0
+        self.hand_results.clear()
         credited = 0
 
         if self.insurance_bet_cents:
@@ -245,26 +245,33 @@ class BlackjackGame:
             if hand.is_blackjack and self.dealer_has_blackjack:
                 credited += hand.bet_cents
                 self.settlement_lines.append(f"{prefix}: blackjack push")
+                self.hand_results.append("push")
             elif hand.is_blackjack:
-                profit = payout_3_to_2(hand.bet_cents) if self.lucky_blackjack else payout_6_to_5(hand.bet_cents)
+                profit = payout_3_to_2(hand.bet_cents)
                 credited += hand.bet_cents + profit
-                label = "3:2 lucky blackjack" if self.lucky_blackjack else "6:5 blackjack"
-                self.settlement_lines.append(f"{prefix}: {label}")
+                self.settlement_lines.append(f"{prefix}: 3:2 blackjack")
+                self.hand_results.append("win")
             elif hand.busted or hand.value > 21:
                 self.settlement_lines.append(f"{prefix}: bust")
+                self.hand_results.append("loss")
             elif self.dealer_has_blackjack:
                 self.settlement_lines.append(f"{prefix}: dealer blackjack")
+                self.hand_results.append("loss")
             elif dealer_bust:
                 credited += hand.bet_cents * 2
                 self.settlement_lines.append(f"{prefix}: dealer bust, win")
+                self.hand_results.append("win")
             elif hand.value > dealer_total:
                 credited += hand.bet_cents * 2
                 self.settlement_lines.append(f"{prefix}: win")
+                self.hand_results.append("win")
             elif hand.value < dealer_total:
                 self.settlement_lines.append(f"{prefix}: lose")
+                self.hand_results.append("loss")
             else:
                 credited += hand.bet_cents
                 self.settlement_lines.append(f"{prefix}: push")
+                self.hand_results.append("push")
 
         self.settlement_credited_cents = credited
         self.settlement_net_cents = credited - self.total_wagered_cents

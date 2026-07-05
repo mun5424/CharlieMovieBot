@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import random
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -20,10 +19,11 @@ from .shoe import MIN_CARDS_TO_START_HAND, RESHUFFLE_AT_REMAINING_CARDS, SingleD
 logger = logging.getLogger(__name__)
 
 MIN_BET_CENTS = 1_000
-DAILY_BONUS_CENTS = 10_000
+DAILY_BONUS_BASE_CENTS = 10_000
+DAILY_BONUS_STREAK_STEP_CENTS = 2_500
+DAILY_BONUS_MAX_CENTS = 20_000
 DEFAULT_DB_PATH = "bot.db"
 TIMEZONE = "America/Los_Angeles"
-LUCKY_HOURS_PER_DAY = 2
 PLAYER_ACTION_TIMEOUT_SECONDS = 30
 INSURANCE_TIMEOUT_SECONDS = 10
 FINISHED_GAME_GRACE_SECONDS = 10 * 60
@@ -52,20 +52,23 @@ ACTION_ALIASES: dict[str, str] = {
 }
 
 SHORTCUT_HELP = "Shortcuts: H=Hit • S=Stand • D=Double • Y/P=Split • I=Insurance • N=No Insurance"
-RULES_TEXT = "Single Deck • Dealer hits soft 17 • Insurance pays 2:1 • $10 minimum"
+RULES_TEXT = "Single Deck • Dealer hits soft 17 • Blackjack pays 3:2 • Insurance pays 2:1 • $10 minimum"
+
+LEADERBOARD_MEDALS = ["🥇", "🥈", "🥉"]
+# (metric key, embed field label, value format: "int" | "pct" | "money")
+LEADERBOARD_CATEGORIES: list[tuple[str, str, str]] = [
+    ("win_streak", "🔥 Highest Win Streak vs Dealer", "int"),
+    ("busts_prevented", "🛡️ Most Busts Prevented", "int"),
+    ("win_pct", "🎯 Highest Win % (min. 10 hands)", "pct"),
+    ("roi_pct", "📈 Highest ROI % (min. $100 wagered)", "pct"),
+    ("blackjacks_hit", "🂡 Most Blackjacks Hit", "int"),
+    ("biggest_win", "💰 Biggest Single Win", "money"),
+    ("hands_played", "🎰 Most Hands Played", "int"),
+]
 
 
 def today_key() -> str:
     return datetime.now(ZoneInfo(TIMEZONE)).strftime("%Y-%m-%d")
-
-
-def current_hour() -> int:
-    return datetime.now(ZoneInfo(TIMEZONE)).hour
-
-
-def lucky_hours_for_day(day: str) -> list[int]:
-    rng = random.Random(f"blackjack-lucky-hours:{day}")
-    return sorted(rng.sample(range(24), k=LUCKY_HOURS_PER_DAY))
 
 
 def timeout_for_game(game: BlackjackGame | None) -> int:
@@ -266,7 +269,6 @@ class BlackjackCog(commands.Cog):
             "user_id": game.user_id,
             "channel_id": game.channel_id,
             "bet_cents": game.bet_cents,
-            "lucky_blackjack": game.lucky_blackjack,
             "player_label": game.player_label,
             "message_id": game.message_id,
             "deck": [card_to_code(card) for card in game.deck],
@@ -291,6 +293,8 @@ class BlackjackCog(commands.Cog):
             "settlement_lines": game.settlement_lines,
             "settlement_credited_cents": game.settlement_credited_cents,
             "settlement_net_cents": game.settlement_net_cents,
+            "hand_results": game.hand_results,
+            "busts_prevented": game.busts_prevented,
         }
 
     def game_from_active_state(self, state: dict) -> BlackjackGame:
@@ -298,7 +302,6 @@ class BlackjackCog(commands.Cog):
             user_id=int(state["user_id"]),
             channel_id=int(state.get("channel_id", 0)),
             bet_cents=int(state["bet_cents"]),
-            lucky_blackjack=bool(state.get("lucky_blackjack", False)),
             player_label=str(state.get("player_label") or "Player"),
             message_id=int(state.get("message_id", 0)),
             deck=[card_from_code(code) for code in state.get("deck", [])],
@@ -323,6 +326,8 @@ class BlackjackCog(commands.Cog):
             settlement_lines=list(state.get("settlement_lines", [])),
             settlement_credited_cents=int(state.get("settlement_credited_cents", 0)),
             settlement_net_cents=int(state.get("settlement_net_cents", 0)),
+            hand_results=list(state.get("hand_results", [])),
+            busts_prevented=int(state.get("busts_prevented", 0)),
         )
 
     async def save_active_game(self, key: tuple[int, int]) -> None:
@@ -443,7 +448,13 @@ class BlackjackCog(commands.Cog):
                 return
 
             day = today_key()
-            bonus_claimed = await self.db.try_claim_daily_bonus(interaction.user.id, day, DAILY_BONUS_CENTS)
+            bonus_claimed, bonus_amount_cents, bonus_streak = await self.db.claim_daily_bonus(
+                interaction.user.id,
+                day,
+                base_cents=DAILY_BONUS_BASE_CENTS,
+                streak_step_cents=DAILY_BONUS_STREAK_STEP_CENTS,
+                max_cents=DAILY_BONUS_MAX_CENTS,
+            )
 
             bet_cents = bet * 100
             if bet_cents < MIN_BET_CENTS:
@@ -454,7 +465,7 @@ class BlackjackCog(commands.Cog):
             if balance < bet_cents:
                 msg = f"You only have {money(balance)}. The minimum bet is $10."
                 if bonus_claimed:
-                    msg += " I did apply your daily +$100 first-play bonus."
+                    msg += f" I did apply your daily +{money(bonus_amount_cents)} bonus."
                 await interaction.response.send_message(msg, ephemeral=True)
                 return
 
@@ -463,7 +474,6 @@ class BlackjackCog(commands.Cog):
 
             await self.db.add_balance(interaction.user.id, -bet_cents, "blackjack_bet")
 
-            lucky = current_hour() in lucky_hours_for_day(day)
             player_label = (
                 getattr(interaction.user, "display_name", None)
                 or getattr(interaction.user, "global_name", None)
@@ -474,7 +484,6 @@ class BlackjackCog(commands.Cog):
                 user_id=interaction.user.id,
                 channel_id=interaction.channel_id or 0,
                 bet_cents=bet_cents,
-                lucky_blackjack=lucky,
                 deck=shoe.deck,
                 player_label=player_label,
             )
@@ -506,7 +515,7 @@ class BlackjackCog(commands.Cog):
                 send_kwargs["view"] = view
 
             if bonus_claimed:
-                bonus_embed = self.build_daily_bonus_embed(DAILY_BONUS_CENTS)
+                bonus_embed = self.build_daily_bonus_embed(bonus_amount_cents, bonus_streak)
                 await interaction.response.send_message(embed=bonus_embed)
                 msg = await interaction.followup.send(**send_kwargs, wait=True)
             else:
@@ -875,6 +884,18 @@ class BlackjackCog(commands.Cog):
 
         deck_note = ""
         if first_settlement:
+            blackjacks_hit = sum(1 for hand in game.hands if hand.is_blackjack)
+            busts = sum(1 for hand in game.hands if hand.busted or hand.value > 21)
+            await self.db.record_round_stats(
+                user_id,
+                hand_results=game.hand_results,
+                blackjacks_hit=blackjacks_hit,
+                busts=busts,
+                busts_prevented=game.busts_prevented,
+                wagered_cents=game.total_wagered_cents,
+                profit_cents=game.settlement_net_cents,
+            )
+
             shoe = await self.shoe_for_user(user_id)
             reshuffled = shoe.finish_hand(game.cards_in_play())
             await self.save_shoe_for_user(user_id)
@@ -883,13 +904,17 @@ class BlackjackCog(commands.Cog):
 
         return self.format_finished_result(game, balance, deck_note=deck_note)
 
-    def build_daily_bonus_embed(self, amount_cents: int) -> discord.Embed:
+    def build_daily_bonus_embed(self, amount_cents: int, streak: int) -> discord.Embed:
         embed = discord.Embed(
             title="🎁 Your first Blackjack game today!",
             description=f"You have been awarded **{money(amount_cents)}** before the cards are dealt.",
             color=discord.Color.gold(),
         )
-        embed.set_footer(text="Daily bonus resets at midnight PT.")
+        streak_text = f"🔥 {streak} day streak"
+        if amount_cents >= DAILY_BONUS_MAX_CENTS:
+            streak_text += " • max bonus reached!"
+        embed.add_field(name="Sign-in Streak", value=streak_text, inline=False)
+        embed.set_footer(text="Daily bonus resets at midnight PT. Miss a day and your streak resets.")
         return embed
 
     def format_finished_result(self, game: BlackjackGame, balance: int, *, deck_note: str = "") -> str:
@@ -1119,6 +1144,117 @@ class BlackjackCog(commands.Cog):
             self.active_views[key] = view
 
         return embed, file, view
+
+    async def resolve_display_name(self, user_id: int, guild: discord.Guild | None) -> str:
+        if guild is not None:
+            member = guild.get_member(user_id)
+            if member is not None:
+                return member.display_name
+
+        user = self.bot.get_user(user_id)
+        if user is None:
+            try:
+                user = await self.bot.fetch_user(user_id)
+            except discord.HTTPException:
+                user = None
+
+        if user is not None:
+            return getattr(user, "display_name", None) or getattr(user, "global_name", None) or user.name
+        return f"User {user_id}"
+
+    def format_leaderboard_value(self, value: float, fmt: str) -> str:
+        if fmt == "pct":
+            return f"{value:.1f}%"
+        if fmt == "money":
+            return money(int(value))
+        return str(int(value))
+
+    @app_commands.command(
+        name="blackjack_leaderboard",
+        description="View the blackjack leaderboard across several fun categories.",
+    )
+    async def blackjack_leaderboard(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+
+        embed = discord.Embed(title="🃏 Blackjack Leaderboard", color=discord.Color.gold())
+        for metric, label, fmt in LEADERBOARD_CATEGORIES:
+            rows = await self.db.get_leaderboard(metric, limit=3)
+            if not rows:
+                embed.add_field(name=label, value="No qualifying players yet.", inline=False)
+                continue
+
+            lines = []
+            for idx, row in enumerate(rows):
+                name = await self.resolve_display_name(row["user_id"], interaction.guild)
+                medal = LEADERBOARD_MEDALS[idx] if idx < len(LEADERBOARD_MEDALS) else "•"
+                value_text = self.format_leaderboard_value(row["value"], fmt)
+                lines.append(f"{medal} **{name}** — {value_text}")
+            embed.add_field(name=label, value="\n".join(lines), inline=False)
+
+        embed.set_footer(text="Win %/ROI % require a minimum sample size to qualify. Play /blackjack to climb the board!")
+        await interaction.followup.send(embed=embed)
+
+    @app_commands.command(
+        name="blackjack_stats",
+        description="View your own blackjack stats.",
+    )
+    async def blackjack_stats(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+
+        stats = await self.db.get_stats(interaction.user.id)
+        balance = await self.db.get_balance(interaction.user.id)
+
+        decided = stats["hands_won"] + stats["hands_lost"]
+        win_pct = (100.0 * stats["hands_won"] / decided) if decided else 0.0
+        roi_pct = (100.0 * stats["total_profit_cents"] / stats["total_wagered_cents"]) if stats["total_wagered_cents"] else 0.0
+        profit_cents = stats["total_profit_cents"]
+        profit_text = f"{'+' if profit_cents >= 0 else '-'}{money(abs(profit_cents))}"
+
+        embed = discord.Embed(
+            title=f"📊 Blackjack Stats — {interaction.user.display_name}",
+            color=discord.Color.blue(),
+        )
+        embed.add_field(
+            name="🃏 Hands",
+            value=(
+                f"**Played:** `{stats['hands_played']}`\n"
+                f"**Won / Lost / Pushed:** `{stats['hands_won']} / {stats['hands_lost']} / {stats['hands_pushed']}`\n"
+                f"**Win %:** `{win_pct:.1f}%`\n"
+                f"**Blackjacks Hit:** `{stats['blackjacks_hit']}`"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="🔥 Streaks",
+            value=(
+                f"**Current Win Streak:** `{stats['current_win_streak']}`\n"
+                f"**Best Win Streak:** `{stats['best_win_streak']}`\n"
+                f"**Daily Sign-in Streak:** `{stats['daily_streak']}`"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="🛡️ Discipline",
+            value=(
+                f"**Busts:** `{stats['busts']}`\n"
+                f"**Busts Prevented:** `{stats['busts_prevented']}`"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="💰 Money",
+            value=(
+                f"**Balance:** {money(balance)}\n"
+                f"**Total Wagered:** {money(stats['total_wagered_cents'])}\n"
+                f"**Lifetime P/L:** {profit_text}\n"
+                f"**ROI:** `{roi_pct:.1f}%`\n"
+                f"**Biggest Win:** {money(stats['biggest_win_cents'])}"
+            ),
+            inline=False,
+        )
+
+        embed.set_footer(text="Check /blackjack_leaderboard to see how you stack up.")
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 async def setup(bot: commands.Bot, db_path: str = DEFAULT_DB_PATH):
