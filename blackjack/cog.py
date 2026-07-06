@@ -1195,7 +1195,7 @@ class BlackjackCog(commands.Cog):
                 medal = LEADERBOARD_MEDALS[idx] if idx < len(LEADERBOARD_MEDALS) else "•"
                 value_text = self.format_leaderboard_value(row["value"], fmt)
                 lines.append(f"{medal} **{name}** — {value_text}")
-            embed.add_field(name=label, value="\n".join(lines), inline=False)
+            embed.add_field(name=label, value="\n\n".join(lines), inline=False)
 
         embed.set_footer(text="Win %/ROI % require a minimum sample size to qualify. Play /blackjack to climb the board!")
         await interaction.followup.send(embed=embed)
@@ -1223,37 +1223,52 @@ class BlackjackCog(commands.Cog):
         embed.add_field(
             name="🃏 Hands",
             value=(
-                f"**Played:** `{stats['hands_played']}`\n"
-                f"**Won / Lost / Pushed:** `{stats['hands_won']} / {stats['hands_lost']} / {stats['hands_pushed']}`\n"
-                f"**Win %:** `{win_pct:.1f}%`\n"
+                f"**Played:** `{stats['hands_played']}`\n\n"
+                f"**Won / Lost / Pushed:** `{stats['hands_won']} / {stats['hands_lost']} / {stats['hands_pushed']}`\n\n"
+                f"**Win %:** `{win_pct:.1f}%`\n\n"
                 f"**Blackjacks Hit:** `{stats['blackjacks_hit']}`"
             ),
             inline=False,
         )
         embed.add_field(
+            name="​",
+            value="​",
+            inline=False,
+        )
+        embed.add_field(
             name="🔥 Streaks",
             value=(
-                f"**Current Win Streak:** `{stats['current_win_streak']}`\n"
-                f"**Best Win Streak:** `{stats['best_win_streak']}`\n"
+                f"**Current Win Streak:** `{stats['current_win_streak']}`\n\n"
+                f"**Best Win Streak:** `{stats['best_win_streak']}`\n\n"
                 f"**Daily Sign-in Streak:** `{stats['daily_streak']}`"
             ),
             inline=False,
         )
         embed.add_field(
+            name="​",
+            value="​",
+            inline=False,
+        )
+        embed.add_field(
             name="🛡️ Discipline",
             value=(
-                f"**Busts:** `{stats['busts']}`\n"
+                f"**Busts:** `{stats['busts']}`\n\n"
                 f"**Busts Prevented:** `{stats['busts_prevented']}`"
             ),
             inline=False,
         )
         embed.add_field(
+            name="​",
+            value="​",
+            inline=False,
+        )
+        embed.add_field(
             name="💰 Money",
             value=(
-                f"**Balance:** {money(balance)}\n"
-                f"**Total Wagered:** {money(stats['total_wagered_cents'])}\n"
-                f"**Lifetime P/L:** {profit_text}\n"
-                f"**ROI:** `{roi_pct:.1f}%`\n"
+                f"**Balance:** {money(balance)}\n\n"
+                f"**Total Wagered:** {money(stats['total_wagered_cents'])}\n\n"
+                f"**Lifetime P/L:** {profit_text}\n\n"
+                f"**ROI:** `{roi_pct:.1f}%`\n\n"
                 f"**Biggest Win:** {money(stats['biggest_win_cents'])}"
             ),
             inline=False,
