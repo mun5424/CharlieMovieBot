@@ -52,7 +52,7 @@ ACTION_ALIASES: dict[str, str] = {
 }
 
 SHORTCUT_HELP = "Shortcuts: H=Hit • S=Stand • D=Double • Y/P=Split • I=Insurance • N=No Insurance"
-RULES_TEXT = "Single Deck • Dealer hits soft 17 • Blackjack pays 3:2 • Insurance pays 2:1 • $10 minimum"
+RULES_TEXT = "Single Deck • Dealer hits soft 17 • Blackjack 3:2 • Insurance 2:1 "
 
 LEADERBOARD_MEDALS = ["🥇", "🥈", "🥉"]
 # (metric key, embed field label, value format: "int" | "pct" | "money")
@@ -146,6 +146,12 @@ class BlackjackView(discord.ui.View):
             self.skip_insurance_button.disabled = False
             return
 
+        # Dealer only offers insurance when showing an Ace (that's what puts the
+        # game into the "insurance" phase above), so outside that phase these
+        # buttons are never actionable - remove them instead of just disabling.
+        self.remove_item(self.insurance_button)
+        self.remove_item(self.skip_insurance_button)
+
         hand = game.active_hand
         self.hit_button.disabled = False
         self.stand_button.disabled = False
@@ -167,7 +173,7 @@ class BlackjackView(discord.ui.View):
     async def stand_button(self, interaction: discord.Interaction, _: discord.ui.Button):
         await self.cog.handle_action(interaction, self.key, "stand")
 
-    @discord.ui.button(label="Double Down", style=discord.ButtonStyle.success, row=0)
+    @discord.ui.button(label="Double", style=discord.ButtonStyle.success, row=0)
     async def double_button(self, interaction: discord.Interaction, _: discord.ui.Button):
         await self.cog.handle_action(interaction, self.key, "double")
 
