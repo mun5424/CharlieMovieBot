@@ -672,10 +672,20 @@ class BlackjackCog(commands.Cog):
                 return
 
             await self.save_active_game(key)
+
+            # Defer before build_response: resolving insurance can reveal the
+            # player's own natural blackjack (the only way a fresh natural can
+            # surface outside the initial deal), which routes into the ~1s+
+            # celebration GIF render. That alone can blow past Discord's 3s
+            # ack window for this component interaction, turning what should be
+            # a normal edit into a "404 Unknown interaction". defer() on a
+            # component interaction is a silent deferred *update* - it doesn't
+            # post any placeholder message, so there's no visible change here.
+            await interaction.response.defer()
             embed, file, view = await self.build_response(key, note=note, celebrate=True)
             finished = game.phase == "finished"
             try:
-                await interaction.response.edit_message(embed=embed, attachments=[file], view=view)
+                msg = await interaction.edit_original_response(embed=embed, attachments=[file], view=view)
             except discord.HTTPException as exc:
                 logger.warning("Blackjack action edit failed for key=%s: %s", key, exc, exc_info=exc)
                 # The action itself was already applied and saved above (and, if
@@ -684,11 +694,10 @@ class BlackjackCog(commands.Cog):
                 # next click on this same message can recover and render the real
                 # state, matching handle_timeout's recovery behavior below.
                 return
-            if interaction.message:
-                game.message_id = interaction.message.id
-            if view and interaction.message:
-                view.message = interaction.message
-                self.game_messages[key] = interaction.message
+            game.message_id = msg.id
+            if view:
+                view.message = msg
+                self.game_messages[key] = msg
             if finished:
                 self.schedule_finished_cleanup(key, game)
             else:
