@@ -431,6 +431,19 @@ class BlackjackCog(commands.Cog):
     @app_commands.command(name="blackjack", description="Play persistent single-deck blackjack. Minimum bet is $10.")
     @app_commands.describe(bet="Bet amount in dollars. Minimum $10.")
     async def blackjack(self, interaction: discord.Interaction, bet: app_commands.Range[int, 10, 1_000_000] = 10):
+        # Ack immediately, before any DB calls or rendering. A natural blackjack's
+        # celebration GIF alone can take over a second to render, and stacked with
+        # the DB/shoe work below that's enough to blow past Discord's 3s interaction
+        # ack window and surface as "The application did not respond" to the user.
+        # Deferring buys up to 15 minutes instead of 3 seconds. Deferred ephemeral
+        # (rather than public) so the "is thinking..." placeholder doesn't sit in
+        # the channel - error replies resolve it via edit_original_response, and
+        # the real table goes out as a separate public followup, with the now-
+        # unneeded ephemeral placeholder deleted afterward. An unedited deferred
+        # response left dangling eventually shows its own "did not respond" once
+        # the interaction token expires, so every path below must resolve or
+        # delete it - never just fall off the end.
+        await interaction.response.defer(ephemeral=True)
         key = self.key_for(interaction)
         async with self.lock_for(key):
             existing_game = await self.load_active_game(key)
@@ -450,12 +463,11 @@ class BlackjackCog(commands.Cog):
             if existing_game and existing_game.phase != "finished":
                 active_channel = existing_game.channel_id
                 if active_channel:
-                    await interaction.response.send_message(
-                        f"You already have an active blackjack hand in <#{active_channel}>.",
-                        ephemeral=True,
+                    await interaction.edit_original_response(
+                        content=f"You already have an active blackjack hand in <#{active_channel}>."
                     )
                 else:
-                    await interaction.response.send_message("You already have an active blackjack hand.", ephemeral=True)
+                    await interaction.edit_original_response(content="You already have an active blackjack hand.")
                 return
 
             day = today_key()
@@ -469,7 +481,7 @@ class BlackjackCog(commands.Cog):
 
             bet_cents = bet * 100
             if bet_cents < MIN_BET_CENTS:
-                await interaction.response.send_message("Minimum blackjack bet is $10.", ephemeral=True)
+                await interaction.edit_original_response(content="Minimum blackjack bet is $10.")
                 return
 
             balance = await self.db.get_balance(interaction.user.id)
@@ -477,7 +489,7 @@ class BlackjackCog(commands.Cog):
                 msg = f"You only have {money(balance)}. The minimum bet is $10."
                 if bonus_claimed:
                     msg += f" I did apply your daily +{money(bonus_amount_cents)} bonus."
-                await interaction.response.send_message(msg, ephemeral=True)
+                await interaction.edit_original_response(content=msg)
                 return
 
             shoe = await self.shoe_for_user(interaction.user.id)
@@ -527,11 +539,14 @@ class BlackjackCog(commands.Cog):
 
             if bonus_claimed:
                 bonus_embed = self.build_daily_bonus_embed(bonus_amount_cents, bonus_streak)
-                await interaction.response.send_message(embed=bonus_embed)
-                msg = await interaction.followup.send(**send_kwargs, wait=True)
-            else:
-                await interaction.response.send_message(**send_kwargs)
-                msg = await interaction.original_response()
+                await interaction.followup.send(embed=bonus_embed)
+            msg = await interaction.followup.send(**send_kwargs, wait=True)
+            try:
+                # Clears the ephemeral "is thinking..." placeholder left behind by
+                # the defer() above - it's otherwise never resolved on this path.
+                await interaction.delete_original_response()
+            except discord.HTTPException:
+                pass
 
             game.message_id = msg.id
             await self.save_active_game(key)
@@ -1132,12 +1147,20 @@ class BlackjackCog(commands.Cog):
             and any(hand.is_blackjack for hand in game.hands)
         )
         if natural_win:
-            image = self.renderer.render_natural_blackjack_gif(
-                game, payout_cents=game.settlement_net_cents, player_name=player_name
+            # The celebration GIF takes well over a second of CPU-bound Pillow
+            # work (compositing ~19 frames) - run it off the event loop so it
+            # can't stall every other user's concurrent interaction while it renders.
+            image = await asyncio.to_thread(
+                self.renderer.render_natural_blackjack_gif,
+                game,
+                payout_cents=game.settlement_net_cents,
+                player_name=player_name,
             )
             image_filename = "blackjack_table.gif"
         else:
-            image = self.renderer.render_png(game, note=note, shoe=shoe, player_name=player_name)
+            image = await asyncio.to_thread(
+                self.renderer.render_png, game, note=note, shoe=shoe, player_name=player_name
+            )
             image_filename = "blackjack_table.png"
         file = discord.File(image, filename=image_filename)
 
