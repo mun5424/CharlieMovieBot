@@ -438,11 +438,8 @@ class BlackjackCog(commands.Cog):
         # Deferring buys up to 15 minutes instead of 3 seconds. Deferred ephemeral
         # (rather than public) so the "is thinking..." placeholder doesn't sit in
         # the channel - error replies resolve it via edit_original_response, and
-        # the real table goes out as a separate public followup, with the now-
-        # unneeded ephemeral placeholder deleted afterward. An unedited deferred
-        # response left dangling eventually shows its own "did not respond" once
-        # the interaction token expires, so every path below must resolve or
-        # delete it - never just fall off the end.
+        # the real table goes out as a separate public followup (left unresolved
+        # on that path - see the comment further down on why it's not deleted).
         await interaction.response.defer(ephemeral=True)
         key = self.key_for(interaction)
         async with self.lock_for(key):
@@ -567,12 +564,14 @@ class BlackjackCog(commands.Cog):
                     pass
                 return
 
-            try:
-                # Clears the ephemeral "is thinking..." placeholder left behind by
-                # the defer() above - it's otherwise never resolved on this path.
-                await interaction.delete_original_response()
-            except discord.HTTPException:
-                pass
+            # Deliberately not calling interaction.delete_original_response() here:
+            # in production this reliably took the real public followup message
+            # (msg, just sent above) down with it within seconds - handle_timeout
+            # would then 404 with "Unknown Message" trying to edit it ~30s later.
+            # Discord's docs say @original and a followup are distinct messages,
+            # but that's not what was observed, so the ephemeral "is thinking..."
+            # placeholder is left as a harmless, invoker-only leftover instead of
+            # risking the real table.
 
             game.message_id = msg.id
             await self.save_active_game(key)
