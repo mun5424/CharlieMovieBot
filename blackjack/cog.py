@@ -526,21 +526,47 @@ class BlackjackCog(commands.Cog):
             else:
                 note_parts.append(f"Choose an action.")
 
-            embed, file, view = await self.build_response(key, note=" ".join(note_parts), celebrate=True)
-            # discord.py's send_message/followup.send treat an explicitly-passed
-            # view=None differently from an omitted view (it checks `is not MISSING`,
-            # not truthiness) and crashes with AttributeError: 'NoneType' object has
-            # no attribute 'is_finished'. view is None whenever the hand finishes
-            # instantly (a natural or dealer blackjack dealt before any player
-            # action), so the view kwarg must be omitted entirely in that case.
-            send_kwargs: dict = {"embed": embed, "file": file}
-            if view is not None:
-                send_kwargs["view"] = view
+            try:
+                embed, file, view = await self.build_response(key, note=" ".join(note_parts), celebrate=True)
+                # discord.py's send_message/followup.send treat an explicitly-passed
+                # view=None differently from an omitted view (it checks `is not MISSING`,
+                # not truthiness) and crashes with AttributeError: 'NoneType' object has
+                # no attribute 'is_finished'. view is None whenever the hand finishes
+                # instantly (a natural or dealer blackjack dealt before any player
+                # action), so the view kwarg must be omitted entirely in that case.
+                send_kwargs: dict = {"embed": embed, "file": file}
+                if view is not None:
+                    send_kwargs["view"] = view
 
-            if bonus_claimed:
-                bonus_embed = self.build_daily_bonus_embed(bonus_amount_cents, bonus_streak)
-                await interaction.followup.send(embed=bonus_embed)
-            msg = await interaction.followup.send(**send_kwargs, wait=True)
+                if bonus_claimed:
+                    bonus_embed = self.build_daily_bonus_embed(bonus_amount_cents, bonus_streak)
+                    await interaction.followup.send(embed=bonus_embed)
+                msg = await interaction.followup.send(**send_kwargs, wait=True)
+            except Exception:
+                # self.games[key] was already marked active and persisted above, before
+                # any of this. If rendering or delivering the table fails now (a slow
+                # render + a flaky Discord webhook call is enough), that leaves a phantom
+                # "active" hand with no message/view ever attached to resolve it - the
+                # player is locked out of /blackjack forever with nothing to click and no
+                # timeout to save them (BlackjackView.on_timeout no-ops when .message is
+                # None). Tear the phantom hand down and refund so the key is usable again.
+                logger.exception("Blackjack: failed to deliver a freshly dealt hand for key=%s", key)
+                already_settled = game.phase == "finished"
+                await self.cleanup_game_and_db(key)
+                if not already_settled:
+                    await self.db.add_balance(interaction.user.id, bet_cents, "blackjack_deal_send_failure_refund")
+                try:
+                    note = (
+                        "Something went wrong showing that hand's result, but it was already settled - "
+                        "check your balance, then try `/blackjack` again."
+                        if already_settled
+                        else "Something went wrong starting that hand and your bet was refunded. Please try `/blackjack` again."
+                    )
+                    await interaction.edit_original_response(content=note)
+                except discord.HTTPException:
+                    pass
+                return
+
             try:
                 # Clears the ephemeral "is thinking..." placeholder left behind by
                 # the defer() above - it's otherwise never resolved on this path.
