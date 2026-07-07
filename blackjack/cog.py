@@ -431,16 +431,6 @@ class BlackjackCog(commands.Cog):
     @app_commands.command(name="blackjack", description="Play persistent single-deck blackjack. Minimum bet is $10.")
     @app_commands.describe(bet="Bet amount in dollars. Minimum $10.")
     async def blackjack(self, interaction: discord.Interaction, bet: app_commands.Range[int, 10, 1_000_000] = 10):
-        # Ack immediately, before any DB calls or rendering. A natural blackjack's
-        # celebration GIF alone can take over a second to render, and stacked with
-        # the DB/shoe work below that's enough to blow past Discord's 3s interaction
-        # ack window and surface as "The application did not respond" to the user.
-        # Deferring buys up to 15 minutes instead of 3 seconds. Deferred ephemeral
-        # (rather than public) so the "is thinking..." placeholder doesn't sit in
-        # the channel - error replies resolve it via edit_original_response, and
-        # the real table goes out as a separate public followup (left unresolved
-        # on that path - see the comment further down on why it's not deleted).
-        await interaction.response.defer(ephemeral=True)
         key = self.key_for(interaction)
         async with self.lock_for(key):
             existing_game = await self.load_active_game(key)
@@ -460,11 +450,12 @@ class BlackjackCog(commands.Cog):
             if existing_game and existing_game.phase != "finished":
                 active_channel = existing_game.channel_id
                 if active_channel:
-                    await interaction.edit_original_response(
-                        content=f"You already have an active blackjack hand in <#{active_channel}>."
+                    await interaction.response.send_message(
+                        f"You already have an active blackjack hand in <#{active_channel}>.",
+                        ephemeral=True,
                     )
                 else:
-                    await interaction.edit_original_response(content="You already have an active blackjack hand.")
+                    await interaction.response.send_message("You already have an active blackjack hand.", ephemeral=True)
                 return
 
             day = today_key()
@@ -478,7 +469,7 @@ class BlackjackCog(commands.Cog):
 
             bet_cents = bet * 100
             if bet_cents < MIN_BET_CENTS:
-                await interaction.edit_original_response(content="Minimum blackjack bet is $10.")
+                await interaction.response.send_message("Minimum blackjack bet is $10.", ephemeral=True)
                 return
 
             balance = await self.db.get_balance(interaction.user.id)
@@ -486,8 +477,18 @@ class BlackjackCog(commands.Cog):
                 msg = f"You only have {money(balance)}. The minimum bet is $10."
                 if bonus_claimed:
                     msg += f" I did apply your daily +{money(bonus_amount_cents)} bonus."
-                await interaction.edit_original_response(content=msg)
+                await interaction.response.send_message(msg, ephemeral=True)
                 return
+
+            # Committed to dealing a hand now - defer before the slow render/send
+            # work below (a natural blackjack's celebration GIF alone can take
+            # over a second to render), so Discord always gets acked well within
+            # its 3s window regardless of render time. Public/non-ephemeral:
+            # Discord ties a followup's ephemeral-ness to how the *original*
+            # response was deferred, not to flags passed on the followup call
+            # itself - deferring ephemeral here silently made the real, public
+            # hand table ephemeral too (confirmed against the live bot).
+            await interaction.response.defer()
 
             shoe = await self.shoe_for_user(interaction.user.id)
             shuffled_before_hand = shoe.prepare_for_new_hand()
@@ -525,20 +526,27 @@ class BlackjackCog(commands.Cog):
 
             try:
                 embed, file, view = await self.build_response(key, note=" ".join(note_parts), celebrate=True)
-                # discord.py's send_message/followup.send treat an explicitly-passed
-                # view=None differently from an omitted view (it checks `is not MISSING`,
-                # not truthiness) and crashes with AttributeError: 'NoneType' object has
-                # no attribute 'is_finished'. view is None whenever the hand finishes
-                # instantly (a natural or dealer blackjack dealt before any player
-                # action), so the view kwarg must be omitted entirely in that case.
-                send_kwargs: dict = {"embed": embed, "file": file}
-                if view is not None:
-                    send_kwargs["view"] = view
-
                 if bonus_claimed:
+                    # edit_original_response turns the deferred placeholder into a real,
+                    # permanent public message instead of leaving it as a dangling
+                    # "thinking..." - it's always the earliest message in the channel
+                    # (created back at defer()), so it must carry the bonus embed here
+                    # for the bonus-then-table reading order; the table then goes out
+                    # as a second, later followup message below it.
                     bonus_embed = self.build_daily_bonus_embed(bonus_amount_cents, bonus_streak)
-                    await interaction.followup.send(embed=bonus_embed)
-                msg = await interaction.followup.send(**send_kwargs, wait=True)
+                    await interaction.edit_original_response(embed=bonus_embed)
+                    # discord.py's followup.send() treats an explicitly-passed view=None
+                    # differently from an omitted view (it checks `is not MISSING`, not
+                    # truthiness) and crashes with AttributeError: 'NoneType' object has
+                    # no attribute 'is_finished'. view is None whenever the hand finishes
+                    # instantly (a natural or dealer blackjack dealt before any player
+                    # action), so the view kwarg must be omitted entirely in that case.
+                    send_kwargs: dict = {"embed": embed, "file": file}
+                    if view is not None:
+                        send_kwargs["view"] = view
+                    msg = await interaction.followup.send(**send_kwargs, wait=True)
+                else:
+                    msg = await interaction.edit_original_response(embed=embed, attachments=[file], view=view)
             except Exception:
                 # self.games[key] was already marked active and persisted above, before
                 # any of this. If rendering or delivering the table fails now (a slow
@@ -559,19 +567,10 @@ class BlackjackCog(commands.Cog):
                         if already_settled
                         else "Something went wrong starting that hand and your bet was refunded. Please try `/blackjack` again."
                     )
-                    await interaction.edit_original_response(content=note)
+                    await interaction.edit_original_response(content=note, embed=None, attachments=[], view=None)
                 except discord.HTTPException:
                     pass
                 return
-
-            # Deliberately not calling interaction.delete_original_response() here:
-            # in production this reliably took the real public followup message
-            # (msg, just sent above) down with it within seconds - handle_timeout
-            # would then 404 with "Unknown Message" trying to edit it ~30s later.
-            # Discord's docs say @original and a followup are distinct messages,
-            # but that's not what was observed, so the ephemeral "is thinking..."
-            # placeholder is left as a harmless, invoker-only leftover instead of
-            # risking the real table.
 
             game.message_id = msg.id
             await self.save_active_game(key)
