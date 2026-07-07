@@ -433,11 +433,14 @@ async def check_custom_reminders():
     for reminder in CUSTOM_REMINDERS:
         event_date = reminder["date"]
         days_until = (event_date - today).days
+        # Some reminders (e.g. signup-deadline ones) want their "day of" ping
+        # sent early so people see it before the deadline passes instead of on it.
+        day_of_offset = reminder.get("day_of_offset", 0)
 
         # for testing
         # days_until = 0
 
-        if days_until == 3 or days_until == 0:
+        if days_until == 3 or days_until == day_of_offset:
             logger.info(f"[Reminder] Sending for '{reminder['name']}' (in {days_until} days)")
 
             embed = discord.Embed(
@@ -454,7 +457,7 @@ async def check_custom_reminders():
                 footer = reminder.get("footer_3", "**TODAY WILL BE THE LAST DAY TO SIGN UP!** ")
                 embed.set_footer(text=footer)
 
-            if days_until == 0:
+            if days_until == day_of_offset:
                 footer = reminder.get("footer_0", "**TOURNAMENT WILL START AT 7PM TODAY. LOCK IN 🔒** ")
                 embed.set_footer(text=footer)
 

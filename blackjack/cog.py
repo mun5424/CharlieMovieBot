@@ -514,7 +514,7 @@ class BlackjackCog(commands.Cog):
             else:
                 note_parts.append(f"Choose an action.")
 
-            embed, file, view = await self.build_response(key, note=" ".join(note_parts))
+            embed, file, view = await self.build_response(key, note=" ".join(note_parts), celebrate=True)
             # discord.py's send_message/followup.send treat an explicitly-passed
             # view=None differently from an omitted view (it checks `is not MISSING`,
             # not truthiness) and crashes with AttributeError: 'NoneType' object has
@@ -633,7 +633,7 @@ class BlackjackCog(commands.Cog):
                 return
 
             await self.save_active_game(key)
-            embed, file, view = await self.build_response(key, note=note)
+            embed, file, view = await self.build_response(key, note=note, celebrate=True)
             finished = game.phase == "finished"
             try:
                 await interaction.response.edit_message(embed=embed, attachments=[file], view=view)
@@ -731,7 +731,7 @@ class BlackjackCog(commands.Cog):
                 )
                 return
 
-            embed, file, view = await self.build_response(key, note=note)
+            embed, file, view = await self.build_response(key, note=note, celebrate=True)
             finished = game.phase == "finished"
             try:
                 await table_message.edit(embed=embed, attachments=[file], view=view)
@@ -866,7 +866,7 @@ class BlackjackCog(commands.Cog):
                 note += " " + timeout_text_for_game(game)
 
             await self.save_active_game(key)
-            embed, file, view = await self.build_response(key, note=note)
+            embed, file, view = await self.build_response(key, note=note, celebrate=True)
             finished = game.phase == "finished"
             try:
                 await message.edit(embed=embed, attachments=[file], view=view)
@@ -1117,14 +1117,29 @@ class BlackjackCog(commands.Cog):
             return discord.Color.green()
         return discord.Color.red()
 
-    async def build_response(self, key: tuple[int, int], *, note: str) -> tuple[discord.Embed, discord.File, BlackjackView | None]:
+    async def build_response(
+        self, key: tuple[int, int], *, note: str, celebrate: bool = False
+    ) -> tuple[discord.Embed, discord.File, BlackjackView | None]:
         game = self.games[key]
         balance = await self.db.get_balance(game.user_id)
         shoe = await self.shoe_for_user(game.user_id)
         player_name = self.display_name_for_game(game)
 
-        image = self.renderer.render_png(game, note=note, shoe=shoe, player_name=player_name)
-        file = discord.File(image, filename="blackjack_table.png")
+        natural_win = (
+            celebrate
+            and game.phase == "finished"
+            and game.settlement_net_cents > 0
+            and any(hand.is_blackjack for hand in game.hands)
+        )
+        if natural_win:
+            image = self.renderer.render_natural_blackjack_gif(
+                game, payout_cents=game.settlement_net_cents, player_name=player_name
+            )
+            image_filename = "blackjack_table.gif"
+        else:
+            image = self.renderer.render_png(game, note=note, shoe=shoe, player_name=player_name)
+            image_filename = "blackjack_table.png"
+        file = discord.File(image, filename=image_filename)
 
         if game.phase == "finished":
             title = self.finished_title_for_game(game)
@@ -1146,7 +1161,7 @@ class BlackjackCog(commands.Cog):
         else:
             embed.set_footer(text=RULES_TEXT)
 
-        embed.set_image(url="attachment://blackjack_table.png")
+        embed.set_image(url=f"attachment://{image_filename}")
 
         # Whenever we're about to replace the view attached to this key's message
         # (or stop attaching one at all, because the hand finished), stop the
