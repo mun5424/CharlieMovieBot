@@ -55,6 +55,11 @@ SHORTCUT_HELP = "Shortcuts: H=Hit • S=Stand • D=Double • Y/P=Split • I=I
 RULES_TEXT = "Single Deck • Dealer hits soft 17 • Blackjack 3:2 • Insurance 2:1 "
 
 LEADERBOARD_MEDALS = ["🥇", "🥈", "🥉"]
+# Blackjack balances/stats are global across every server the bot is in, so the
+# leaderboard query itself has no guild scoping. To keep results limited to the
+# requesting server, we pull more candidates than we need and filter out any
+# user who isn't a member of that guild before taking the top 3.
+LEADERBOARD_CANDIDATE_LIMIT = 25
 # (metric key, embed field label, value format: "int" | "pct" | "money")
 LEADERBOARD_CATEGORIES: list[tuple[str, str, str]] = [
     ("win_streak", "🔥 Highest Win Streak vs Dealer", "int"),
@@ -981,6 +986,8 @@ class BlackjackCog(commands.Cog):
                     result = "lose"
                 else:
                     result = "push"
+                if hand.doubled:
+                    result += " (doubled)"
                 details.append(f"Hand {idx}: {result}")
 
         return " • ".join(details)
@@ -1078,9 +1085,15 @@ class BlackjackCog(commands.Cog):
         text = text or ("Waiting for your decision." if game.phase != "insurance" else "Insurance decision pending.")
 
         if len(game.hands) > 1:
-            bet_text = " • ".join(f"Hand {idx}: {money(hand.bet_cents)}" for idx, hand in enumerate(game.hands, start=1))
+            bet_text = " • ".join(
+                f"Hand {idx}: {money(hand.bet_cents)}{' (doubled)' if hand.doubled else ''}"
+                for idx, hand in enumerate(game.hands, start=1)
+            )
         else:
-            bet_text = money(game.hands[0].bet_cents) if game.hands else money(game.bet_cents)
+            hand = game.hands[0] if game.hands else None
+            bet_text = money(hand.bet_cents) if hand else money(game.bet_cents)
+            if hand and hand.doubled:
+                bet_text += " (doubled)"
 
         return f"{text} Your Bet: {bet_text}"
 
@@ -1168,6 +1181,28 @@ class BlackjackCog(commands.Cog):
             return getattr(user, "display_name", None) or getattr(user, "global_name", None) or user.name
         return f"User {user_id}"
 
+    async def resolve_guild_member(
+        self, guild: discord.Guild, user_id: int, cache: dict[int, discord.Member | None]
+    ) -> discord.Member | None:
+        """Resolve a user_id to a Member of `guild`, or None if they aren't a member.
+
+        Used to filter the (global) blackjack leaderboard down to just this
+        server, since the members gateway intent isn't enabled and guild.members
+        can't be trusted to be a complete cache.
+        """
+        if user_id in cache:
+            return cache[user_id]
+
+        member = guild.get_member(user_id)
+        if member is None:
+            try:
+                member = await guild.fetch_member(user_id)
+            except discord.HTTPException:
+                member = None
+
+        cache[user_id] = member
+        return member
+
     def format_leaderboard_value(self, value: float, fmt: str) -> str:
         if fmt == "pct":
             return f"{value:.1f}%"
@@ -1179,22 +1214,31 @@ class BlackjackCog(commands.Cog):
         name="blackjack_leaderboard",
         description="View the blackjack leaderboard across several fun categories.",
     )
+    @app_commands.guild_only()
     async def blackjack_leaderboard(self, interaction: discord.Interaction):
         await interaction.response.defer()
 
+        guild = interaction.guild
+        member_cache: dict[int, discord.Member | None] = {}
+
         embed = discord.Embed(title="🃏 Blackjack Leaderboard", color=discord.Color.gold())
         for metric, label, fmt in LEADERBOARD_CATEGORIES:
-            rows = await self.db.get_leaderboard(metric, limit=3)
-            if not rows:
-                embed.add_field(name=label, value="No qualifying players yet.", inline=False)
-                continue
+            candidates = await self.db.get_leaderboard(metric, limit=LEADERBOARD_CANDIDATE_LIMIT)
 
             lines = []
-            for idx, row in enumerate(rows):
-                name = await self.resolve_display_name(row["user_id"], interaction.guild)
-                medal = LEADERBOARD_MEDALS[idx] if idx < len(LEADERBOARD_MEDALS) else "•"
+            for row in candidates:
+                member = await self.resolve_guild_member(guild, row["user_id"], member_cache)
+                if member is None:
+                    continue
+                medal = LEADERBOARD_MEDALS[len(lines)] if len(lines) < len(LEADERBOARD_MEDALS) else "•"
                 value_text = self.format_leaderboard_value(row["value"], fmt)
-                lines.append(f"{medal} **{name}** — {value_text}")
+                lines.append(f"{medal} **{member.display_name}** — {value_text}")
+                if len(lines) >= len(LEADERBOARD_MEDALS):
+                    break
+
+            if not lines:
+                embed.add_field(name=label, value="No qualifying players yet.", inline=False)
+                continue
             embed.add_field(name=label, value="\n\n".join(lines), inline=False)
 
         embed.set_footer(text="Win %/ROI % require a minimum sample size to qualify. Play /blackjack to climb the board!")

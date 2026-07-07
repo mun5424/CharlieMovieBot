@@ -52,9 +52,6 @@ OPENTDB_CATEGORY_MAP: Dict[int, CategoryMapping] = {
     32: CategoryMapping(32, "Cartoons", UnifiedCategory.ENTERTAINMENT),
 }
 
-# SF6 is its own special category under Gaming
-SF6_CATEGORY = CategoryMapping("sf6", "Street Fighter 6", UnifiedCategory.GAMING)
-
 
 def get_unified_categories() -> List[str]:
     """Get list of all unified category names for autocomplete"""
@@ -85,9 +82,6 @@ def get_category_display_info() -> Dict[str, Dict]:
             for mapping in OPENTDB_CATEGORY_MAP.values()
             if mapping.unified == unified
         ]
-        # Add SF6 to Gaming
-        if unified == UnifiedCategory.GAMING:
-            sub_categories.append("Street Fighter 6")
 
         info[unified.value] = {
             "emoji": CATEGORY_EMOJIS.get(unified, "❓"),

@@ -22,7 +22,7 @@ from trivia.categories import (
 )
 from trivia.providers import (
     TriviaProvider, StandardQuestion,
-    OpenTDBProvider, SF6Provider, TriviaAPIProvider, QuizAPIProvider
+    OpenTDBProvider, TriviaAPIProvider, QuizAPIProvider
 )
 
 logger = logging.getLogger(__name__)
@@ -195,11 +195,9 @@ class ScoreCalculator:
         is_correct: bool,
         streak: int,
         was_intentional: bool = False,
-        is_sf6: bool = False
     ) -> Tuple[int, Dict[str, Any]]:
         """Calculate final score with breakdown"""
-        scoring_difficulty = Difficulty.EASY if is_sf6 else difficulty
-        base_points = SCORING_CONFIG["base_points"][scoring_difficulty.value]
+        base_points = SCORING_CONFIG["base_points"][difficulty.value]
         speed_bonus, speed_tier = ScoreCalculator.calculate_speed_bonus(response_time)
         streak_multiplier = ScoreCalculator.calculate_streak_multiplier(streak)
 
@@ -212,7 +210,6 @@ class ScoreCalculator:
             "penalty_reason": "",
             "rush_penalty": 0,
             "rush_tier": "",
-            "is_sf6": is_sf6
         }
 
         if is_correct:
@@ -220,14 +217,11 @@ class ScoreCalculator:
         else:
             # Base wrong answer penalty
             if was_intentional:
-                penalty = SCORING_CONFIG["penalties"]["wrong_answer_intentional"][scoring_difficulty.value]
+                penalty = SCORING_CONFIG["penalties"]["wrong_answer_intentional"][difficulty.value]
                 penalty_reason = f"Wrong on {difficulty.value.title()} (Intentional)"
             else:
-                penalty = SCORING_CONFIG["penalties"]["wrong_answer_random"][scoring_difficulty.value]
+                penalty = SCORING_CONFIG["penalties"]["wrong_answer_random"][difficulty.value]
                 penalty_reason = f"Wrong on {difficulty.value.title()} (Random)"
-
-            if is_sf6:
-                penalty_reason += " - SF6 Easy Penalty"
 
             # Diminishing rush penalty - faster = more penalty
             rush_penalty, rush_tier = ScoreCalculator.calculate_rush_penalty(response_time)
@@ -272,10 +266,6 @@ class TriviaCog(commands.Cog):
         opentdb = OpenTDBProvider(self.data_manager)
         self.providers["opentdb"] = opentdb
 
-        # SF6 provider (frame data)
-        sf6 = SF6Provider()
-        self.providers["sf6"] = sf6
-
         # The Trivia API provider (no API key needed)
         trivia_api = TriviaAPIProvider()
         self.providers["trivia_api"] = trivia_api
@@ -298,7 +288,7 @@ class TriviaCog(commands.Cog):
     def _select_random_provider(self, unified_category: Optional[UnifiedCategory] = None) -> TriviaProvider:
         """
         Select a random provider with weighted probabilities.
-        Weights: OpenTDB 55%, Trivia API 40%, SF6 5%
+        Weights: OpenTDB 55%, Trivia API 45%
         QuizAPI disabled (programming-focused questions removed)
         """
         available_providers = []
@@ -315,13 +305,7 @@ class TriviaCog(commands.Cog):
             trivia_api = self.providers["trivia_api"]
             if unified_category is None or unified_category in trivia_api.get_supported_categories():
                 available_providers.append(trivia_api)
-                weights.append(40)
-
-        # SF6 - only for Gaming or random (rare - 5%)
-        if self.providers.get("sf6") and self.providers["sf6"].is_available:
-            if unified_category is None or unified_category == UnifiedCategory.GAMING:
-                available_providers.append(self.providers["sf6"])
-                weights.append(5)
+                weights.append(45)
 
         # QuizAPI disabled - programming questions removed
 
@@ -398,7 +382,7 @@ class TriviaCog(commands.Cog):
             # Find a fallback provider we haven't tried
             # QuizAPI removed from fallback (programming questions disabled)
             current_provider = None
-            fallback_order = ["opentdb", "trivia_api", "sf6"]
+            fallback_order = ["opentdb", "trivia_api"]
 
             for pid in fallback_order:
                 if pid in tried_providers:
@@ -479,11 +463,9 @@ class TriviaCog(commands.Cog):
     async def autocomplete_category(self, interaction: discord.Interaction, current: str):
         """Autocomplete for unified trivia categories"""
         categories = get_unified_categories()
-        # Add SF6 as special option under Gaming
-        all_options = categories + ["Street Fighter 6"]
 
         choices = []
-        for cat in all_options:
+        for cat in categories:
             if current.lower() in cat.lower():
                 choices.append(app_commands.Choice(name=cat, value=cat))
 
@@ -560,10 +542,7 @@ class TriviaCog(commands.Cog):
         provider = None
         unified_category = None
 
-        if category == "Street Fighter 6":
-            provider = self.providers.get("sf6")
-            unified_category = UnifiedCategory.GAMING
-        elif category:
+        if category:
             try:
                 unified_category = UnifiedCategory(category)
                 # Select provider that supports this category
@@ -617,16 +596,11 @@ class TriviaCog(commands.Cog):
 
         # Get difficulty enum
         difficulty = Difficulty(question.difficulty)
-        is_sf6 = question.provider == "sf6"
 
         # Create embed
         category_emoji = get_category_emoji(question.unified_category)
-        if is_sf6:
-            title = f"🎮⚔️ Street Fighter 6 Trivia"
-            embed_color = discord.Color.from_rgb(255, 215, 0)
-        else:
-            title = f"{category_emoji} {question.category} Trivia"
-            embed_color = self._get_difficulty_color(difficulty)
+        title = f"{category_emoji} {question.category} Trivia"
+        embed_color = self._get_difficulty_color(difficulty)
 
         embed = discord.Embed(title=title, color=embed_color)
 
@@ -643,16 +617,11 @@ class TriviaCog(commands.Cog):
         embed.add_field(name="⚡ Difficulty", value=diff_display, inline=True)
 
         # Scoring info
-        if is_sf6:
-            base_points = SCORING_CONFIG["base_points"]["easy"]
-            scoring_note = "\n*(🎮 SF6 uses Easy scoring)*"
-        else:
-            base_points = SCORING_CONFIG["base_points"][difficulty.value]
-            scoring_note = ""
+        base_points = SCORING_CONFIG["base_points"][difficulty.value]
         max_speed_bonus = SCORING_CONFIG["speed_bonuses"][0]["bonus"]
         embed.add_field(
             name="💰 Scoring",
-            value=f"**Base:** {base_points} pts\n**Max Speed:** +{max_speed_bonus} pts{scoring_note}",
+            value=f"**Base:** {base_points} pts\n**Max Speed:** +{max_speed_bonus} pts",
             inline=True
         )
 
@@ -665,8 +634,6 @@ class TriviaCog(commands.Cog):
         # Show concurrent players info
         active_count = self._get_active_count(guild_id) + 1
         footer_text = f"🎯 Only {interaction.user.name} can answer! Type A, B, C, or D. ({QUESTION_TIMEOUT}s) | 🎮 Players: {active_count}/{MAX_CONCURRENT_PLAYERS}"
-        if is_sf6:
-            footer_text += " | ⚔️ Frame data mastery required!"
         embed.set_footer(text=footer_text)
 
         msg = await interaction.followup.send(embed=embed)
@@ -799,7 +766,6 @@ class TriviaCog(commands.Cog):
                 # Calculate score
                 response_time = time.time() - active_q.start_time
                 is_correct = content == active_q.correct_letter
-                is_sf6 = active_q.question_data.provider == "sf6"
 
                 user_stats = self.data_manager.get_user_stats(guild_id, str(user_id), message.author.name)
 
@@ -809,7 +775,6 @@ class TriviaCog(commands.Cog):
                     is_correct,
                     user_stats.current_streak,
                     active_q.was_intentional,
-                    is_sf6
                 )
 
                 # Mark question as seen
@@ -826,7 +791,7 @@ class TriviaCog(commands.Cog):
                 await self._send_answer_response(
                     message, is_correct, active_q.correct_letter, active_q.correct_answer,
                     response_time, score_change, breakdown, updated_stats,
-                    active_q.was_intentional, active_q.question_data
+                    active_q.was_intentional
                 )
 
                 # Check for milestone (every 10 questions)
@@ -855,7 +820,6 @@ class TriviaCog(commands.Cog):
         breakdown: Dict,
         user_stats: UserStats,
         was_intentional: bool,
-        question_data: StandardQuestion
     ):
         """Send the answer response embed"""
         if is_correct:
@@ -904,14 +868,6 @@ class TriviaCog(commands.Cog):
             )
 
         embed.add_field(name="\u200b", value=score_text, inline=False)
-
-        # SF6 explanation
-        if question_data.explanation and question_data.provider == "sf6":
-            embed.add_field(
-                name="🎮 Frame Data Explanation",
-                value=f"*{question_data.explanation}*",
-                inline=False
-            )
 
         await message.channel.send(embed=embed)
 
@@ -1009,8 +965,7 @@ class TriviaCog(commands.Cog):
                         f"+ 🌟 Be the first to play! 🌟\n"
                         f"+ ⭐ Your legend starts here! ⭐\n"
                         f"```\n\n"
-                        f"🚀💫 **Ready to compete?** Use `/trivia` to start your legendary journey! 🎯✨\n\n"
-                        f"🎮 **NEW:** Try `Street Fighter 6` category for frame data mastery!",
+                        f"🚀💫 **Ready to compete?** Use `/trivia` to start your legendary journey! 🎯✨",
                 color=discord.Color.gold()
             )
             await interaction.followup.send(embed=embed)
@@ -1121,8 +1076,7 @@ class TriviaCog(commands.Cog):
                         f"```\n"
                         f"📜 **History awaits your greatness!** 📜\n"
                         f"🎭 Seasons are automatically archived on the 7th of every month!\n"
-                        f"✨ Start building your legendary legacy with `/trivia`!\n\n"
-                        f"🎮 **NEW:** Try Street Fighter 6 trivia for hardcore frame data challenges!✨ ",
+                        f"✨ Start building your legendary legacy with `/trivia`!",
                 color=discord.Color.gold()
             )
             if interaction.guild and interaction.guild.icon:
@@ -1262,7 +1216,6 @@ class TriviaCog(commands.Cog):
                 inline=True
             )
 
-        embed.set_footer(text="Tip: Try 'Street Fighter 6' for hardcore frame data challenges!")
         await interaction.followup.send(embed=embed)
 
     @app_commands.command(name="trivia_reset_title", description="Set a custom title for the current trivia season")

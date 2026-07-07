@@ -44,7 +44,7 @@ class OpenTDBProvider(TriviaProvider):
         self._data_manager = data_manager
 
     def get_supported_categories(self) -> List[UnifiedCategory]:
-        """OpenTDB supports all unified categories except SF6-specific ones"""
+        """OpenTDB supports all unified categories"""
         return [
             UnifiedCategory.ENTERTAINMENT,
             UnifiedCategory.GAMING,

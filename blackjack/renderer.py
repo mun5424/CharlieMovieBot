@@ -58,8 +58,12 @@ class CardRenderer:
         for index, row in enumerate(rows):
             top = y - 12
             bottom = y + row_h - 10
-            outline = (255, 230, 120) if row["active"] else (235, 235, 235)
-            width = 5 if row["active"] else 2
+            if row["active"]:
+                outline, width = (255, 230, 120), 5
+            elif row["doubled"]:
+                outline, width = (255, 140, 0), 4
+            else:
+                outline, width = (235, 235, 235), 2
             draw.rounded_rectangle(
                 (MARGIN_X // 2, top, CANVAS_W - MARGIN_X // 2, bottom),
                 radius=22,
@@ -96,6 +100,7 @@ class CardRenderer:
                 "cards": game.dealer,
                 "hide_second": dealer_hidden,
                 "active": False,
+                "doubled": False,
             }
         ]
 
@@ -106,7 +111,13 @@ class CardRenderer:
             active = game.phase == "player" and idx == game.active_hand_index
             prefix = f"{player_label} Hand {idx + 1}" if multiple_hands else player_label
             label = f"{prefix} ({value}{' soft' if soft else ''})"
-            if hand.busted:
+            # double() always sets stood=True too, so doubled must be checked
+            # first or a doubled hand would just be mislabeled "STAND".
+            if hand.doubled and hand.busted:
+                label += " — DOUBLED, BUST"
+            elif hand.doubled:
+                label += " — DOUBLED"
+            elif hand.busted:
                 label += " — BUST"
             elif hand.stood:
                 label += " — STAND"
@@ -119,6 +130,7 @@ class CardRenderer:
                     "cards": hand.cards,
                     "hide_second": False,
                     "active": active,
+                    "doubled": hand.doubled,
                 }
             )
 
