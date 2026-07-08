@@ -772,6 +772,14 @@ class BlackjackCog(commands.Cog):
 
             table_message = await self.resolve_table_message(key, game)
             if table_message is None:
+                if game.phase == "finished":
+                    # There's no message left to recover via (unlike the HTTPException
+                    # branch below, where the table message still exists and a later
+                    # click can resync it) - without this, a hand that finishes via a
+                    # shortcut whose table message got deleted/unreachable would sit in
+                    # blackjack_active_games as "finished" forever, since nothing else
+                    # ever schedules its cleanup.
+                    self.schedule_finished_cleanup(key, game)
                 await self.send_shortcut_error(
                     message,
                     "Your action was applied, but I could not find the blackjack table message to update it. "
