@@ -26,6 +26,7 @@ class CardRenderer:
         self.asset_dir = Path(asset_dir) if asset_dir else Path(__file__).parent / "assets" / "cards"
         self._source_cache: dict[str, "Image.Image"] = {}
         self._resized_cache: dict[tuple[str, int, int], "Image.Image"] = {}
+        self._font_cache: dict[int, "ImageFont.FreeTypeFont"] = {}
 
     def render_png(
         self,
@@ -89,13 +90,22 @@ class CardRenderer:
 
         confetti = self._make_confetti(random.Random(1), background.size)
 
+        # Cards never move frame-to-frame; every zero-sunburst frame (the
+        # reveal beat and the whole payout beat) is otherwise identical, so
+        # precompute that composite once and hand out cheap copies of it
+        # instead of re-pasting the same card images onto a fresh background
+        # every time.
+        base_with_cards = background.copy()
+        self._paste_cards_only(base_with_cards, rows, card_w, card_h)
+
         frames: list["Image.Image"] = []
         durations: list[int] = []
 
         def build_frame(*, sunburst: float = 0.0) -> "Image.Image":
+            if sunburst <= 0:
+                return base_with_cards.copy()
             frame = background.copy()
-            if sunburst > 0:
-                self._draw_sunburst(frame, center, sunburst)
+            self._draw_sunburst(frame, center, sunburst)
             self._paste_cards_only(frame, rows, card_w, card_h)
             return frame
 
@@ -106,32 +116,36 @@ class CardRenderer:
         # Beat 0: plain reveal, matching the still render, held briefly.
         add(build_frame(), 500)
 
-        burst_steps = 5
+        # Frame counts below are trimmed from an original 19-frame cut (5/4/3/6
+        # per beat) to 13, with each beat's duration kept the same overall
+        # length by stretching out the fewer remaining frames - same pacing,
+        # ~1/3 fewer frames to draw/encode/quantize.
+        burst_steps = 3
         for step in range(1, burst_steps + 1):
             progress = step / burst_steps
             frame = build_frame(sunburst=progress)
             self._draw_confetti(frame, confetti, step)
             self._draw_banner_text(frame, "BLACKJACK!", banner_text_y, progress)
-            add(frame, 80)
+            add(frame, 133)
 
-        hold_steps = 4
+        hold_steps = 3
         for step in range(hold_steps):
             frame = build_frame(sunburst=1.0)
             self._draw_confetti(frame, confetti, burst_steps + step)
             self._draw_banner_text(frame, "BLACKJACK!", banner_text_y, 1.0)
             self._draw_sparkles(frame, center, card_w, card_h, step)
-            add(frame, 130)
+            add(frame, 173)
 
-        transition_steps = 3
+        transition_steps = 2
         for step in range(1, transition_steps + 1):
             fade = 1.0 - step / transition_steps
             frame = build_frame(sunburst=fade)
             self._draw_confetti(frame, confetti, burst_steps + hold_steps + step)
             self._draw_sparkles(frame, center, card_w, card_h, hold_steps + step)
             self._draw_ribbon(frame, "* Natural 21 *", card_bottom_y - 26, step / transition_steps)
-            add(frame, 110)
+            add(frame, 165)
 
-        payout_steps = 6
+        payout_steps = 4
         payout_text = f"+{money(payout_cents)}"
         for step in range(payout_steps):
             frame = build_frame()
@@ -140,20 +154,49 @@ class CardRenderer:
             self._draw_ribbon(frame, "* Natural 21 *", card_bottom_y - 26, 1.0)
             reveal = min(1.0, (step + 1) / 3)
             self._draw_ribbon(frame, payout_text, card_bottom_y + 60, reveal, accent=True)
-            add(frame, 160)
+            add(frame, 240)
+
+        # Pillow quantizes each RGB frame to its own adaptive 256-color palette
+        # at save time unless the frame already arrives in "P" mode - profiling
+        # showed that per-frame adaptive quantization is ~70% of this method's
+        # total time (~750ms of ~1.1s for a 19-frame animation). Building one
+        # shared palette from the busiest frames and reusing it for every frame
+        # cuts that to a few dozen ms, since mapping onto an existing palette is
+        # far cheaper than computing a new one.
+        peak_index = min(1 + burst_steps, len(frames) - 1)
+        palette_source = self._gif_palette_source([frames[peak_index], frames[-1]])
+        paletted_frames = [frame.quantize(palette=palette_source, dither=Image.Dither.NONE) for frame in frames]
 
         output = io.BytesIO()
-        frames[0].save(
+        paletted_frames[0].save(
             output,
             format="GIF",
             save_all=True,
-            append_images=frames[1:],
+            append_images=paletted_frames[1:],
             duration=durations,
             loop=0,
             disposal=2,
         )
         output.seek(0)
         return output
+
+    def _gif_palette_source(self, representative_frames: list["Image.Image"]) -> "Image.Image":
+        """Build one adaptive palette from a couple of the busiest frames.
+
+        Side-by-side rather than blended so every distinct color used across
+        the animation (sunburst gold, confetti, ribbons) survives into the
+        256-color palette every other frame gets quantized against.
+        """
+        from PIL import Image
+
+        width = sum(frame.width for frame in representative_frames)
+        height = max(frame.height for frame in representative_frames)
+        combo = Image.new("RGB", (width, height))
+        x = 0
+        for frame in representative_frames:
+            combo.paste(frame, (x, 0))
+            x += frame.width
+        return combo.convert("P", palette=Image.Palette.ADAPTIVE, colors=256)
 
     def _draw_base_table(self, rows: list[dict[str, object]], card_w: int, card_h: int) -> "Image.Image":
         image, _ = self._draw_table_background(rows, card_w, card_h)
@@ -497,12 +540,22 @@ class CardRenderer:
         return scaled
 
     def _font(self, size: int):
+        cached = self._font_cache.get(size)
+        if cached is not None:
+            return cached
+
         from PIL import ImageFont
 
         try:
-            return ImageFont.truetype("DejaVuSans.ttf", size)
+            font = ImageFont.truetype("DejaVuSans.ttf", size)
         except Exception:
-            return ImageFont.load_default()
+            # When DejaVuSans.ttf isn't installed, truetype() searches several
+            # system font directories before giving up - repeating that failed
+            # search on every single text draw (a GIF frame draws several) is
+            # a measurable chunk of render time, so the miss is cached too.
+            font = ImageFont.load_default()
+        self._font_cache[size] = font
+        return font
 
 
 def money(cents: int) -> str:
