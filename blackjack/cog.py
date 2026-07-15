@@ -1222,6 +1222,7 @@ class BlackjackCog(commands.Cog):
         member_cache: dict[int, discord.Member | None] = {}
 
         embed = discord.Embed(title="🃏 Blackjack Leaderboard", color=discord.Color.gold())
+        blocks = []
         for metric, label, fmt in LEADERBOARD_CATEGORIES:
             candidates = await self.db.get_leaderboard(metric, limit=LEADERBOARD_CANDIDATE_LIMIT)
 
@@ -1232,15 +1233,14 @@ class BlackjackCog(commands.Cog):
                     continue
                 medal = LEADERBOARD_MEDALS[len(lines)] if len(lines) < len(LEADERBOARD_MEDALS) else "•"
                 value_text = self.format_leaderboard_value(row["value"], fmt)
-                lines.append(f"{medal} **{member.display_name}** — {value_text}")
+                lines.append(f"{medal} {member.display_name} — **{value_text}**")
                 if len(lines) >= len(LEADERBOARD_MEDALS):
                     break
 
-            if not lines:
-                embed.add_field(name=label, value="No qualifying players yet.", inline=False)
-                continue
-            embed.add_field(name=label, value="\n\n".join(lines), inline=False)
+            body = "\n".join(lines) if lines else "No qualifying players yet."
+            blocks.append(f"**{label}**\n{body}")
 
+        embed.description = "\n\n".join(blocks)
         embed.set_footer(text="Win %/ROI % require a minimum sample size to qualify. Play /blackjack to climb the board!")
         await interaction.followup.send(embed=embed)
 

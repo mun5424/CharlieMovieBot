@@ -27,6 +27,7 @@ class PlayerHand:
     cards: list[Card]
     bet_cents: int
     from_split: bool = False
+    split_aces: bool = False
     stood: bool = False
     busted: bool = False
     doubled: bool = False
@@ -186,14 +187,23 @@ class BlackjackGame:
     def split(self) -> None:
         hand = self.active_hand
         first, second = hand.cards
+        split_aces = first.rank == "A"
         hand.cards = [first, self.deck.pop()]
-        new_hand = PlayerHand(cards=[second, self.deck.pop()], bet_cents=hand.bet_cents, from_split=True)
+        new_hand = PlayerHand(
+            cards=[second, self.deck.pop()], bet_cents=hand.bet_cents, from_split=True, split_aces=split_aces
+        )
         hand.from_split = True
+        hand.split_aces = split_aces
         self.hands.insert(self.active_hand_index + 1, new_hand)
         self.did_split = True
 
-        # If first split hand immediately lands on 21, move on.
-        if hand.value == 21:
+        if split_aces:
+            # Split aces get exactly one card each and can't be hit - both hands stand immediately.
+            hand.stood = True
+            new_hand.stood = True
+            self.advance_hand_or_finish()
+        elif hand.value == 21:
+            # If the first split hand immediately lands on 21, move on.
             hand.stood = True
             self.advance_hand_or_finish()
 
