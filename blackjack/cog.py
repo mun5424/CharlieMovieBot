@@ -1246,13 +1246,16 @@ class BlackjackCog(commands.Cog):
 
     @app_commands.command(
         name="blackjack_stats",
-        description="View your own blackjack stats.",
+        description="View your own or another member's blackjack stats.",
     )
-    async def blackjack_stats(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
+    @app_commands.describe(member="View this member's stats instead of your own")
+    async def blackjack_stats(self, interaction: discord.Interaction, member: discord.Member | None = None):
+        await interaction.response.defer()
 
-        stats = await self.db.get_stats(interaction.user.id)
-        balance = await self.db.get_balance(interaction.user.id)
+        target = member or interaction.user
+
+        stats = await self.db.get_stats(target.id)
+        balance = await self.db.get_balance(target.id)
 
         decided = stats["hands_won"] + stats["hands_lost"]
         win_pct = (100.0 * stats["hands_won"] / decided) if decided else 0.0
@@ -1261,65 +1264,34 @@ class BlackjackCog(commands.Cog):
         profit_text = f"{'+' if profit_cents >= 0 else '-'}{money(abs(profit_cents))}"
 
         embed = discord.Embed(
-            title=f"📊 Blackjack Stats — {interaction.user.display_name}",
+            title=f"📊 Blackjack Stats — {target.display_name}",
             color=discord.Color.blue(),
         )
-        embed.add_field(
-            name="🃏 Hands",
-            value=(
-                f"**Played:** `{stats['hands_played']}`\n\n"
-                f"**Won / Lost / Pushed:** `{stats['hands_won']} / {stats['hands_lost']} / {stats['hands_pushed']}`\n\n"
-                f"**Win %:** `{win_pct:.1f}%`\n\n"
-                f"**Blackjacks Hit:** `{stats['blackjacks_hit']}`"
-            ),
-            inline=False,
-        )
-        embed.add_field(
-            name="​",
-            value="​",
-            inline=False,
-        )
-        embed.add_field(
-            name="🔥 Streaks",
-            value=(
-                f"**Current Win Streak:** `{stats['current_win_streak']}`\n\n"
-                f"**Best Win Streak:** `{stats['best_win_streak']}`\n\n"
-                f"**Daily Sign-in Streak:** `{stats['daily_streak']}`"
-            ),
-            inline=False,
-        )
-        embed.add_field(
-            name="​",
-            value="​",
-            inline=False,
-        )
-        embed.add_field(
-            name="🛡️ Discipline",
-            value=(
-                f"**Busts:** `{stats['busts']}`\n\n"
-                f"**Busts Prevented:** `{stats['busts_prevented']}`"
-            ),
-            inline=False,
-        )
-        embed.add_field(
-            name="​",
-            value="​",
-            inline=False,
-        )
-        embed.add_field(
-            name="💰 Money",
-            value=(
-                f"**Balance:** {money(balance)}\n\n"
-                f"**Total Wagered:** {money(stats['total_wagered_cents'])}\n\n"
-                f"**Lifetime P/L:** {profit_text}\n\n"
-                f"**ROI:** `{roi_pct:.1f}%`\n\n"
-                f"**Biggest Win:** {money(stats['biggest_win_cents'])}"
-            ),
-            inline=False,
-        )
+
+        blocks = [
+            "**🃏 Hands**\n"
+            f"Played: **{stats['hands_played']}**\n"
+            f"Won / Lost / Pushed: **{stats['hands_won']} / {stats['hands_lost']} / {stats['hands_pushed']}**\n"
+            f"Win %: **{win_pct:.1f}%**\n"
+            f"Blackjacks Hit: **{stats['blackjacks_hit']}**",
+            "**🔥 Streaks**\n"
+            f"Current Win Streak: **{stats['current_win_streak']}**\n"
+            f"Best Win Streak: **{stats['best_win_streak']}**\n"
+            f"Daily Sign-in Streak: **{stats['daily_streak']}**",
+            "**🛡️ Discipline**\n"
+            f"Busts: **{stats['busts']}**\n"
+            f"Busts Prevented: **{stats['busts_prevented']}**",
+            "**💰 Money**\n"
+            f"Balance: **{money(balance)}**\n"
+            f"Total Wagered: **{money(stats['total_wagered_cents'])}**\n"
+            f"Lifetime P/L: **{profit_text}**\n"
+            f"ROI: **{roi_pct:.1f}%**\n"
+            f"Biggest Win: **{money(stats['biggest_win_cents'])}**",
+        ]
+        embed.description = "\n\n".join(blocks)
 
         embed.set_footer(text="Check /blackjack_leaderboard to see how you stack up.")
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed)
 
 
 async def setup(bot: commands.Bot, db_path: str = DEFAULT_DB_PATH):
