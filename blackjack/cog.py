@@ -480,6 +480,16 @@ class BlackjackCog(commands.Cog):
                 await interaction.response.send_message(msg, ephemeral=True)
                 return
 
+            # Committed to dealing a hand now - defer before the slow render/send
+            # work below (a natural blackjack's celebration GIF alone can take
+            # over a second to render), so Discord always gets acked well within
+            # its 3s window regardless of render time. Public/non-ephemeral:
+            # Discord ties a followup's ephemeral-ness to how the *original*
+            # response was deferred, not to flags passed on the followup call
+            # itself - deferring ephemeral here silently made the real, public
+            # hand table ephemeral too (confirmed against the live bot).
+            await interaction.response.defer()
+
             shoe = await self.shoe_for_user(interaction.user.id)
             shuffled_before_hand = shoe.prepare_for_new_hand()
 
@@ -514,24 +524,53 @@ class BlackjackCog(commands.Cog):
             else:
                 note_parts.append(f"Choose an action.")
 
-            embed, file, view = await self.build_response(key, note=" ".join(note_parts))
-            # discord.py's send_message/followup.send treat an explicitly-passed
-            # view=None differently from an omitted view (it checks `is not MISSING`,
-            # not truthiness) and crashes with AttributeError: 'NoneType' object has
-            # no attribute 'is_finished'. view is None whenever the hand finishes
-            # instantly (a natural or dealer blackjack dealt before any player
-            # action), so the view kwarg must be omitted entirely in that case.
-            send_kwargs: dict = {"embed": embed, "file": file}
-            if view is not None:
-                send_kwargs["view"] = view
-
-            if bonus_claimed:
-                bonus_embed = self.build_daily_bonus_embed(bonus_amount_cents, bonus_streak)
-                await interaction.response.send_message(embed=bonus_embed)
-                msg = await interaction.followup.send(**send_kwargs, wait=True)
-            else:
-                await interaction.response.send_message(**send_kwargs)
-                msg = await interaction.original_response()
+            try:
+                embed, file, view = await self.build_response(key, note=" ".join(note_parts), celebrate=True)
+                if bonus_claimed:
+                    # edit_original_response turns the deferred placeholder into a real,
+                    # permanent public message instead of leaving it as a dangling
+                    # "thinking..." - it's always the earliest message in the channel
+                    # (created back at defer()), so it must carry the bonus embed here
+                    # for the bonus-then-table reading order; the table then goes out
+                    # as a second, later followup message below it.
+                    bonus_embed = self.build_daily_bonus_embed(bonus_amount_cents, bonus_streak)
+                    await interaction.edit_original_response(embed=bonus_embed)
+                    # discord.py's followup.send() treats an explicitly-passed view=None
+                    # differently from an omitted view (it checks `is not MISSING`, not
+                    # truthiness) and crashes with AttributeError: 'NoneType' object has
+                    # no attribute 'is_finished'. view is None whenever the hand finishes
+                    # instantly (a natural or dealer blackjack dealt before any player
+                    # action), so the view kwarg must be omitted entirely in that case.
+                    send_kwargs: dict = {"embed": embed, "file": file}
+                    if view is not None:
+                        send_kwargs["view"] = view
+                    msg = await interaction.followup.send(**send_kwargs, wait=True)
+                else:
+                    msg = await interaction.edit_original_response(embed=embed, attachments=[file], view=view)
+            except Exception:
+                # self.games[key] was already marked active and persisted above, before
+                # any of this. If rendering or delivering the table fails now (a slow
+                # render + a flaky Discord webhook call is enough), that leaves a phantom
+                # "active" hand with no message/view ever attached to resolve it - the
+                # player is locked out of /blackjack forever with nothing to click and no
+                # timeout to save them (BlackjackView.on_timeout no-ops when .message is
+                # None). Tear the phantom hand down and refund so the key is usable again.
+                logger.exception("Blackjack: failed to deliver a freshly dealt hand for key=%s", key)
+                already_settled = game.phase == "finished"
+                await self.cleanup_game_and_db(key)
+                if not already_settled:
+                    await self.db.add_balance(interaction.user.id, bet_cents, "blackjack_deal_send_failure_refund")
+                try:
+                    note = (
+                        "Something went wrong showing that hand's result, but it was already settled - "
+                        "check your balance, then try `/blackjack` again."
+                        if already_settled
+                        else "Something went wrong starting that hand and your bet was refunded. Please try `/blackjack` again."
+                    )
+                    await interaction.edit_original_response(content=note, embed=None, attachments=[], view=None)
+                except discord.HTTPException:
+                    pass
+                return
 
             game.message_id = msg.id
             await self.save_active_game(key)
@@ -633,10 +672,20 @@ class BlackjackCog(commands.Cog):
                 return
 
             await self.save_active_game(key)
-            embed, file, view = await self.build_response(key, note=note)
+
+            # Defer before build_response: resolving insurance can reveal the
+            # player's own natural blackjack (the only way a fresh natural can
+            # surface outside the initial deal), which routes into the ~1s+
+            # celebration GIF render. That alone can blow past Discord's 3s
+            # ack window for this component interaction, turning what should be
+            # a normal edit into a "404 Unknown interaction". defer() on a
+            # component interaction is a silent deferred *update* - it doesn't
+            # post any placeholder message, so there's no visible change here.
+            await interaction.response.defer()
+            embed, file, view = await self.build_response(key, note=note, celebrate=True)
             finished = game.phase == "finished"
             try:
-                await interaction.response.edit_message(embed=embed, attachments=[file], view=view)
+                msg = await interaction.edit_original_response(embed=embed, attachments=[file], view=view)
             except discord.HTTPException as exc:
                 logger.warning("Blackjack action edit failed for key=%s: %s", key, exc, exc_info=exc)
                 # The action itself was already applied and saved above (and, if
@@ -645,11 +694,10 @@ class BlackjackCog(commands.Cog):
                 # next click on this same message can recover and render the real
                 # state, matching handle_timeout's recovery behavior below.
                 return
-            if interaction.message:
-                game.message_id = interaction.message.id
-            if view and interaction.message:
-                view.message = interaction.message
-                self.game_messages[key] = interaction.message
+            game.message_id = msg.id
+            if view:
+                view.message = msg
+                self.game_messages[key] = msg
             if finished:
                 self.schedule_finished_cleanup(key, game)
             else:
@@ -724,6 +772,14 @@ class BlackjackCog(commands.Cog):
 
             table_message = await self.resolve_table_message(key, game)
             if table_message is None:
+                if game.phase == "finished":
+                    # There's no message left to recover via (unlike the HTTPException
+                    # branch below, where the table message still exists and a later
+                    # click can resync it) - without this, a hand that finishes via a
+                    # shortcut whose table message got deleted/unreachable would sit in
+                    # blackjack_active_games as "finished" forever, since nothing else
+                    # ever schedules its cleanup.
+                    self.schedule_finished_cleanup(key, game)
                 await self.send_shortcut_error(
                     message,
                     "Your action was applied, but I could not find the blackjack table message to update it. "
@@ -731,7 +787,7 @@ class BlackjackCog(commands.Cog):
                 )
                 return
 
-            embed, file, view = await self.build_response(key, note=note)
+            embed, file, view = await self.build_response(key, note=note, celebrate=True)
             finished = game.phase == "finished"
             try:
                 await table_message.edit(embed=embed, attachments=[file], view=view)
@@ -866,7 +922,7 @@ class BlackjackCog(commands.Cog):
                 note += " " + timeout_text_for_game(game)
 
             await self.save_active_game(key)
-            embed, file, view = await self.build_response(key, note=note)
+            embed, file, view = await self.build_response(key, note=note, celebrate=True)
             finished = game.phase == "finished"
             try:
                 await message.edit(embed=embed, attachments=[file], view=view)
@@ -1117,14 +1173,37 @@ class BlackjackCog(commands.Cog):
             return discord.Color.green()
         return discord.Color.red()
 
-    async def build_response(self, key: tuple[int, int], *, note: str) -> tuple[discord.Embed, discord.File, BlackjackView | None]:
+    async def build_response(
+        self, key: tuple[int, int], *, note: str, celebrate: bool = False
+    ) -> tuple[discord.Embed, discord.File, BlackjackView | None]:
         game = self.games[key]
         balance = await self.db.get_balance(game.user_id)
         shoe = await self.shoe_for_user(game.user_id)
         player_name = self.display_name_for_game(game)
 
-        image = self.renderer.render_png(game, note=note, shoe=shoe, player_name=player_name)
-        file = discord.File(image, filename="blackjack_table.png")
+        natural_win = (
+            celebrate
+            and game.phase == "finished"
+            and game.settlement_net_cents > 0
+            and any(hand.is_blackjack for hand in game.hands)
+        )
+        if natural_win:
+            # The celebration GIF takes well over a second of CPU-bound Pillow
+            # work (compositing ~19 frames) - run it off the event loop so it
+            # can't stall every other user's concurrent interaction while it renders.
+            image = await asyncio.to_thread(
+                self.renderer.render_natural_blackjack_gif,
+                game,
+                payout_cents=game.settlement_net_cents,
+                player_name=player_name,
+            )
+            image_filename = "blackjack_table.gif"
+        else:
+            image = await asyncio.to_thread(
+                self.renderer.render_png, game, note=note, shoe=shoe, player_name=player_name
+            )
+            image_filename = "blackjack_table.png"
+        file = discord.File(image, filename=image_filename)
 
         if game.phase == "finished":
             title = self.finished_title_for_game(game)
@@ -1146,7 +1225,7 @@ class BlackjackCog(commands.Cog):
         else:
             embed.set_footer(text=RULES_TEXT)
 
-        embed.set_image(url="attachment://blackjack_table.png")
+        embed.set_image(url=f"attachment://{image_filename}")
 
         # Whenever we're about to replace the view attached to this key's message
         # (or stop attaching one at all, because the hand finished), stop the

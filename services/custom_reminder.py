@@ -84,42 +84,45 @@ CUSTOM_REMINDERS = [
         "date": datetime.date(2026, 7, 15),
         "link": "https://www.start.gg/tournament/world-warrior-2026-us-canada-west-3",
         "description": (
-            "**Registration for World Warrior 2026 US/CAN West #3 closes today at 12 PM PT!**\n"
+            "**Registration for World Warrior 2026 US/CAN West #3 closes TOMORROW at 12 PM PT!**\n"
             "\n"
             "• Bracket play starts **Saturday, July 19 at 2:00 PM PT**\n"
             "• Top 8 at **5:00 PM PT**\n"
             "• Official Ruleset: <https://sf.esports.capcom.com/cpt/rules/>\n"
         ),
         "footer_3": "Registration closes in 3 days! Sign up now!",
-        "footer_0": "Registration closes TODAY at 12 PM PT! Last chance to sign up!",
+        "footer_0": "Registration closes TOMORROW at 12 PM PT! Last chance to sign up!",
+        "day_of_offset": 1,
     },
     {
         "name": "World Warrior 2026 US/CAN West #4 - Registration Closing",
         "date": datetime.date(2026, 8, 19),
         "link": "https://www.start.gg/tournament/world-warrior-2026-us-canada-west-4",
         "description": (
-            "**Registration for World Warrior 2026 US/CAN West #4 closes today at 12 PM PT!**\n"
+            "**Registration for World Warrior 2026 US/CAN West #4 closes TOMORROW at 12 PM PT!**\n"
             "\n"
             "• Bracket play starts **Saturday, August 23 at 2:00 PM PT**\n"
             "• Top 8 at **5:00 PM PT**\n"
             "• Official Ruleset: <https://sf.esports.capcom.com/cpt/rules/>\n"
         ),
         "footer_3": "Registration closes in 3 days! Sign up now!",
-        "footer_0": "Registration closes TODAY at 12 PM PT! Last chance to sign up!",
+        "footer_0": "Registration closes TOMORROW at 12 PM PT! Last chance to sign up!",
+        "day_of_offset": 1,
     },
     {
         "name": "World Warrior 2026 US/CAN West #5 - Registration Closing",
         "date": datetime.date(2026, 9, 23),
         "link": "https://www.start.gg/tournament/world-warrior-2026-us-canada-west-5",
         "description": (
-            "**Registration for World Warrior 2026 US/CAN West #5 closes today at 12 PM PT!**\n"
+            "**Registration for World Warrior 2026 US/CAN West #5 closes TOMORROW at 12 PM PT!**\n"
             "\n"
             "• Bracket play starts **Saturday, September 27 at 2:00 PM PT**\n"
             "• Top 8 at **5:00 PM PT**\n"
             "• Official Ruleset: <https://sf.esports.capcom.com/cpt/rules/>\n"
         ),
         "footer_3": "Registration closes in 3 days! Sign up now!",
-        "footer_0": "Registration closes TODAY at 12 PM PT! Last chance to sign up!",
+        "footer_0": "Registration closes TOMORROW at 12 PM PT! Last chance to sign up!",
+        "day_of_offset": 1,
     },
 
     # ===== World Warrior 2026 US/CAN West - Bracket Play Reminders =====
