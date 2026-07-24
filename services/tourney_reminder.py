@@ -734,7 +734,7 @@ async def check_dodgers_double_play():
 
 @tasks.loop(time=SCHEDULED_TIME_11AM)
 async def check_dodgers_and_notify():
-    """Check if Dodgers won a home game yesterday and send Panda Express notification at 11 AM PT"""
+    """Check if Dodgers won a home game yesterday and send Panda Express / Sunright Tea Studio notifications at 11 AM PT"""
     if bot_instance is None:
         logger.warning("[Dodgers] Bot instance not set. Cannot send notifications.")
         return
@@ -779,6 +779,44 @@ async def check_dodgers_and_notify():
 
                     await channel.send(content=role_mention, embed=embed)
                     logger.info(f"[Dodgers] Panda Express notification sent to channel {channel_id}")
+                except Exception as e:
+                    logger.error(f"[Dodgers] Error sending to channel {channel_id}: {e}")
+            else:
+                logger.warning(f"[Dodgers] Channel {channel_id} not found")
+
+        logger.info("[Dodgers] Home victory confirmed! Sending Sunright Tea Studio notifications")
+
+        sunright_embed = discord.Embed(
+            title="🧋 SUNRIGHT TEA STUDIO BOGO DEAL TODAY! 🧋",
+            description="**The Dodgers won at home last night!** Head to Sunright Tea Studio for a Blue Heaven Frostie! ⚾",
+            color=0x005A9C  # Dodgers blue
+        )
+
+        sunright_embed.add_field(
+            name="🍹 **Deal Details**",
+            value=(
+                "• **Deal:** Buy One, Get One Free Blue Heaven Frostie\n"
+                "• **Valid:** Today only\n"
+                "• **Location:** All Sunright Tea Studio locations\n"
+                "• **How:** Use code ILOVELA at checkout!"
+            ),
+            inline=False
+        )
+
+        sunright_embed.set_footer(text="This deal happens every day after a Dodgers HOME win! 💙")
+
+        sunright_channel_ids = getattr(config, "SUNRIGHT_CHANNEL_IDS", config.PANDA_CHANNEL_IDS)
+        sunright_channel_roles = getattr(config, "SUNRIGHT_CHANNEL_ROLES", config.PANDA_CHANNEL_ROLES)
+
+        for channel_id in sunright_channel_ids:
+            channel = bot_instance.get_channel(channel_id)
+            if channel:
+                try:
+                    role_id = sunright_channel_roles.get(channel_id)
+                    role_mention = f"<@&{role_id}>" if role_id else ""
+
+                    await channel.send(content=role_mention, embed=sunright_embed)
+                    logger.info(f"[Dodgers] Sunright Tea Studio notification sent to channel {channel_id}")
                 except Exception as e:
                     logger.error(f"[Dodgers] Error sending to channel {channel_id}: {e}")
             else:

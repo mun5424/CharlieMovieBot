@@ -21,7 +21,8 @@ logger = logging.getLogger(__name__)
 MIN_BET_CENTS = 1_000
 DAILY_BONUS_BASE_CENTS = 10_000
 DAILY_BONUS_STREAK_STEP_CENTS = 2_500
-DAILY_BONUS_MAX_CENTS = 20_000
+DAILY_BONUS_PLATEAU_CENTS = 20_000
+DAILY_BONUS_EXTENDED_STEP_CENTS = 1_000
 DEFAULT_DB_PATH = "bot.db"
 TIMEZONE = "America/Los_Angeles"
 PLAYER_ACTION_TIMEOUT_SECONDS = 30
@@ -464,7 +465,8 @@ class BlackjackCog(commands.Cog):
                 day,
                 base_cents=DAILY_BONUS_BASE_CENTS,
                 streak_step_cents=DAILY_BONUS_STREAK_STEP_CENTS,
-                max_cents=DAILY_BONUS_MAX_CENTS,
+                plateau_cents=DAILY_BONUS_PLATEAU_CENTS,
+                extended_step_cents=DAILY_BONUS_EXTENDED_STEP_CENTS,
             )
 
             bet_cents = bet * 100
@@ -978,8 +980,8 @@ class BlackjackCog(commands.Cog):
             color=discord.Color.gold(),
         )
         streak_text = f"🔥 {streak} day streak"
-        if amount_cents >= DAILY_BONUS_MAX_CENTS:
-            streak_text += " • max bonus reached!"
+        if amount_cents >= DAILY_BONUS_PLATEAU_CENTS:
+            streak_text += " • +$10/day bonus!"
         embed.add_field(name="Sign-in Streak", value=streak_text, inline=False)
         embed.set_footer(text="Daily bonus resets at midnight PT. Miss a day and your streak resets.")
         return embed

@@ -140,7 +140,8 @@ class BlackjackDB:
         *,
         base_cents: int,
         streak_step_cents: int,
-        max_cents: int,
+        plateau_cents: int,
+        extended_step_cents: int,
         reason: str = "blackjack_daily_bonus",
     ) -> tuple[bool, int, int]:
         """Attempt to claim the daily sign-in bonus for claim_date.
@@ -154,7 +155,8 @@ class BlackjackDB:
             claim_date,
             base_cents,
             streak_step_cents,
-            max_cents,
+            plateau_cents,
+            extended_step_cents,
             reason,
         )
 
@@ -164,7 +166,8 @@ class BlackjackDB:
         claim_date: str,
         base_cents: int,
         streak_step_cents: int,
-        max_cents: int,
+        plateau_cents: int,
+        extended_step_cents: int,
         reason: str,
     ) -> tuple[bool, int, int]:
         yesterday = (
@@ -190,7 +193,11 @@ class BlackjackDB:
             current_streak, last_claim_date = int(streak_row[0]), str(streak_row[1])
 
             new_streak = current_streak + 1 if last_claim_date == yesterday else 1
-            amount_cents = min(base_cents + (new_streak - 1) * streak_step_cents, max_cents)
+            plateau_streak = (plateau_cents - base_cents) // streak_step_cents + 1
+            if new_streak <= plateau_streak:
+                amount_cents = base_cents + (new_streak - 1) * streak_step_cents
+            else:
+                amount_cents = plateau_cents + (new_streak - plateau_streak) * extended_step_cents
 
             try:
                 conn.execute(

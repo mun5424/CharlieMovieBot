@@ -230,6 +230,16 @@ class BotManager:
             except Exception as e:
                 self.logger.error(f"❌ Failed to load trivia season scheduler: {e}")
 
+            # Load LAFC deal reminder (checks yesterday's home match at 10:50 AM PT)
+            try:
+                from services.lafc_reminder import setup_reminder as setup_lafc_reminder
+                setup_lafc_reminder(self.bot)
+                self.logger.info("✅ LAFC deal reminder loaded")
+            except ImportError:
+                self.logger.info("ℹ️ LAFC deal reminder not available")
+            except Exception as e:
+                self.logger.error(f"❌ Failed to load LAFC deal reminder: {e}")
+
         except Exception as e:
             self.logger.error(f"❌ Error loading additional components: {e}")
     
