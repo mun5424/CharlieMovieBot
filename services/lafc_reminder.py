@@ -14,7 +14,7 @@ from services.tourney_reminder import PACIFIC_TZ, get_scheduled_time, get_sessio
 logger = logging.getLogger(__name__)
 
 API_FOOTBALL_BASE_URL = "https://v3.football.api-sports.io"
-API_FOOTBALL_KEY = os.getenv("API_FOOTBALL_KEY")
+API_FOOTBALL_KEY = getattr(config, "API_FOOTBALL_KEY", "")
 
 # Scheduled check time (DST-aware, matches the Dodgers/Habit pattern)
 SCHEDULED_TIME_1050AM = get_scheduled_time(10, 50)
