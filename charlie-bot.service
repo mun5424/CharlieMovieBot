@@ -1,0 +1,46 @@
+[Unit]
+Description=CharlieMovieBot Discord Bot
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=notify
+NotifyAccess=main
+User=charlie
+Group=charlie
+WorkingDirectory=/home/charlie/CharlieMovieBot
+
+# Python env
+Environment=PATH=/home/charlie/CharlieMovieBot/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONPATH=/home/charlie/CharlieMovieBot
+Environment=RASPBERRY_PI=true
+
+ExecStart=/usr/bin/python3 /home/charlie/CharlieMovieBot/bot.py
+Restart=always
+RestartSec=5
+TimeoutStartSec=120
+TimeoutStopSec=30
+
+# Runtime hang detection: bot.py pings WATCHDOG=1 every 25s once ready.
+# Miss this window and systemd kills + restarts us, even if the process
+# never technically exits (e.g. stuck non-daemon thread at shutdown).
+WatchdogSec=90
+
+# Reasonable hardening that usually doesn't break Python
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+
+# Allow writes only where you need them
+ReadWritePaths=/home/charlie/CharlieMovieBot
+StateDirectory=
+CacheDirectory=
+LogsDirectory=
+
+# Resource limits (tune later)
+MemoryMax=1G
+
+[Install]
+WantedBy=multi-user.target

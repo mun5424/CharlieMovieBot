@@ -1,13 +1,15 @@
 import asyncio
+import os
 import signal
 import sys
 from typing import Optional
 
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 
 # Local imports
 import config
+import sd_notify
 from logging_utils import setup_logging, log_system_info
 from performance import OptimizedBot
 
@@ -19,6 +21,7 @@ class BotManager:
         self.logger = setup_logging(config)
         self.bot: Optional[OptimizedBot] = None
         self.setup_complete = False
+        self._watchdog_heartbeat: Optional[tasks.Loop] = None
         
         # Log system information
         log_system_info(self.logger, {
@@ -250,9 +253,11 @@ class BotManager:
             
             # Create shutdown task
             async def shutdown():
+                sd_notify.notify("STOPPING=1")
+                self._stop_watchdog()
                 if self.bot:
                     await self.bot.close()
-            
+
             # Schedule shutdown
             try:
                 loop = asyncio.get_event_loop()
@@ -260,11 +265,32 @@ class BotManager:
             except RuntimeError:
                 # No event loop running, exit immediately
                 sys.exit(0)
-        
+
         # Register signal handlers
         signal.signal(signal.SIGINT, signal_handler)
         signal.signal(signal.SIGTERM, signal_handler)
-    
+
+    def _start_watchdog(self):
+        """Start periodic WATCHDOG=1 keep-alives so systemd can detect a
+        hang (event loop wedged, not just a crash) and restart us via
+        WatchdogSec=. No-op if not running under systemd or already started.
+        """
+        if not os.environ.get("NOTIFY_SOCKET") or self._watchdog_heartbeat is not None:
+            return
+
+        @tasks.loop(seconds=25)
+        async def _heartbeat():
+            sd_notify.notify("WATCHDOG=1")
+
+        self._watchdog_heartbeat = _heartbeat
+        _heartbeat.start()
+        self.logger.info("🫀 systemd watchdog heartbeat started")
+
+    def _stop_watchdog(self):
+        if self._watchdog_heartbeat is not None:
+            self._watchdog_heartbeat.cancel()
+            self._watchdog_heartbeat = None
+
     async def start_bot(self) -> bool:
         """Start the bot with retry logic"""
         if not self.setup_complete:
@@ -295,8 +321,13 @@ class BotManager:
                     
                     # Load additional components
                     await self.load_additional_components()
-                    
+
                     self.logger.info("🎉 Bot is ready and operational!")
+
+                    # Tell systemd we're up, then start watchdog keep-alives
+                    # so a hang (not just a crash) triggers Restart=always.
+                    sd_notify.notify("READY=1")
+                    self._start_watchdog()
                 
                 # Start the bot
                 await self.bot.start(config.DISCORD_TOKEN)
@@ -345,12 +376,13 @@ async def main():
         traceback.print_exc()
     finally:
         # Ensure cleanup
+        bot_manager._stop_watchdog()
         if bot_manager.bot:
             try:
                 await bot_manager.bot.close()
             except:
                 pass
-        
+
         bot_manager.logger.info("🔚 Bot process ended")
 
 
