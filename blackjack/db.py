@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS blackjack_wallets (
@@ -292,6 +295,29 @@ class BlackjackDB:
         if row is None:
             return None
         return json.loads(row[0])
+
+    async def get_all_active_games(self) -> list[tuple[int, dict]]:
+        """Every row in blackjack_active_games, for startup reconciliation -
+        get_active_game only looks up a single known user."""
+        return await asyncio.to_thread(self._get_all_active_games_sync)
+
+    def _get_all_active_games_sync(self) -> list[tuple[int, dict]]:
+        with sqlite3.connect(self.path) as conn:
+            rows = conn.execute("SELECT user_id, state_json FROM blackjack_active_games").fetchall()
+
+        games: list[tuple[int, dict]] = []
+        for user_id, state_json in rows:
+            try:
+                games.append((int(user_id), json.loads(state_json)))
+            except Exception:
+                # One row with corrupted JSON must not take down every other
+                # user's row with it - callers (startup reconciliation) rely
+                # on getting everyone else's hands back even if this one is
+                # unreadable. It's left in place for scripts/flush_blackjack_hands.py
+                # or the per-user get_active_game() corrupt-state recovery path
+                # to deal with later.
+                logger.error("Blackjack: skipping unreadable active-game row for user_id=%s", user_id, exc_info=True)
+        return games
 
     async def delete_active_game(self, user_id: int) -> None:
         await asyncio.to_thread(self._delete_active_game_sync, user_id)

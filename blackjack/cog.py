@@ -217,9 +217,143 @@ class BlackjackCog(commands.Cog):
         self.finished_cleanup_tasks: dict[tuple[int, int], asyncio.Task] = {}
         self.shoes: dict[int, SingleDeckShoe] = {}
         self.corrupt_state_refunds: dict[tuple[int, int], int] = {}
+        self._startup_reconciled = False
 
     async def cog_load(self) -> None:
         await self.db.init()
+
+    @commands.Cog.listener()
+    async def on_ready(self) -> None:
+        # cog_load runs before the bot has even logged in (BotManager loads
+        # cogs, then starts the bot), so it's too early to fetch/edit Discord
+        # messages here - do it on the first on_ready instead, once the HTTP
+        # client and gateway cache are actually usable. Guard against
+        # reconnects firing this again after the first successful run.
+        if self._startup_reconciled:
+            return
+        self._startup_reconciled = True
+        await self.reconcile_active_games_on_startup()
+
+    async def reconcile_active_games_on_startup(self) -> None:
+        """Every hand left in blackjack_active_games belongs to the *previous*
+        process life - self.games/self.active_views/self.view_versions are
+        all empty here, so none of those hands have a working Discord View
+        anymore, and none have a timer ticking. A hand that finished but never
+        got torn down (its final edit failed right before this restart) would
+        otherwise rot in the DB until the player's next /blackjack call. Worse,
+        a hand that was still mid-turn when the bot restarted (a deploy, a
+        crash, the watchdog failsafe) is left with dead buttons and no timeout
+        to resolve it: the player can't act (clicks silently fail with no
+        view registered to handle them) and can't start a new hand either
+        (blocked by the "already have an active hand" check) - a permanent
+        hang with no self-healing path short of scripts/flush_blackjack_hands.py.
+        Fix both by re-hydrating a live view (or cleaning up) here, once,
+        right after the bot actually comes online.
+        """
+        try:
+            rows = await self.db.get_all_active_games()
+        except Exception:
+            logger.exception("Blackjack: failed to load active games for startup reconciliation")
+            return
+
+        for user_id, state in rows:
+            try:
+                await self._reconcile_one_active_game(user_id, state)
+            except Exception:
+                # One malformed/unreachable row must never abort reconciliation
+                # for every other user's hand.
+                logger.exception("Blackjack: startup reconciliation failed for user_id=%s", user_id)
+
+    async def _reconcile_one_active_game(self, user_id: int, state: dict) -> None:
+        key = (user_id, 0)
+        # Locked like every other mutation of self.games/the DB row for this key,
+        # in case a real player interaction (e.g. a fresh /blackjack) lands while
+        # this is still running - startup reconciliation races the live bot from
+        # the moment on_ready fires.
+        async with self.lock_for(key):
+            if key in self.games:
+                # A real interaction already loaded/handled this key while we
+                # were waiting for the lock - nothing left for us to do.
+                return
+            # Re-fetch rather than trust the `state` snapshot taken before the
+            # lock: a real interaction could have changed or deleted this row
+            # in the meantime even without populating self.games (e.g. it hit
+            # the corrupt-state recovery path and deleted the row itself).
+            current_state = await self.db.get_active_game(user_id)
+            if current_state is None:
+                return
+            await self._reconcile_one_active_game_locked(user_id, current_state)
+
+    async def _reconcile_one_active_game_locked(self, user_id: int, state: dict) -> None:
+        key = (user_id, 0)
+        try:
+            game = self.game_from_active_state(state)
+        except Exception as exc:
+            logger.error(
+                "Blackjack: active-game state could not be restored for user_id=%s at startup: %s",
+                user_id, exc, exc_info=exc,
+            )
+            await self.delete_active_game_for_key(key)
+            await self.refund_unrestorable_game(key, state)
+            return
+
+        self.games[key] = game
+
+        if game.phase == "finished":
+            if not game.settled:
+                # A hand can reach phase="finished" and get persisted (blackjack()
+                # saves right after BlackjackGame.start(), and apply_action_locked
+                # saves right after an action finishes the hand) *before*
+                # settle_finished_game() runs to actually credit the payout and
+                # flip settled=True. A crash/restart in that window would
+                # otherwise have this branch delete the row via
+                # cleanup_game_and_db without ever paying the player - settle
+                # first so their stake/winnings aren't silently lost.
+                logger.warning(
+                    "Blackjack: found an unsettled finished hand at startup for user_id=%s; settling before cleanup.",
+                    user_id,
+                )
+                await self.settle_finished_game(user_id, game)
+            asyncio.create_task(self.disable_stale_message(key, game))
+            await self.cleanup_game_and_db(key)
+            return
+
+        table_message = await self.resolve_table_message(key, game)
+        if table_message is None:
+            logger.warning(
+                "Blackjack: could not locate the table message for an orphaned in-progress "
+                "hand at startup: user_id=%s message_id=%s channel_id=%s. Leaving it in the "
+                "DB for scripts/flush_blackjack_hands.py.",
+                user_id, game.message_id, game.channel_id,
+            )
+            return
+
+        try:
+            embed, file, view = await self.build_response(
+                key,
+                note="🔄 The bot restarted, but your hand was saved. Pick up right where you left off.",
+            )
+        except Exception:
+            logger.exception("Blackjack: failed to render an orphaned in-progress hand for user_id=%s at startup", user_id)
+            return
+
+        try:
+            await table_message.edit(embed=embed, attachments=[file], view=view)
+        except discord.HTTPException as exc:
+            logger.warning(
+                "Blackjack: failed to re-attach a live view for user_id=%s at startup: %s",
+                user_id, exc, exc_info=exc,
+            )
+            self.discard_pending_view(view)
+            return
+
+        game.message_id = table_message.id
+        self.commit_view(key, view)
+        if view:
+            view.message = table_message
+            self.game_messages[key] = table_message
+        await self.save_active_game(key)
+        logger.info("Blackjack: re-attached a live view for an orphaned in-progress hand: user_id=%s", user_id)
 
     def key_for(self, interaction: discord.Interaction) -> tuple[int, int]:
         # One active blackjack hand per user globally. The game itself still records
