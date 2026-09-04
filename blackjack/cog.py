@@ -1077,11 +1077,32 @@ class BlackjackCog(commands.Cog):
             # attempt can't race a concurrent player click the way a dropped-then-
             # reacquired lock would. Retries (below) necessarily run later, in their
             # own task after a real sleep, and reacquire the lock themselves then.
-            await self._render_timeout_result(key, message, note, attempt=0)
+            await self._render_timeout_result(key, message, note, version, attempt=0)
 
-    async def _render_timeout_result(self, key: tuple[int, int], message: discord.Message, note: str, attempt: int) -> None:
+    async def _render_timeout_result(
+        self, key: tuple[int, int], message: discord.Message, note: str, version: int, attempt: int
+    ) -> None:
         """Render and edit in the current state of `key`'s game. Caller must already
         hold self.lock_for(key)."""
+        if self.view_versions.get(key) != version:
+            # Only handle_timeout's very first call (attempt=0) is guaranteed to run
+            # right after its own version check, in the same lock acquisition, with
+            # nothing else able to run in between - so that check alone doesn't cover
+            # this method's retries, which reacquire the lock later after a real
+            # sleep (up to TIMEOUT_EDIT_MAX_RETRIES * TIMEOUT_EDIT_RETRY_SECONDS
+            # later). If the player has since acted, timed out again, or started a
+            # brand new hand while a retry was pending, `key` has moved on to a
+            # different game/message entirely. Blindly rendering here would render
+            # THAT current game's state into `message` (the stale one this retry is
+            # still holding a reference to) and then overwrite the current game's
+            # message_id to point back at it - corrupting a hand this retry has
+            # nothing to do with. Drop it instead.
+            logger.info(
+                "Blackjack: dropping a stale timeout render retry for key=%s (expected version=%s, current=%s).",
+                key, version, self.view_versions.get(key),
+            )
+            return
+
         game = self.games.get(key)
         if not game:
             return
@@ -1104,7 +1125,7 @@ class BlackjackCog(commands.Cog):
             # updated, so even a player clicking it still shows/edits stale state.
             self.discard_pending_view(view)
             if attempt + 1 < TIMEOUT_EDIT_MAX_RETRIES:
-                asyncio.create_task(self.retry_render_timeout_result(key, message, note, attempt + 1))
+                asyncio.create_task(self.retry_render_timeout_result(key, message, note, version, attempt + 1))
             else:
                 logger.error(
                     "Blackjack timeout render permanently failed after %s attempts for key=%s. "
@@ -1124,10 +1145,12 @@ class BlackjackCog(commands.Cog):
         else:
             await self.save_active_game(key)
 
-    async def retry_render_timeout_result(self, key: tuple[int, int], message: discord.Message, note: str, attempt: int) -> None:
+    async def retry_render_timeout_result(
+        self, key: tuple[int, int], message: discord.Message, note: str, version: int, attempt: int
+    ) -> None:
         await asyncio.sleep(TIMEOUT_EDIT_RETRY_SECONDS)
         async with self.lock_for(key):
-            await self._render_timeout_result(key, message, note, attempt)
+            await self._render_timeout_result(key, message, note, version, attempt)
 
     async def settle_finished_game(self, user_id: int, game: BlackjackGame) -> str:
         first_settlement = not game.settled
@@ -1451,6 +1474,13 @@ class BlackjackCog(commands.Cog):
         if view is not None:
             self.view_versions[key] = view.version
             self.active_views[key] = view
+        else:
+            # No live view results when the hand just finished, but this still
+            # represents a new, distinct state of `key` - a stale timeout retry
+            # (see _render_timeout_result) relies on this counter advancing on
+            # every such transition, not just ones that produce a view, to
+            # detect it's been superseded.
+            self.view_versions[key] = self.view_versions.get(key, 0) + 1
 
     def discard_pending_view(self, view: "BlackjackView | None") -> None:
         """Cancel a candidate view's timeout after the edit that would have
