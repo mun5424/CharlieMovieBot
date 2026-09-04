@@ -28,6 +28,14 @@ TIMEZONE = "America/Los_Angeles"
 PLAYER_ACTION_TIMEOUT_SECONDS = 30
 INSURANCE_TIMEOUT_SECONDS = 10
 FINISHED_GAME_GRACE_SECONDS = 10 * 60
+# A view's on_timeout only fires once, so unlike a failed edit from a player
+# action (where the previous view is still live and will simply time out
+# again later), a failed edit here has no live timer left to fall back on.
+# Retry a bounded number of times before giving up so a purely transient
+# Discord error (a network blip, a momentarily unreachable webhook) doesn't
+# permanently strand the hand with no working recovery path.
+TIMEOUT_EDIT_RETRY_SECONDS = 15
+TIMEOUT_EDIT_MAX_RETRIES = 6
 
 # Exact-message shortcuts for active blackjack hands.
 # These only work when the user types exactly one of these values in the same channel
@@ -225,11 +233,6 @@ class BlackjackCog(commands.Cog):
         if key not in self.locks:
             self.locks[key] = asyncio.Lock()
         return self.locks[key]
-
-    def bump_view_version(self, key: tuple[int, int]) -> int:
-        version = self.view_versions.get(key, 0) + 1
-        self.view_versions[key] = version
-        return version
 
     def cleanup_game(self, key: tuple[int, int]) -> None:
         task = self.finished_cleanup_tasks.pop(key, None)
@@ -692,11 +695,16 @@ class BlackjackCog(commands.Cog):
                 logger.warning("Blackjack action edit failed for key=%s: %s", key, exc, exc_info=exc)
                 # The action itself was already applied and saved above (and, if
                 # finished, already settled/paid out) - only the Discord-side
-                # confirmation failed. Leave the game in memory (uncleaned) so the
-                # next click on this same message can recover and render the real
-                # state, matching handle_timeout's recovery behavior below.
+                # confirmation failed. Deliberately do NOT commit_view here: the
+                # previous view is still attached to the real, clickable message
+                # and its own timeout is still ticking, so leaving it in place
+                # keeps that timeout as a working safety net that can auto-stand
+                # this hand later even if the player never clicks again. Just
+                # discard this attempt's unused candidate view instead.
+                self.discard_pending_view(view)
                 return
             game.message_id = msg.id
+            self.commit_view(key, view)
             if view:
                 view.message = msg
                 self.game_messages[key] = msg
@@ -798,8 +806,14 @@ class BlackjackCog(commands.Cog):
                 # Same as handle_action: the action was already applied and saved
                 # above, so leave the game recoverable via the next click instead of
                 # desyncing the message from the real, already-persisted state.
+                # Also same as handle_action: don't commit_view - the previous
+                # view (still attached to the real message) keeps its own
+                # timeout ticking as a safety net, instead of both it and this
+                # unattached candidate view going permanently inert.
+                self.discard_pending_view(view)
                 return
             game.message_id = table_message.id
+            self.commit_view(key, view)
             if view:
                 view.message = table_message
                 self.game_messages[key] = table_message
@@ -924,24 +938,62 @@ class BlackjackCog(commands.Cog):
                 note += " " + timeout_text_for_game(game)
 
             await self.save_active_game(key)
-            embed, file, view = await self.build_response(key, note=note, celebrate=True)
-            finished = game.phase == "finished"
-            try:
-                await message.edit(embed=embed, attachments=[file], view=view)
-            except discord.HTTPException as exc:
-                logger.warning("Blackjack timeout edit failed for key=%s, version=%s: %s", key, version, exc, exc_info=exc)
-                # Leave the finished game in memory so the next stale button click can
-                # recover and render the final result instead of showing an active table.
-                return
 
-            game.message_id = message.id
-            if view:
-                view.message = message
-                self.game_messages[key] = message
-            if finished:
-                self.schedule_finished_cleanup(key, game)
+            # Still holding the lock from the mutation above, so this first render
+            # attempt can't race a concurrent player click the way a dropped-then-
+            # reacquired lock would. Retries (below) necessarily run later, in their
+            # own task after a real sleep, and reacquire the lock themselves then.
+            await self._render_timeout_result(key, message, note, attempt=0)
+
+    async def _render_timeout_result(self, key: tuple[int, int], message: discord.Message, note: str, attempt: int) -> None:
+        """Render and edit in the current state of `key`'s game. Caller must already
+        hold self.lock_for(key)."""
+        game = self.games.get(key)
+        if not game:
+            return
+
+        embed, file, view = await self.build_response(key, note=note, celebrate=True)
+        finished = game.phase == "finished"
+        try:
+            await message.edit(embed=embed, attachments=[file], view=view)
+        except discord.HTTPException as exc:
+            logger.warning(
+                "Blackjack timeout edit failed for key=%s (attempt %s/%s): %s",
+                key, attempt + 1, TIMEOUT_EDIT_MAX_RETRIES, exc, exc_info=exc,
+            )
+            # This view's own timeout already fired once (a view's timeout is
+            # one-shot, unlike the action/shortcut edit-failure paths where the
+            # previous view is still ticking and remains a safety net). Without
+            # re-arming something here, a purely transient Discord error at
+            # exactly this moment would otherwise strand the hand with no live
+            # timer and no way to self-heal - the message was never actually
+            # updated, so even a player clicking it still shows/edits stale state.
+            self.discard_pending_view(view)
+            if attempt + 1 < TIMEOUT_EDIT_MAX_RETRIES:
+                asyncio.create_task(self.retry_render_timeout_result(key, message, note, attempt + 1))
             else:
-                await self.save_active_game(key)
+                logger.error(
+                    "Blackjack timeout render permanently failed after %s attempts for key=%s. "
+                    "This hand's state is correctly saved in the DB, but its table message was never "
+                    "updated and no timer remains to retry - see scripts/flush_blackjack_hands.py.",
+                    TIMEOUT_EDIT_MAX_RETRIES, key,
+                )
+            return
+
+        game.message_id = message.id
+        self.commit_view(key, view)
+        if view:
+            view.message = message
+            self.game_messages[key] = message
+        if finished:
+            self.schedule_finished_cleanup(key, game)
+        else:
+            await self.save_active_game(key)
+
+    async def retry_render_timeout_result(self, key: tuple[int, int], message: discord.Message, note: str, attempt: int) -> None:
+        await asyncio.sleep(TIMEOUT_EDIT_RETRY_SECONDS)
+        async with self.lock_for(key):
+            await self._render_timeout_result(key, message, note, attempt)
 
     async def settle_finished_game(self, user_id: int, game: BlackjackGame) -> str:
         first_settlement = not game.settled
@@ -1229,21 +1281,49 @@ class BlackjackCog(commands.Cog):
 
         embed.set_image(url=f"attachment://{image_filename}")
 
-        # Whenever we're about to replace the view attached to this key's message
-        # (or stop attaching one at all, because the hand finished), stop the
-        # previous view so its independent 30s timeout timer can never fire again.
-        # Without this, a stale view's timeout could still land after this key has
-        # moved on to a different hand entirely.
+        # Build the candidate next view, but do NOT touch self.active_views /
+        # self.view_versions yet, and do NOT stop the current view here. This
+        # method only renders a response - it has no idea yet whether the
+        # caller's upcoming Discord edit will actually succeed. Committing the
+        # swap here unconditionally used to mean: if that edit later failed
+        # (e.g. a transient "Unknown Webhook"/expired-interaction error), the
+        # OLD view - still the only thing actually attached to the real,
+        # clickable message - was already permanently .stop()'d, while the NEW
+        # view (now "active" and version-current) never got a `.message` set
+        # since the edit that would have set it failed, leaving its own
+        # timeout permanently inert (on_timeout no-ops when .message is None).
+        # That silently disabled the auto-timeout safety net for the hand
+        # forever, stranding the player's stake with no self-healing path
+        # short of them clicking that same now-unresponsive message again.
+        #
+        # Instead, the caller commits the swap via commit_view(...) only after
+        # its edit succeeds. On failure, it leaves the previous view (and its
+        # ticking timeout) completely untouched so it remains a working
+        # safety net, and discards this candidate via discard_pending_view(...).
+        view = None
+        if game.phase != "finished":
+            version = self.view_versions.get(key, 0) + 1
+            view = BlackjackView(self, key, balance, version)
+
+        return embed, file, view
+
+    def commit_view(self, key: tuple[int, int], view: "BlackjackView | None") -> None:
+        """Swap in `view` as the tracked view for `key`. Call this ONLY after the
+        Discord edit that attaches `view` to a real message has actually
+        succeeded - see the long comment in build_response for why."""
         old_view = self.active_views.pop(key, None)
         if old_view is not None:
             old_view.stop()
-
-        view = None
-        if game.phase != "finished":
-            view = BlackjackView(self, key, balance, self.bump_view_version(key))
+        if view is not None:
+            self.view_versions[key] = view.version
             self.active_views[key] = view
 
-        return embed, file, view
+    def discard_pending_view(self, view: "BlackjackView | None") -> None:
+        """Cancel a candidate view's timeout after the edit that would have
+        attached it failed, since it was never committed via commit_view and
+        would otherwise sit around with a dangling, unusable timer."""
+        if view is not None:
+            view.stop()
 
     async def resolve_display_name(self, user_id: int, guild: discord.Guild | None) -> str:
         if guild is not None:
