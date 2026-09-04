@@ -98,12 +98,11 @@ def timeout_text_for_game(game: BlackjackGame) -> str:
 
 
 class BlackjackView(discord.ui.View):
-    def __init__(self, cog: "BlackjackCog", key: tuple[int, int], balance_cents: int, version: int):
+    def __init__(self, cog: "BlackjackCog", key: tuple[int, int], balance_cents: int):
         game = cog.games.get(key)
         super().__init__(timeout=timeout_for_game(game))
         self.cog = cog
         self.key = key
-        self.version = version
         self.owner_id = key[0]
         self.message: discord.Message | None = None
         self.sync_buttons(balance_cents)
@@ -174,10 +173,13 @@ class BlackjackView(discord.ui.View):
 
     async def on_timeout(self) -> None:
         # Timeout means: no player response, so either skip insurance or stand the active hand.
-        # The version guard prevents old/replaced views from timing out a newer turn.
+        # Passing `self` lets handle_timeout check identity against self.active_views[key] -
+        # an old/replaced view whose timeout still fires late is recognized as stale because
+        # it's no longer the object stored there, not because some separately-tracked counter
+        # says so.
         if self.message is None:
             return
-        await self.cog.handle_timeout(self.key, self.message, self.version)
+        await self.cog.handle_timeout(self.key, self.message, self)
 
     @discord.ui.button(label="Hit", style=discord.ButtonStyle.primary, row=0)
     async def hit_button(self, interaction: discord.Interaction, _: discord.ui.Button):
@@ -212,7 +214,6 @@ class BlackjackCog(commands.Cog):
         self.games: dict[tuple[int, int], BlackjackGame] = {}
         self.locks: dict[tuple[int, int], asyncio.Lock] = {}
         self.game_messages: dict[tuple[int, int], discord.Message] = {}
-        self.view_versions: dict[tuple[int, int], int] = {}
         self.active_views: dict[tuple[int, int], BlackjackView] = {}
         self.finished_cleanup_tasks: dict[tuple[int, int], asyncio.Task] = {}
         self.shoes: dict[int, SingleDeckShoe] = {}
@@ -236,8 +237,8 @@ class BlackjackCog(commands.Cog):
 
     async def reconcile_active_games_on_startup(self) -> None:
         """Every hand left in blackjack_active_games belongs to the *previous*
-        process life - self.games/self.active_views/self.view_versions are
-        all empty here, so none of those hands have a working Discord View
+        process life - self.games/self.active_views are all empty here, so
+        none of those hands have a working Discord View
         anymore, and none have a timer ticking. A hand that finished but never
         got torn down (its final edit failed right before this restart) would
         otherwise rot in the DB until the player's next /blackjack call. Worse,
@@ -377,18 +378,12 @@ class BlackjackCog(commands.Cog):
         old_view = self.active_views.pop(key, None)
         if old_view is not None:
             old_view.stop()
-        # view_versions is intentionally NOT reset here. Each BlackjackView starts
-        # its own independent timeout timer at construction and is never explicitly
-        # cancelled when superseded (aside from the .stop() above, added after this
-        # bug was found), so an old view's timer can still be pending when this key
-        # gets reused for a brand new hand. If the version counter reset to 0 here,
-        # a new hand's first view would restart at version 1 - the exact same value
-        # a quickly-finished previous hand's only view would have had - so a stale
-        # timeout from hand N could coincidentally pass the staleness check
-        # (self.view_versions[key] != version) for hand N+1 and get misapplied to
-        # it, corrupting its message_id. Keeping this counter monotonic per key for
-        # the process's lifetime guarantees no two views for the same key ever
-        # share a version number, regardless of the .stop() calls below.
+        # Popping `old_view` out of self.active_views here is what makes a stale
+        # timeout harmless even without the .stop() above: handle_timeout/
+        # _render_timeout_result check identity against self.active_views[key],
+        # so once this key moves on to a brand new hand (even one reusing the
+        # same key), no old view can ever be `is` whatever gets stored next -
+        # no counter or reset bookkeeping needed for that guarantee to hold.
 
     async def delete_active_game_for_key(self, key: tuple[int, int]) -> None:
         await self.db.delete_active_game(key[0])
@@ -715,18 +710,14 @@ class BlackjackCog(commands.Cog):
             await self.save_active_game(key)
             # Every other successful-render path (handle_action, handle_shortcut_action,
             # _render_timeout_result, startup reconciliation) calls commit_view() here -
-            # this one didn't, leaving self.view_versions[key] unset for a freshly-dealt
-            # hand's first view. That view's own 30s/10s timeout would then always look
-            # stale to handle_timeout's `self.view_versions.get(key) != version` check
-            # (None != 1) and get silently dropped, so a hand nobody ever clicks on
-            # would sit active forever with no auto-resolve. Worse, since the view was
-            # also never registered in self.active_views, nothing ever stopped its
-            # timer either - it stays ticking, and the *next* view (built after the
-            # player's first real action) can end up with the same version number
-            # (both compute self.view_versions.get(key, 0) + 1 from the same
-            # never-recorded baseline), so that first view's later timeout can pass
-            # the staleness check against the wrong, currently-live hand and force an
-            # incorrect premature auto-stand mid-turn.
+            # this one didn't, leaving a freshly-dealt hand's first view unregistered in
+            # self.active_views. handle_timeout checks identity against that dict, so an
+            # unregistered view's own 30s/10s timeout would always look stale (it can
+            # never be `is` an entry that was never stored) and get silently dropped - a
+            # hand nobody ever clicks on would sit active forever with no auto-resolve.
+            # Worse, since it was never registered, nothing ever .stop()'d its timer
+            # either, so it stays ticking and can misfire against whatever a later
+            # action or hand leaves in self.active_views for this key.
             self.commit_view(key, view)
             if view:
                 view.message = msg
@@ -797,13 +788,13 @@ class BlackjackCog(commands.Cog):
             if interaction.message and game.message_id and interaction.message.id != game.message_id:
                 logger.warning(
                     "Blackjack message_id mismatch on action=%s: key=%s clicked_message_id=%s "
-                    "current_game_message_id=%s game_phase=%s view_version=%s",
+                    "current_game_message_id=%s game_phase=%s active_view_id=%s",
                     action,
                     key,
                     interaction.message.id,
                     game.message_id,
                     game.phase,
-                    self.view_versions.get(key),
+                    id(self.active_views.get(key)),
                 )
                 await self.expire_stale_interaction(
                     interaction,
@@ -1056,10 +1047,13 @@ class BlackjackCog(commands.Cog):
                     ephemeral=True,
                 )
 
-    async def handle_timeout(self, key: tuple[int, int], message: discord.Message, version: int) -> None:
+    async def handle_timeout(self, key: tuple[int, int], message: discord.Message, origin_view: "BlackjackView") -> None:
         async with self.lock_for(key):
-            # Ignore stale timeouts from an old View that was replaced after a player action.
-            if self.view_versions.get(key) != version:
+            # Ignore stale timeouts from an old View that was replaced after a player
+            # action: `origin_view` is the specific View instance whose own timer just
+            # fired, so if it's no longer the one tracked for this key, something newer
+            # has already taken over.
+            if self.active_views.get(key) is not origin_view:
                 return
 
             game = await self.load_active_game(key)
@@ -1092,16 +1086,16 @@ class BlackjackCog(commands.Cog):
             # attempt can't race a concurrent player click the way a dropped-then-
             # reacquired lock would. Retries (below) necessarily run later, in their
             # own task after a real sleep, and reacquire the lock themselves then.
-            await self._render_timeout_result(key, message, note, version, attempt=0)
+            await self._render_timeout_result(key, message, note, origin_view, attempt=0)
 
     async def _render_timeout_result(
-        self, key: tuple[int, int], message: discord.Message, note: str, version: int, attempt: int
+        self, key: tuple[int, int], message: discord.Message, note: str, origin_view: "BlackjackView", attempt: int
     ) -> None:
         """Render and edit in the current state of `key`'s game. Caller must already
         hold self.lock_for(key)."""
-        if self.view_versions.get(key) != version:
+        if self.active_views.get(key) is not origin_view:
             # Only handle_timeout's very first call (attempt=0) is guaranteed to run
-            # right after its own version check, in the same lock acquisition, with
+            # right after its own identity check, in the same lock acquisition, with
             # nothing else able to run in between - so that check alone doesn't cover
             # this method's retries, which reacquire the lock later after a real
             # sleep (up to TIMEOUT_EDIT_MAX_RETRIES * TIMEOUT_EDIT_RETRY_SECONDS
@@ -1113,8 +1107,8 @@ class BlackjackCog(commands.Cog):
             # message_id to point back at it - corrupting a hand this retry has
             # nothing to do with. Drop it instead.
             logger.info(
-                "Blackjack: dropping a stale timeout render retry for key=%s (expected version=%s, current=%s).",
-                key, version, self.view_versions.get(key),
+                "Blackjack: dropping a stale timeout render retry for key=%s (origin_view no longer active).",
+                key,
             )
             return
 
@@ -1140,7 +1134,7 @@ class BlackjackCog(commands.Cog):
             # updated, so even a player clicking it still shows/edits stale state.
             self.discard_pending_view(view)
             if attempt + 1 < TIMEOUT_EDIT_MAX_RETRIES:
-                asyncio.create_task(self.retry_render_timeout_result(key, message, note, version, attempt + 1))
+                asyncio.create_task(self.retry_render_timeout_result(key, message, note, origin_view, attempt + 1))
             else:
                 logger.error(
                     "Blackjack timeout render permanently failed after %s attempts for key=%s. "
@@ -1161,11 +1155,11 @@ class BlackjackCog(commands.Cog):
             await self.save_active_game(key)
 
     async def retry_render_timeout_result(
-        self, key: tuple[int, int], message: discord.Message, note: str, version: int, attempt: int
+        self, key: tuple[int, int], message: discord.Message, note: str, origin_view: "BlackjackView", attempt: int
     ) -> None:
         await asyncio.sleep(TIMEOUT_EDIT_RETRY_SECONDS)
         async with self.lock_for(key):
-            await self._render_timeout_result(key, message, note, version, attempt)
+            await self._render_timeout_result(key, message, note, origin_view, attempt)
 
     async def settle_finished_game(self, user_id: int, game: BlackjackGame) -> str:
         first_settlement = not game.settled
@@ -1453,20 +1447,20 @@ class BlackjackCog(commands.Cog):
 
         embed.set_image(url=f"attachment://{image_filename}")
 
-        # Build the candidate next view, but do NOT touch self.active_views /
-        # self.view_versions yet, and do NOT stop the current view here. This
-        # method only renders a response - it has no idea yet whether the
-        # caller's upcoming Discord edit will actually succeed. Committing the
-        # swap here unconditionally used to mean: if that edit later failed
-        # (e.g. a transient "Unknown Webhook"/expired-interaction error), the
-        # OLD view - still the only thing actually attached to the real,
-        # clickable message - was already permanently .stop()'d, while the NEW
-        # view (now "active" and version-current) never got a `.message` set
-        # since the edit that would have set it failed, leaving its own
-        # timeout permanently inert (on_timeout no-ops when .message is None).
-        # That silently disabled the auto-timeout safety net for the hand
-        # forever, stranding the player's stake with no self-healing path
-        # short of them clicking that same now-unresponsive message again.
+        # Build the candidate next view, but do NOT touch self.active_views yet,
+        # and do NOT stop the current view here. This method only renders a
+        # response - it has no idea yet whether the caller's upcoming Discord
+        # edit will actually succeed. Committing the swap here unconditionally
+        # used to mean: if that edit later failed (e.g. a transient "Unknown
+        # Webhook"/expired-interaction error), the OLD view - still the only
+        # thing actually attached to the real, clickable message - was already
+        # permanently .stop()'d, while the NEW view (now the tracked "active"
+        # one) never got a `.message` set since the edit that would have set it
+        # failed, leaving its own timeout permanently inert (on_timeout no-ops
+        # when .message is None). That silently disabled the auto-timeout
+        # safety net for the hand forever, stranding the player's stake with no
+        # self-healing path short of them clicking that same now-unresponsive
+        # message again.
         #
         # Instead, the caller commits the swap via commit_view(...) only after
         # its edit succeeds. On failure, it leaves the previous view (and its
@@ -1474,28 +1468,25 @@ class BlackjackCog(commands.Cog):
         # safety net, and discards this candidate via discard_pending_view(...).
         view = None
         if game.phase != "finished":
-            version = self.view_versions.get(key, 0) + 1
-            view = BlackjackView(self, key, balance, version)
+            view = BlackjackView(self, key, balance)
 
         return embed, file, view
 
     def commit_view(self, key: tuple[int, int], view: "BlackjackView | None") -> None:
         """Swap in `view` as the tracked view for `key`. Call this ONLY after the
         Discord edit that attaches `view` to a real message has actually
-        succeeded - see the long comment in build_response for why."""
+        succeeded - see the long comment in build_response for why.
+
+        Popping the old view out of self.active_views (and stopping it) is also
+        what a stale timeout's identity check (see handle_timeout/
+        _render_timeout_result) relies on: once a key's tracked view has been
+        swapped out here, no old view instance can ever be `is` whatever gets
+        stored next, whether or not this call produces a new view to store."""
         old_view = self.active_views.pop(key, None)
         if old_view is not None:
             old_view.stop()
         if view is not None:
-            self.view_versions[key] = view.version
             self.active_views[key] = view
-        else:
-            # No live view results when the hand just finished, but this still
-            # represents a new, distinct state of `key` - a stale timeout retry
-            # (see _render_timeout_result) relies on this counter advancing on
-            # every such transition, not just ones that produce a view, to
-            # detect it's been superseded.
-            self.view_versions[key] = self.view_versions.get(key, 0) + 1
 
     def discard_pending_view(self, view: "BlackjackView | None") -> None:
         """Cancel a candidate view's timeout after the edit that would have
