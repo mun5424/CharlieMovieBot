@@ -713,6 +713,21 @@ class BlackjackCog(commands.Cog):
 
             game.message_id = msg.id
             await self.save_active_game(key)
+            # Every other successful-render path (handle_action, handle_shortcut_action,
+            # _render_timeout_result, startup reconciliation) calls commit_view() here -
+            # this one didn't, leaving self.view_versions[key] unset for a freshly-dealt
+            # hand's first view. That view's own 30s/10s timeout would then always look
+            # stale to handle_timeout's `self.view_versions.get(key) != version` check
+            # (None != 1) and get silently dropped, so a hand nobody ever clicks on
+            # would sit active forever with no auto-resolve. Worse, since the view was
+            # also never registered in self.active_views, nothing ever stopped its
+            # timer either - it stays ticking, and the *next* view (built after the
+            # player's first real action) can end up with the same version number
+            # (both compute self.view_versions.get(key, 0) + 1 from the same
+            # never-recorded baseline), so that first view's later timeout can pass
+            # the staleness check against the wrong, currently-live hand and force an
+            # incorrect premature auto-stand mid-turn.
+            self.commit_view(key, view)
             if view:
                 view.message = msg
                 self.game_messages[key] = msg
