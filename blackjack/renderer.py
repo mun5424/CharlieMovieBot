@@ -8,7 +8,7 @@ from typing import Iterable
 
 from .cards import Card, SUIT_SYMBOLS, hand_value
 from .game import BlackjackGame
-from .shoe import SingleDeckShoe
+from .shoe import Shoe
 
 CANVAS_W = 900
 MARGIN_X = 44
@@ -33,7 +33,7 @@ class CardRenderer:
         game: BlackjackGame,
         *,
         note: str = "",
-        shoe: SingleDeckShoe | None = None,
+        shoe: Shoe | None = None,
         player_name: str = "Player",
     ) -> io.BytesIO:
         """Render a mobile-friendly blackjack table.

@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Literal
 
-from .cards import Card, dealer_should_hit, hand_value, is_natural_blackjack, new_single_deck, same_rank
+from .cards import Card, dealer_should_hit, hand_value, is_natural_blackjack, new_shoe, new_single_deck, same_rank
+from .rules import DEFAULT_MODE, RuleSet, get_rules
+
+logger = logging.getLogger(__name__)
 
 Phase = Literal["insurance", "player", "finished"]
 
@@ -47,11 +51,27 @@ class PlayerHand:
 
     @property
     def can_double(self) -> bool:
-        return len(self.cards) == 2 and not self.stood and not self.busted and not self.doubled
+        # A split ace draws exactly one card, so it can never be doubled.
+        return (
+            len(self.cards) == 2
+            and not self.stood
+            and not self.busted
+            and not self.doubled
+            and not self.split_aces
+        )
 
     @property
     def can_split(self) -> bool:
-        return len(self.cards) == 2 and same_rank(self.cards[0], self.cards[1]) and not self.from_split
+        """Pair *shape* only. Whether a split is actually allowed depends on the
+        mode's hand limit and resplit-aces rule - see BlackjackGame.can_split_active.
+        `from_split` is deliberately not checked here any more: modes that allow
+        resplitting let an already-split hand split again."""
+        return (
+            len(self.cards) == 2
+            and same_rank(self.cards[0], self.cards[1])
+            and not self.stood
+            and not self.busted
+        )
 
 
 @dataclass(slots=True)
@@ -75,6 +95,15 @@ class BlackjackGame:
     settlement_net_cents: int = 0
     hand_results: list[str] = field(default_factory=list)
     busts_prevented: int = 0
+    mode: str = DEFAULT_MODE
+    # Set if _draw() had to refill mid-hand. The cog reads it after the hand and
+    # forces a clean reshuffle, because the refill leaves the shoe's discard pile
+    # and cut card describing a shoe that no longer exists.
+    emergency_refill: bool = False
+
+    @property
+    def rules(self) -> RuleSet:
+        return get_rules(self.mode)
 
     @classmethod
     def start(
@@ -85,20 +114,23 @@ class BlackjackGame:
         bet_cents: int,
         deck: list[Card] | None = None,
         player_label: str = "Player",
+        mode: str = DEFAULT_MODE,
     ) -> "BlackjackGame":
+        rules = get_rules(mode)
         game = cls(
             user_id=user_id,
             channel_id=channel_id,
             bet_cents=bet_cents,
             player_label=player_label,
-            deck=deck if deck is not None else new_single_deck(),
+            deck=deck if deck is not None else new_shoe(rules.decks),
+            mode=rules.key,
         )
 
         # Deal in real table order: player, dealer, player, dealer.
-        player_cards = [game.deck.pop()]
-        dealer_cards = [game.deck.pop()]
-        player_cards.append(game.deck.pop())
-        dealer_cards.append(game.deck.pop())
+        player_cards = [game._draw()]
+        dealer_cards = [game._draw()]
+        player_cards.append(game._draw())
+        dealer_cards.append(game._draw())
         game.hands.append(PlayerHand(cards=player_cards, bet_cents=bet_cents))
         game.dealer = dealer_cards
 
@@ -154,9 +186,69 @@ class BlackjackGame:
         if self.dealer_has_blackjack or player_has_blackjack:
             self.phase = "finished"
 
+    def _draw(self) -> Card:
+        """Take one card, refilling if the shoe somehow empties mid-hand.
+
+        With any sane penetration this never fires - the cut card ends the shoe
+        long before it empties. It exists so a pathological hand (split to the
+        limit with every hand drawing out) degrades into a reshuffle rather than
+        an IndexError, which would strand the player's stake mid-hand.
+        """
+        if not self.deck:
+            # self.deck IS the shoe's list, so this refill is visible to the shoe
+            # but leaves its discard/cut-card bookkeeping describing the old shoe.
+            # Flag it so the cog can reshuffle properly once the hand is settled.
+            logger.warning(
+                "Blackjack: shoe exhausted mid-hand for user_id=%s mode=%s - refilling",
+                self.user_id, self.mode,
+            )
+            self.deck.extend(new_shoe(self.rules.decks))
+            self.emergency_refill = True
+        return self.deck.pop()
+
+    @property
+    def can_hit_active(self) -> bool:
+        hand = self.active_hand
+        if hand.stood or hand.busted:
+            return False
+        # A split ace takes its one card at split time and is done.
+        return not hand.split_aces
+
+    @property
+    def can_double_active(self) -> bool:
+        hand = self.active_hand
+        if not hand.can_double:
+            return False
+        return self.rules.can_double_total(hand.value, hand.from_split)
+
+    def hand_can_split(self, hand: PlayerHand) -> bool:
+        if not hand.can_split:
+            return False
+        if len(self.hands) >= self.rules.max_hands:
+            return False
+        if hand.split_aces and not self.rules.resplit_aces:
+            return False
+        return True
+
+    @property
+    def can_split_active(self) -> bool:
+        return self.hand_can_split(self.active_hand)
+
+    def _resolve_hand_entry(self, hand: PlayerHand) -> bool:
+        """Auto-stand a hand the player has no real decision on. True if stood."""
+        if hand.split_aces and not self.hand_can_split(hand):
+            # One card to a split ace, then it stands. The only exception is a
+            # fresh pair of aces under a resplit-aces rule, which may split again.
+            hand.stood = True
+            return True
+        if hand.value == 21:
+            hand.stood = True
+            return True
+        return False
+
     def hit(self) -> None:
         hand = self.active_hand
-        hand.cards.append(self.deck.pop())
+        hand.cards.append(self._draw())
         if hand.value > 21:
             hand.busted = True
             hand.stood = True
@@ -178,7 +270,7 @@ class BlackjackGame:
         hand = self.active_hand
         hand.bet_cents *= 2
         hand.doubled = True
-        hand.cards.append(self.deck.pop())
+        hand.cards.append(self._draw())
         if hand.value > 21:
             hand.busted = True
         hand.stood = True
@@ -188,34 +280,34 @@ class BlackjackGame:
         hand = self.active_hand
         first, second = hand.cards
         split_aces = first.rank == "A"
-        hand.cards = [first, self.deck.pop()]
+        hand.cards = [first, self._draw()]
         new_hand = PlayerHand(
-            cards=[second, self.deck.pop()], bet_cents=hand.bet_cents, from_split=True, split_aces=split_aces
+            cards=[second, self._draw()], bet_cents=hand.bet_cents, from_split=True, split_aces=split_aces
         )
         hand.from_split = True
         hand.split_aces = split_aces
         self.hands.insert(self.active_hand_index + 1, new_hand)
         self.did_split = True
 
-        if split_aces:
-            # Split aces get exactly one card each and can't be hit - both hands stand immediately.
-            hand.stood = True
-            new_hand.stood = True
-            self.advance_hand_or_finish()
-        elif hand.value == 21:
-            # If the first split hand immediately lands on 21, move on.
-            hand.stood = True
+        # Each hand is auto-resolved as it becomes active rather than both being
+        # stood here: under resplit-aces a freshly split ace can land on another
+        # ace and is still owed a decision.
+        if self._resolve_hand_entry(hand):
             self.advance_hand_or_finish()
 
     def advance_hand_or_finish(self) -> None:
         for index in range(self.active_hand_index + 1, len(self.hands)):
-            if not self.hands[index].stood and not self.hands[index].busted:
-                self.active_hand_index = index
-                return
+            hand = self.hands[index]
+            if hand.stood or hand.busted:
+                continue
+            self.active_hand_index = index
+            if self._resolve_hand_entry(hand):
+                continue
+            return
 
         if any(not hand.busted for hand in self.hands):
-            while dealer_should_hit(self.dealer):
-                self.dealer.append(self.deck.pop())
+            while dealer_should_hit(self.dealer, self.rules.dealer_hits_soft_17):
+                self.dealer.append(self._draw())
 
         self.phase = "finished"
 
@@ -257,9 +349,9 @@ class BlackjackGame:
                 self.settlement_lines.append(f"{prefix}: blackjack push")
                 self.hand_results.append("push")
             elif hand.is_blackjack:
-                profit = payout_3_to_2(hand.bet_cents)
+                profit = self.rules.blackjack_profit(hand.bet_cents)
                 credited += hand.bet_cents + profit
-                self.settlement_lines.append(f"{prefix}: 3:2 blackjack")
+                self.settlement_lines.append(f"{prefix}: {self.rules.payout_label} blackjack")
                 self.hand_results.append("win")
             elif hand.busted or hand.value > 21:
                 self.settlement_lines.append(f"{prefix}: bust")

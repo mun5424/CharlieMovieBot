@@ -25,6 +25,11 @@ CREATE TABLE IF NOT EXISTS twitch_stream_state (
   last_stream_id  TEXT,
   last_started_at TEXT,
   last_notified_at TEXT,
+  -- The stream id we actually announced. Deliberately NOT cleared when a poll
+  -- sees the streamer offline: a single missed poll (API blip, rate limit) would
+  -- otherwise erase the only evidence that this stream was already announced,
+  -- and the cooldown would re-announce it an hour later as if it were new.
+  last_notified_stream_id TEXT,
   PRIMARY KEY (guild_id, user_login)
 );
 
@@ -40,6 +45,14 @@ class TwitchStore:
         self._db = await aiosqlite.connect(self.db_path)
         self._db.row_factory = aiosqlite.Row
         await self._db.executescript(SCHEMA_SQL)
+        # Existing installs predate last_notified_stream_id; CREATE TABLE IF NOT
+        # EXISTS won't add it, so patch it on. Additive and idempotent.
+        cur = await self._db.execute("PRAGMA table_info(twitch_stream_state)")
+        columns = {row[1] for row in await cur.fetchall()}
+        if "last_notified_stream_id" not in columns:
+            await self._db.execute(
+                "ALTER TABLE twitch_stream_state ADD COLUMN last_notified_stream_id TEXT"
+            )
         await self._db.commit()
 
     async def close(self) -> None:
@@ -152,14 +165,16 @@ class TwitchStore:
         user_login = user_login.strip().lower()
         db = self._conn()
         cur = await db.execute(
-            "SELECT guild_id, user_login, is_live, last_stream_id, last_started_at, last_notified_at "
+            "SELECT guild_id, user_login, is_live, last_stream_id, last_started_at, "
+            "last_notified_at, last_notified_stream_id "
             "FROM twitch_stream_state WHERE guild_id=? AND user_login=?",
             (guild_id, user_login),
         )
         row = await cur.fetchone()
         if not row:
             return {"guild_id": guild_id, "user_login": user_login, "is_live": 0,
-                    "last_stream_id": None, "last_started_at": None, "last_notified_at": None}
+                    "last_stream_id": None, "last_started_at": None,
+                    "last_notified_at": None, "last_notified_stream_id": None}
         return dict(row)
 
     async def set_state(
@@ -170,15 +185,19 @@ class TwitchStore:
         stream_id: Optional[str],
         started_at: Optional[str],
         notified_at: Optional[str],
+        notified_stream_id: Optional[str] = None,
     ) -> None:
         user_login = user_login.strip().lower()
         db = self._conn()
         await db.execute(
-            "INSERT INTO twitch_stream_state (guild_id, user_login, is_live, last_stream_id, last_started_at, last_notified_at) "
-            "VALUES (?, ?, ?, ?, ?, ?) "
+            "INSERT INTO twitch_stream_state (guild_id, user_login, is_live, last_stream_id, "
+            "last_started_at, last_notified_at, last_notified_stream_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(guild_id, user_login) DO UPDATE SET "
             "is_live=excluded.is_live, last_stream_id=excluded.last_stream_id, "
-            "last_started_at=excluded.last_started_at, last_notified_at=excluded.last_notified_at",
-            (guild_id, user_login, 1 if is_live else 0, stream_id, started_at, notified_at),
+            "last_started_at=excluded.last_started_at, last_notified_at=excluded.last_notified_at, "
+            "last_notified_stream_id=excluded.last_notified_stream_id",
+            (guild_id, user_login, 1 if is_live else 0, stream_id, started_at,
+             notified_at, notified_stream_id),
         )
         await db.commit()

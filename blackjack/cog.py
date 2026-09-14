@@ -14,11 +14,21 @@ from .cards import card_from_code, card_to_code
 from .db import BlackjackDB
 from .game import BlackjackGame, PlayerHand
 from .renderer import CardRenderer, money
-from .shoe import MIN_CARDS_TO_START_HAND, RESHUFFLE_AT_REMAINING_CARDS, SingleDeckShoe
+from .rules import DEFAULT_MODE, RULE_SETS, RuleSet, get_rules
+from .shoe import Shoe
 
 logger = logging.getLogger(__name__)
 
 MIN_BET_CENTS = 1_000
+MAX_BET_DOLLARS = 1_000_000
+# How long a finished table keeps its "Deal Again"/"Change Bet" buttons. Kept
+# deliberately short and non-persistent: a finished table message sits in channel
+# scrollback forever, so permanently live replay buttons would be a permanent
+# stale-click surface (someone scrolling back days later dealing a surprise hand).
+# After this, on_timeout strips them and the message becomes an inert receipt.
+REPLAY_TIMEOUT_SECONDS = 180
+# How long the /blackjack_options picker stays interactive.
+MODE_OPTIONS_TIMEOUT_SECONDS = 300
 DAILY_BONUS_BASE_CENTS = 10_000
 DAILY_BONUS_STREAK_STEP_CENTS = 2_500
 DAILY_BONUS_PLATEAU_CENTS = 20_000
@@ -61,7 +71,9 @@ ACTION_ALIASES: dict[str, str] = {
 }
 
 SHORTCUT_HELP = "Shortcuts: H=Hit • S=Stand • D=Double • Y/P=Split • I=Insurance • N=No Insurance"
-RULES_TEXT = "Single Deck • Dealer hits soft 17 • Blackjack 3:2 • Insurance 2:1 "
+# Fallback footer for surfaces with no game in hand (e.g. a stale-hand notice).
+# A live table uses game.rules.rules_line() so the footer matches the mode dealt.
+RULES_TEXT = get_rules(DEFAULT_MODE).rules_line()
 
 LEADERBOARD_MEDALS = ["🥇", "🥈", "🥉"]
 # Blackjack balances/stats are global across every server the bot is in, so the
@@ -79,6 +91,16 @@ LEADERBOARD_CATEGORIES: list[tuple[str, str, str]] = [
     ("biggest_win", "💰 Biggest Single Win", "money"),
     ("hands_played", "🎰 Most Hands Played", "int"),
 ]
+
+
+MODE_CHOICES = [
+    app_commands.Choice(name=f"{r.name} · {r.house} ({r.payout_label})", value=r.key)
+    for r in RULE_SETS.values()
+]
+
+
+def mode_label(rules: RuleSet) -> str:
+    return f"{rules.name} · {rules.house}"
 
 
 def today_key() -> str:
@@ -166,10 +188,13 @@ class BlackjackView(discord.ui.View):
         self.remove_item(self.skip_insurance_button)
 
         hand = game.active_hand
-        self.hit_button.disabled = False
+        # Every gate comes from the game rather than the hand alone: the mode
+        # decides the hand limit, resplit-aces and double-after-split, and a split
+        # ace can only ever split (never hit or double).
+        self.hit_button.disabled = not game.can_hit_active
         self.stand_button.disabled = False
-        self.double_button.disabled = not hand.can_double or balance_cents < hand.bet_cents
-        self.split_button.disabled = game.did_split or not hand.can_split or balance_cents < hand.bet_cents
+        self.double_button.disabled = not game.can_double_active or balance_cents < hand.bet_cents
+        self.split_button.disabled = not game.can_split_active or balance_cents < hand.bet_cents
 
     async def on_timeout(self) -> None:
         # Timeout means: no player response, so either skip insurance or stand the active hand.
@@ -206,6 +231,185 @@ class BlackjackView(discord.ui.View):
         await self.cog.handle_action(interaction, self.key, "no_insurance")
 
 
+class ReplayView(discord.ui.View):
+    """Buttons offered on a *finished* table: replay the same bet, or pick a new one.
+
+    The bet amount lives in the button label (`Deal Again ($25)`) rather than being
+    asked about, so the player always sees what is about to leave their balance
+    before they tap. See REPLAY_TIMEOUT_SECONDS for why this view is short-lived
+    and deliberately not persistent across restarts."""
+
+    def __init__(self, cog: "BlackjackCog", key: tuple[int, int], bet_cents: int):
+        super().__init__(timeout=REPLAY_TIMEOUT_SECONDS)
+        self.cog = cog
+        self.key = key
+        self.owner_id = key[0]
+        self.bet_cents = bet_cents
+        self.message: discord.Message | None = None
+        self.deal_again_button.label = f"Deal Again ({money(bet_cents)})"
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message("This blackjack hand belongs to someone else.", ephemeral=True)
+            return False
+        return True
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception, item: discord.ui.Item) -> None:
+        # Same reasoning as BlackjackView.on_error: discord.py's default only
+        # prints to stderr, which this bot's logging setup does not capture.
+        logger.exception(
+            "Blackjack replay button error: key=%s item=%s message_id=%s bet_cents=%s",
+            self.key,
+            getattr(item, "label", item),
+            getattr(interaction.message, "id", None),
+            self.bet_cents,
+            exc_info=error,
+        )
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    "Something went wrong starting that hand. Please try `/blackjack` instead.",
+                    ephemeral=True,
+                )
+            else:
+                await interaction.followup.send(
+                    "Something went wrong starting that hand. Please try `/blackjack` instead.",
+                    ephemeral=True,
+                )
+        except discord.HTTPException:
+            pass
+
+    async def retire(self) -> None:
+        """Stop the timer and strip these buttons off the finished table message."""
+        self.stop()
+        if self.message is None:
+            return
+        try:
+            await self.message.edit(view=None)
+        except (discord.HTTPException, AttributeError):
+            pass
+
+    async def on_timeout(self) -> None:
+        await self.retire()
+
+    async def replay(self, interaction: discord.Interaction, bet_cents: int) -> None:
+        """Shared tail of both buttons: try to deal `bet_cents`, retire on success."""
+        # start_hand re-checks the balance, the bet bounds and whether this player
+        # already has a live hand, so a stale click from scrollback hits exactly the
+        # same guard rails as /blackjack. Only retire the buttons once a hand was
+        # really dealt - on a rejection (usually: this bet now exceeds their balance)
+        # leaving them up is what gives the player Change Bet as a way to correct it.
+        dealt = await self.cog.start_hand(interaction, bet_cents)
+        if dealt:
+            await self.retire()
+
+    @discord.ui.button(label="Deal Again", style=discord.ButtonStyle.primary, row=0)
+    async def deal_again_button(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self.replay(interaction, self.bet_cents)
+
+    @discord.ui.button(label="Change Bet", style=discord.ButtonStyle.success, row=0)
+    async def change_bet_button(self, interaction: discord.Interaction, _: discord.ui.Button):
+        # A modal has to be the FIRST response to an interaction - it cannot follow a
+        # defer() - so this click only opens the modal. The modal *submit* is then a
+        # separate interaction, and that is the one start_hand defers and deals on.
+        await interaction.response.send_modal(ChangeBetModal(self))
+
+
+class ChangeBetModal(discord.ui.Modal, title="Change Your Bet"):
+    def __init__(self, view: ReplayView):
+        super().__init__()
+        self.replay_view = view
+        # Built per instance rather than as a class attribute: a class-level
+        # TextInput is shared by every instance of the modal, so prefilling
+        # `default` with this player's last bet there would leak it into another
+        # player's modal opened at the same time.
+        self.bet_input = discord.ui.TextInput(
+            label="Bet amount in dollars",
+            default=str(view.bet_cents // 100),
+            placeholder=f"{MIN_BET_CENTS // 100} - {MAX_BET_DOLLARS}",
+            min_length=1,
+            max_length=9,
+            required=True,
+        )
+        self.add_item(self.bet_input)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        raw = self.bet_input.value.strip().lstrip("$").replace(",", "").replace("_", "")
+        try:
+            dollars = int(raw)
+        except ValueError:
+            await interaction.response.send_message(
+                f"`{self.bet_input.value.strip()}` isn't a whole dollar amount. "
+                f"Enter a number between {MIN_BET_CENTS // 100} and {MAX_BET_DOLLARS}.",
+                ephemeral=True,
+            )
+            return
+        # Bounds/balance are start_hand's job - it owns the same checks /blackjack
+        # uses, so the two entry points can't drift apart.
+        await self.replay_view.replay(interaction, dollars * 100)
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
+        logger.exception(
+            "Blackjack change-bet modal error: key=%s raw=%r",
+            self.replay_view.key,
+            getattr(self.bet_input, "value", None),
+            exc_info=error,
+        )
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    "Something went wrong with that bet. Please try `/blackjack` instead.", ephemeral=True
+                )
+        except discord.HTTPException:
+            pass
+
+
+class ModeSelect(discord.ui.Select):
+    """Rule browser and default-setter in one. Each option's description carries
+    the headline rules, so the picker itself is the comparison table."""
+
+    def __init__(self, cog: "BlackjackCog", current: str):
+        options = [
+            discord.SelectOption(
+                label=mode_label(r),
+                value=r.key,
+                description=f"{r.payout_label} • {'H17' if r.dealer_hits_soft_17 else 'S17'} • "
+                            f"split to {r.max_hands}{' • RSA' if r.resplit_aces else ''}"[:100],
+                default=(r.key == current),
+            )
+            for r in RULE_SETS.values()
+        ]
+        super().__init__(placeholder="Choose a table…", options=options, min_values=1, max_values=1)
+        self.cog = cog
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await self.cog.apply_mode_choice(interaction, self.values[0])
+
+
+class ModeOptionsView(discord.ui.View):
+    def __init__(self, cog: "BlackjackCog", owner_id: int, current: str):
+        super().__init__(timeout=MODE_OPTIONS_TIMEOUT_SECONDS)
+        self.owner_id = owner_id
+        self.message: discord.Message | None = None
+        self.add_item(ModeSelect(cog, current))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message(
+                "Run `/blackjack_options` yourself to pick your table.", ephemeral=True
+            )
+            return False
+        return True
+
+    async def on_timeout(self) -> None:
+        if self.message is None:
+            return
+        try:
+            await self.message.edit(view=None)
+        except (discord.HTTPException, AttributeError):
+            pass
+
+
 class BlackjackCog(commands.Cog):
     def __init__(self, bot: commands.Bot, *, db_path: str = DEFAULT_DB_PATH):
         self.bot = bot
@@ -215,8 +419,11 @@ class BlackjackCog(commands.Cog):
         self.locks: dict[tuple[int, int], asyncio.Lock] = {}
         self.game_messages: dict[tuple[int, int], discord.Message] = {}
         self.active_views: dict[tuple[int, int], BlackjackView] = {}
+        self.replay_views: dict[tuple[int, int], ReplayView] = {}
         self.finished_cleanup_tasks: dict[tuple[int, int], asyncio.Task] = {}
-        self.shoes: dict[int, SingleDeckShoe] = {}
+        # Keyed by (user_id, mode): a 2-deck shoe and an 8-deck shoe are different
+        # objects, and switching modes must never deal one game's cards into another.
+        self.shoes: dict[tuple[int, str], Shoe] = {}
         self.corrupt_state_refunds: dict[tuple[int, int], int] = {}
         self._startup_reconciled = False
 
@@ -378,6 +585,17 @@ class BlackjackCog(commands.Cog):
         old_view = self.active_views.pop(key, None)
         if old_view is not None:
             old_view.stop()
+        # Replay buttons belong to the hand that just ended, so they die with it.
+        # Only the timer is stopped here (this method is sync and can't await an
+        # edit); the message itself is stripped by ReplayView.retire() on its own
+        # timeout, or by disable_stale_message when a new hand takes over the key.
+        # That relies on REPLAY_TIMEOUT_SECONDS < FINISHED_GAME_GRACE_SECONDS: if
+        # the grace period ever became the shorter of the two, this stop() would
+        # land first and leave buttons that are visible but no longer wired to
+        # anything ("This interaction failed" on click).
+        old_replay = self.replay_views.pop(key, None)
+        if old_replay is not None:
+            old_replay.stop()
         # Popping `old_view` out of self.active_views here is what makes a stale
         # timeout harmless even without the .stop() above: handle_timeout/
         # _render_timeout_result check identity against self.active_views[key],
@@ -422,6 +640,11 @@ class BlackjackCog(commands.Cog):
                     "cards": [card_to_code(card) for card in hand.cards],
                     "bet_cents": hand.bet_cents,
                     "from_split": hand.from_split,
+                    # Never persisted before modes: a split ace's "one card only"
+                    # status had no effect once both hands were auto-stood. Under
+                    # resplit-aces it gates doubling and hitting, so a hand restored
+                    # after a restart would otherwise become illegally playable.
+                    "split_aces": hand.split_aces,
                     "stood": hand.stood,
                     "busted": hand.busted,
                     "doubled": hand.doubled,
@@ -439,6 +662,7 @@ class BlackjackCog(commands.Cog):
             "settlement_net_cents": game.settlement_net_cents,
             "hand_results": game.hand_results,
             "busts_prevented": game.busts_prevented,
+            "mode": game.mode,
         }
 
     def game_from_active_state(self, state: dict) -> BlackjackGame:
@@ -455,6 +679,7 @@ class BlackjackCog(commands.Cog):
                     cards=[card_from_code(code) for code in hand_state.get("cards", [])],
                     bet_cents=int(hand_state.get("bet_cents", 0)),
                     from_split=bool(hand_state.get("from_split", False)),
+                    split_aces=bool(hand_state.get("split_aces", False)),
                     stood=bool(hand_state.get("stood", False)),
                     busted=bool(hand_state.get("busted", False)),
                     doubled=bool(hand_state.get("doubled", False)),
@@ -472,6 +697,9 @@ class BlackjackCog(commands.Cog):
             settlement_net_cents=int(state.get("settlement_net_cents", 0)),
             hand_results=list(state.get("hand_results", [])),
             busts_prevented=int(state.get("busts_prevented", 0)),
+            # Hands persisted before modes existed carry no mode and are, by
+            # definition, the original single-deck game.
+            mode=str(state.get("mode") or DEFAULT_MODE),
         )
 
     async def save_active_game(self, key: tuple[int, int]) -> None:
@@ -528,59 +756,146 @@ class BlackjackCog(commands.Cog):
             return None
         return f"Your previous blackjack hand's saved data was corrupted and could not be resumed. {money(refunded)} was refunded to your balance."
 
-    async def shoe_for_user(self, user_id: int) -> SingleDeckShoe:
-        shoe = self.shoes.get(user_id)
+    async def mode_for_user(self, user_id: int) -> str:
+        return await self.db.get_mode(user_id)
+
+    async def shoe_for_user(self, user_id: int, mode: str = DEFAULT_MODE) -> Shoe:
+        key = (user_id, mode)
+        shoe = self.shoes.get(key)
         if shoe is not None:
             return shoe
 
-        state = await self.db.get_shoe_state(user_id)
+        state = await self.db.get_shoe_state(user_id, mode)
         if state is None:
-            shoe = SingleDeckShoe.fresh("new shoe")
+            shoe = Shoe.fresh(mode, "new shoe")
         else:
             try:
-                shoe = SingleDeckShoe(
+                shoe = Shoe(
+                    mode=mode,
                     deck=[card_from_code(code) for code in state["deck"]],
                     discard=[card_from_code(code) for code in state["discard"]],
                     hands_played=int(state["hands_played"]),
                     last_shuffle_reason=str(state["last_shuffle_reason"]),
+                    # Re-roll only if this row predates the persisted cut card;
+                    # an in-play shoe keeps the depth it was actually cut at.
+                    cut_card_at=int(state.get("cut_card_at") or 0) or get_rules(mode).cut_card_at(),
                 )
             except Exception:
                 # If old/corrupt shoe data ever exists, fail safe with a fresh deck.
-                shoe = SingleDeckShoe.fresh("recovered from invalid shoe state")
+                shoe = Shoe.fresh(mode, "recovered from invalid shoe state")
 
-        self.shoes[user_id] = shoe
+        self.shoes[key] = shoe
         return shoe
 
-    async def save_shoe_for_user(self, user_id: int) -> None:
-        shoe = await self.shoe_for_user(user_id)
+    async def save_shoe_for_user(self, user_id: int, mode: str = DEFAULT_MODE) -> None:
+        shoe = await self.shoe_for_user(user_id, mode)
         await self.db.save_shoe_state(
             user_id=user_id,
             deck_codes=[card_to_code(card) for card in shoe.deck],
             discard_codes=[card_to_code(card) for card in shoe.discard],
             hands_played=shoe.hands_played,
             last_shuffle_reason=shoe.last_shuffle_reason,
+            mode=mode,
+            cut_card_at=shoe.cut_card_at,
         )
 
-    @app_commands.command(name="blackjack", description="Play persistent single-deck blackjack. Minimum bet is $10.")
-    @app_commands.describe(bet="Bet amount in dollars. Minimum $10.")
-    async def blackjack(self, interaction: discord.Interaction, bet: app_commands.Range[int, 10, 1_000_000] = 10):
+    def mode_embed(self, rules: RuleSet, *, current: str, note: str = "") -> discord.Embed:
+        is_current = rules.key == current
+        embed = discord.Embed(
+            title=f"🎲 {mode_label(rules)}",
+            description="\n".join(rules.detail_lines()),
+            color=discord.Color.green() if is_current else discord.Color.blurple(),
+        )
+        if note:
+            embed.add_field(name="\u200b", value=note, inline=False)
+        embed.set_footer(text="Your table is saved and used for every /blackjack hand until you change it.")
+        return embed
+
+    async def apply_mode_choice(self, interaction: discord.Interaction, chosen: str) -> None:
+        user_id = interaction.user.id
         key = self.key_for(interaction)
+        rules = get_rules(chosen)
+
+        # A live hand belongs to the mode it was dealt from - switching underneath
+        # it would settle that hand against a different rule sheet and a different
+        # shoe. Make the player finish or time out first.
+        async with self.lock_for(key):
+            active = await self.load_active_game(key)
+            if active is not None and active.phase != "finished":
+                await interaction.response.send_message(
+                    f"Finish your current {mode_label(active.rules)} hand before switching tables.",
+                    ephemeral=True,
+                )
+                return
+
+        previous = await self.mode_for_user(user_id)
+        await self.db.set_mode(user_id, rules.key)
+
+        if previous == rules.key:
+            note = "Already your table - nothing changed."
+        else:
+            # Each mode keeps its own shoe, so this is a genuine sit-down at a
+            # different table rather than a reshuffle of the one they just left.
+            note = f"Switched from **{mode_label(get_rules(previous))}**. Your {mode_label(rules)} shoe picks up where you left it."
+        await interaction.response.edit_message(embed=self.mode_embed(rules, current=rules.key, note=note), view=None)
+
+    @app_commands.command(
+        name="blackjack_options",
+        description="Pick which blackjack table you play: single deck, Pechanga double deck, or Mandalay Bay 8-deck.",
+    )
+    async def blackjack_options(self, interaction: discord.Interaction) -> None:
+        current = await self.mode_for_user(interaction.user.id)
+        rules = get_rules(current)
+        view = ModeOptionsView(self, interaction.user.id, current)
+        await interaction.response.send_message(
+            embed=self.mode_embed(rules, current=current, note="**Currently your table.** Pick another below to switch."),
+            view=view,
+            ephemeral=True,
+        )
+        try:
+            view.message = await interaction.original_response()
+        except discord.HTTPException:
+            pass
+
+    @app_commands.command(name="blackjack", description="Play blackjack at your chosen table. Change tables with /blackjack_options.")
+    @app_commands.describe(bet="Bet amount in dollars. Minimum $10.")
+    async def blackjack(self, interaction: discord.Interaction, bet: app_commands.Range[int, 10, MAX_BET_DOLLARS] = 10):
+        await self.start_hand(interaction, bet * 100)
+
+    async def start_hand(self, interaction: discord.Interaction, bet_cents: int) -> bool:
+        """Deal a fresh hand for `interaction`'s user, or explain why it can't.
+
+        The single entry point for dealing, shared by /blackjack and the finished
+        table's replay buttons, so both go through the same active-hand guard, daily
+        bonus claim, bet-bounds check and balance check. Split into its own method
+        precisely so those can't drift apart - a replay path with its own copy of
+        this would, for instance, quietly stop claiming the daily bonus.
+
+        Returns True only if a hand was actually dealt. A False return means the
+        caller's interaction has already been answered with the reason.
+        """
+        key = self.key_for(interaction)
+        # Normalise through get_rules: a stored preference naming a retired mode
+        # falls back to the default, and everything downstream (the shoe key here,
+        # game.mode, settle, build_response) must agree on which mode that is.
+        rules = get_rules(await self.mode_for_user(interaction.user.id))
+        mode = rules.key
         async with self.lock_for(key):
             existing_game = await self.load_active_game(key)
-            refund_note = self.pop_corrupt_refund_note(key)
-            if existing_game and existing_game.phase == "finished":
-                # Best-effort: if that hand's final edit_message/table_message.edit
-                # never went through (e.g. a transient Discord API failure), its
-                # message may still show live buttons even though the hand is fully
-                # settled. Strip them now, in the background, so that old message
-                # can't later be clicked and mistaken for a still-active hand once
-                # this new one takes over the key. Fire-and-forget so a slow/failed
-                # Discord call here never delays this interaction's own response.
-                asyncio.create_task(self.disable_stale_message(key, existing_game))
-                await self.cleanup_game_and_db(key)
+
+            # A finished predecessor doesn't block a new hand, but do NOT tear it
+            # down yet - every rejection below still has to leave the player
+            # looking at that table. Tearing it down here (disable_stale_message
+            # strips its buttons, cleanup_game stops its ReplayView) would take
+            # the Change Bet button away before the player is told their bet was
+            # refused, which is exactly the button they need to fix it with.
+            # Retired once this call is actually committed to dealing instead.
+            finished_predecessor = None
+            if existing_game is not None and existing_game.phase == "finished":
+                finished_predecessor = existing_game
                 existing_game = None
 
-            if existing_game and existing_game.phase != "finished":
+            if existing_game is not None:
                 active_channel = existing_game.channel_id
                 if active_channel:
                     await interaction.response.send_message(
@@ -589,7 +904,22 @@ class BlackjackCog(commands.Cog):
                     )
                 else:
                     await interaction.response.send_message("You already have an active blackjack hand.", ephemeral=True)
-                return
+                return False
+
+            # Bet bounds are checked before anything with a side effect. /blackjack's
+            # app_commands.Range enforces them too, but the Change Bet modal takes
+            # free text, so this is the check that actually holds there - and a typo'd
+            # amount must not be able to burn the player's once-a-day bonus claim.
+            if bet_cents < rules.min_bet_cents:
+                await interaction.response.send_message(
+                    f"Minimum bet on {mode_label(rules)} is {money(rules.min_bet_cents)}.", ephemeral=True
+                )
+                return False
+            if bet_cents > MAX_BET_DOLLARS * 100:
+                await interaction.response.send_message(
+                    f"Maximum blackjack bet is {money(MAX_BET_DOLLARS * 100)}.", ephemeral=True
+                )
+                return False
 
             day = today_key()
             bonus_claimed, bonus_amount_cents, bonus_streak = await self.db.claim_daily_bonus(
@@ -601,18 +931,31 @@ class BlackjackCog(commands.Cog):
                 extended_step_cents=DAILY_BONUS_EXTENDED_STEP_CENTS,
             )
 
-            bet_cents = bet * 100
-            if bet_cents < MIN_BET_CENTS:
-                await interaction.response.send_message("Minimum blackjack bet is $10.", ephemeral=True)
-                return
-
             balance = await self.db.get_balance(interaction.user.id)
             if balance < bet_cents:
-                msg = f"You only have {money(balance)}. The minimum bet is $10."
+                # Names the bet as well as the balance: on the replay path the
+                # shortfall is almost never about the minimum, and "you only have
+                # $15, the minimum bet is $10" reads like $15 is somehow too small.
+                msg = f"That bet is {money(bet_cents)} but you only have {money(balance)}."
                 if bonus_claimed:
                     msg += f" I did apply your daily +{money(bonus_amount_cents)} bonus."
                 await interaction.response.send_message(msg, ephemeral=True)
-                return
+                return False
+
+            # Committed to dealing from here on, so it's finally safe to retire the
+            # finished predecessor and to consume the pending refund note (popping it
+            # on a rejected bet would drop the notice before any hand could show it).
+            refund_note = self.pop_corrupt_refund_note(key)
+            if finished_predecessor is not None:
+                # Best-effort: if that hand's final edit_message/table_message.edit
+                # never went through (e.g. a transient Discord API failure), its
+                # message may still show live buttons even though the hand is fully
+                # settled. Strip them now, in the background, so that old message
+                # can't later be clicked and mistaken for a still-active hand once
+                # this new one takes over the key. Fire-and-forget so a slow/failed
+                # Discord call here never delays this interaction's own response.
+                asyncio.create_task(self.disable_stale_message(key, finished_predecessor))
+                await self.cleanup_game_and_db(key)
 
             # Committed to dealing a hand now - defer before the slow render/send
             # work below (a natural blackjack's celebration GIF alone can take
@@ -622,9 +965,17 @@ class BlackjackCog(commands.Cog):
             # response was deferred, not to flags passed on the followup call
             # itself - deferring ephemeral here silently made the real, public
             # hand table ephemeral too (confirmed against the live bot).
-            await interaction.response.defer()
+            #
+            # thinking=True matters for the replay buttons: a *component*
+            # interaction's plain defer() is a deferred message *update*, so the
+            # edit_original_response below would overwrite the finished table the
+            # button sits on instead of posting the new hand. thinking=True forces
+            # the same deferred-channel-message that an application command always
+            # gets, so all three entry points (slash, button, modal submit) land a
+            # brand new table message and leave the old one intact as a receipt.
+            await interaction.response.defer(thinking=True)
 
-            shoe = await self.shoe_for_user(interaction.user.id)
+            shoe = await self.shoe_for_user(interaction.user.id, mode)
             shuffled_before_hand = shoe.prepare_for_new_hand()
 
             await self.db.add_balance(interaction.user.id, -bet_cents, "blackjack_bet")
@@ -641,6 +992,7 @@ class BlackjackCog(commands.Cog):
                 bet_cents=bet_cents,
                 deck=shoe.deck,
                 player_label=player_label,
+                mode=mode,
             )
             self.games[key] = game
             await self.save_active_game(key)
@@ -649,7 +1001,7 @@ class BlackjackCog(commands.Cog):
             if refund_note:
                 note_parts.append(refund_note)
             if shuffled_before_hand:
-                note_parts.append("Fresh single deck shuffled.")
+                note_parts.append(f"Fresh {rules.deck_label.lower()} shuffled.")
 
             if game.phase == "insurance":
                 note_parts.append(f"Dealer shows Ace. Take insurance or skip. Auto-skips in {INSURANCE_TIMEOUT_SECONDS} seconds.")
@@ -672,9 +1024,9 @@ class BlackjackCog(commands.Cog):
                     # discord.py's followup.send() treats an explicitly-passed view=None
                     # differently from an omitted view (it checks `is not MISSING`, not
                     # truthiness) and crashes with AttributeError: 'NoneType' object has
-                    # no attribute 'is_finished'. view is None whenever the hand finishes
-                    # instantly (a natural or dealer blackjack dealt before any player
-                    # action), so the view kwarg must be omitted entirely in that case.
+                    # no attribute 'is_finished'. build_response now returns a ReplayView
+                    # for finished hands so this should never be None, but the guard stays
+                    # as cheap insurance against that crash coming back.
                     send_kwargs: dict = {"embed": embed, "file": file}
                     if view is not None:
                         send_kwargs["view"] = view
@@ -704,7 +1056,9 @@ class BlackjackCog(commands.Cog):
                     await interaction.edit_original_response(content=note, embed=None, attachments=[], view=None)
                 except discord.HTTPException:
                     pass
-                return
+                # False: the stake was refunded (or the hand was already settled), so
+                # a replay caller should keep its buttons up as a way back in.
+                return False
 
             game.message_id = msg.id
             await self.save_active_game(key)
@@ -722,8 +1076,13 @@ class BlackjackCog(commands.Cog):
             if view:
                 view.message = msg
                 self.game_messages[key] = msg
-            elif game.phase == "finished":
+            # Was an `elif` on the old `view is None` meaning of "hand already
+            # over". A finished hand now carries a (truthy) ReplayView, so this
+            # has to be its own check or an instant blackjack would never get
+            # its cleanup scheduled and would rot in blackjack_active_games.
+            if game.phase == "finished":
                 self.schedule_finished_cleanup(key, game)
+            return True
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
@@ -806,8 +1165,14 @@ class BlackjackCog(commands.Cog):
                 # If a timeout already finished the hand but the timeout edit failed,
                 # recover by rendering the final result now instead of leaving the
                 # message looking playable.
-                embed, file, _ = await self.build_response(key, note="")
-                await interaction.response.edit_message(embed=embed, attachments=[file], view=None)
+                embed, file, view = await self.build_response(key, note="")
+                await interaction.response.edit_message(embed=embed, attachments=[file], view=view)
+                self.commit_view(key, view)
+                if view:
+                    # edit_message returns nothing, but it edited exactly the message
+                    # this interaction came from - that's what the replay view needs
+                    # to strip its own buttons when it times out.
+                    view.message = interaction.message
                 self.schedule_finished_cleanup(key, game)
                 return
 
@@ -987,13 +1352,19 @@ class BlackjackCog(commands.Cog):
         elif game.phase == "player":
             hand = game.active_hand
             if action == "hit":
+                if not game.can_hit_active:
+                    return False, "A split ace takes one card and stands - you can't hit it."
                 game.hit()
                 note = "Hit."
             elif action == "stand":
                 game.stand()
                 note = "Stand."
             elif action == "double":
-                if not hand.can_double:
+                if not game.can_double_active:
+                    if hand.split_aces:
+                        return False, "You can't double a split ace."
+                    if not game.rules.double_after_split and hand.from_split:
+                        return False, f"{mode_label(game.rules)} doesn't allow doubling after a split."
                     return False, "You can only double down on your first two cards."
                 if balance < hand.bet_cents:
                     return False, "You do not have enough money to double down."
@@ -1001,8 +1372,15 @@ class BlackjackCog(commands.Cog):
                 game.double()
                 note = "Double down. One card dealt, then stand."
             elif action == "split":
-                if game.did_split or not hand.can_split:
-                    return False, "You can only split once, and only on matching ranks."
+                if not game.can_split_active:
+                    if len(game.hands) >= game.rules.max_hands:
+                        return False, (
+                            f"{mode_label(game.rules)} allows up to {game.rules.max_hands} hands, "
+                            "and you're already there."
+                        )
+                    if hand.split_aces and not game.rules.resplit_aces:
+                        return False, f"{mode_label(game.rules)} doesn't allow resplitting aces."
+                    return False, "You can only split a matching pair."
                 if balance < hand.bet_cents:
                     return False, "You do not have enough money to split."
                 await self.db.add_balance(user_id, -hand.bet_cents, "blackjack_split")
@@ -1181,11 +1559,22 @@ class BlackjackCog(commands.Cog):
                 busts_prevented=game.busts_prevented,
                 wagered_cents=game.total_wagered_cents,
                 profit_cents=game.settlement_net_cents,
+                mode=game.mode,
             )
 
-            shoe = await self.shoe_for_user(user_id)
-            reshuffled = shoe.finish_hand(game.cards_in_play())
-            await self.save_shoe_for_user(user_id)
+            # game.mode, not the player's current preference: they may have switched
+            # modes while this hand was live, and the cards belong to the shoe they
+            # were actually dealt from.
+            shoe = await self.shoe_for_user(user_id, game.mode)
+            if game.emergency_refill:
+                # The hand outran the shoe and _draw() patched cards in. Reset to a
+                # genuinely clean shoe rather than carrying a stale discard pile and
+                # a cut card measured against a shoe that is no longer there.
+                shoe.shuffle_new_deck("recovered from mid-hand exhaustion")
+                reshuffled = True
+            else:
+                reshuffled = shoe.finish_hand(game.cards_in_play())
+            await self.save_shoe_for_user(user_id, game.mode)
             if reshuffled:
                 deck_note = "\n\n🔄 Deck reached the cut card and was reshuffled for the next hand."
 
@@ -1348,11 +1737,13 @@ class BlackjackCog(commands.Cog):
     def active_actions_text_for_game(self, game: BlackjackGame) -> str:
         if game.phase == "insurance":
             return "Buttons: **Insurance** or **No Insurance** • Shortcuts: **I** / **N**"
-        hand = game.active_hand
-        actions = ["**H** Hit", "**S** Stand"]
-        if hand.can_double:
+        actions = []
+        if game.can_hit_active:
+            actions.append("**H** Hit")
+        actions.append("**S** Stand")
+        if game.can_double_active:
             actions.append("**D** Double")
-        if not game.did_split and hand.can_split:
+        if game.can_split_active:
             actions.append("**Y/P** Split")
         return " • ".join(actions)
 
@@ -1395,10 +1786,10 @@ class BlackjackCog(commands.Cog):
 
     async def build_response(
         self, key: tuple[int, int], *, note: str, celebrate: bool = False
-    ) -> tuple[discord.Embed, discord.File, BlackjackView | None]:
+    ) -> tuple[discord.Embed, discord.File, BlackjackView | ReplayView | None]:
         game = self.games[key]
         balance = await self.db.get_balance(game.user_id)
-        shoe = await self.shoe_for_user(game.user_id)
+        shoe = await self.shoe_for_user(game.user_id, game.mode)
         player_name = self.display_name_for_game(game)
 
         natural_win = (
@@ -1441,9 +1832,12 @@ class BlackjackCog(commands.Cog):
         embed = discord.Embed(title=title, description=description, color=self.embed_color_for_game(game))
         if game.phase != "finished":
             embed.add_field(name="Available Actions", value=self.active_actions_text_for_game(game), inline=False)
-            embed.set_footer(text=f"Action timer: {PLAYER_ACTION_TIMEOUT_SECONDS}s • Insurance timer: {INSURANCE_TIMEOUT_SECONDS}s • {RULES_TEXT}")
+            embed.set_footer(
+                text=f"Action timer: {PLAYER_ACTION_TIMEOUT_SECONDS}s • "
+                     f"Insurance timer: {INSURANCE_TIMEOUT_SECONDS}s • {game.rules.rules_line()}"
+            )
         else:
-            embed.set_footer(text=RULES_TEXT)
+            embed.set_footer(text=game.rules.rules_line())
 
         embed.set_image(url=f"attachment://{image_filename}")
 
@@ -1466,13 +1860,17 @@ class BlackjackCog(commands.Cog):
         # its edit succeeds. On failure, it leaves the previous view (and its
         # ticking timeout) completely untouched so it remains a working
         # safety net, and discards this candidate via discard_pending_view(...).
-        view = None
         if game.phase != "finished":
             view = BlackjackView(self, key, balance)
+        else:
+            # game.bet_cents is the hand's *base* bet, so a hand that was doubled
+            # or split still offers to replay the original stake, not the total
+            # that ended up on the table.
+            view = ReplayView(self, key, game.bet_cents)
 
         return embed, file, view
 
-    def commit_view(self, key: tuple[int, int], view: "BlackjackView | None") -> None:
+    def commit_view(self, key: tuple[int, int], view: "BlackjackView | ReplayView | None") -> None:
         """Swap in `view` as the tracked view for `key`. Call this ONLY after the
         Discord edit that attaches `view` to a real message has actually
         succeeded - see the long comment in build_response for why.
@@ -1485,10 +1883,20 @@ class BlackjackCog(commands.Cog):
         old_view = self.active_views.pop(key, None)
         if old_view is not None:
             old_view.stop()
-        if view is not None:
+        old_replay = self.replay_views.pop(key, None)
+        if old_replay is not None and old_replay is not view:
+            old_replay.stop()
+        # A ReplayView is tracked separately from active_views on purpose: the
+        # staleness checks in handle_timeout/_render_timeout_result identify a live
+        # hand by `self.active_views[key] is origin_view`, and a finished hand's
+        # replay buttons are not a hand in progress. Keeping it out of that dict
+        # means a finished table can never be mistaken for a playable one.
+        if isinstance(view, ReplayView):
+            self.replay_views[key] = view
+        elif view is not None:
             self.active_views[key] = view
 
-    def discard_pending_view(self, view: "BlackjackView | None") -> None:
+    def discard_pending_view(self, view: "BlackjackView | ReplayView | None") -> None:
         """Cancel a candidate view's timeout after the edit that would have
         attached it failed, since it was never committed via commit_view and
         would otherwise sit around with a dangling, unusable timer."""
@@ -1546,16 +1954,24 @@ class BlackjackCog(commands.Cog):
         description="View the blackjack leaderboard across several fun categories.",
     )
     @app_commands.guild_only()
-    async def blackjack_leaderboard(self, interaction: discord.Interaction):
+    @app_commands.describe(table="Limit to one table. Omit to combine every table.")
+    @app_commands.choices(table=MODE_CHOICES)
+    async def blackjack_leaderboard(
+        self, interaction: discord.Interaction, table: app_commands.Choice[str] | None = None
+    ):
         await interaction.response.defer()
 
         guild = interaction.guild
         member_cache: dict[int, discord.Member | None] = {}
+        mode = table.value if table else None
 
-        embed = discord.Embed(title="🃏 Blackjack Leaderboard", color=discord.Color.gold())
+        title = "🃏 Blackjack Leaderboard"
+        if mode:
+            title += f" — {mode_label(get_rules(mode))}"
+        embed = discord.Embed(title=title, color=discord.Color.gold())
         blocks = []
         for metric, label, fmt in LEADERBOARD_CATEGORIES:
-            candidates = await self.db.get_leaderboard(metric, limit=LEADERBOARD_CANDIDATE_LIMIT)
+            candidates = await self.db.get_leaderboard(metric, limit=LEADERBOARD_CANDIDATE_LIMIT, mode=mode)
 
             lines = []
             for row in candidates:
@@ -1579,13 +1995,23 @@ class BlackjackCog(commands.Cog):
         name="blackjack_stats",
         description="View your own or another member's blackjack stats.",
     )
-    @app_commands.describe(member="View this member's stats instead of your own")
-    async def blackjack_stats(self, interaction: discord.Interaction, member: discord.Member | None = None):
+    @app_commands.describe(
+        member="View this member's stats instead of your own",
+        table="Limit to one table. Omit to combine every table.",
+    )
+    @app_commands.choices(table=MODE_CHOICES)
+    async def blackjack_stats(
+        self,
+        interaction: discord.Interaction,
+        member: discord.Member | None = None,
+        table: app_commands.Choice[str] | None = None,
+    ):
         await interaction.response.defer()
 
         target = member or interaction.user
+        mode = table.value if table else None
 
-        stats = await self.db.get_stats(target.id)
+        stats = await self.db.get_stats(target.id, mode)
         balance = await self.db.get_balance(target.id)
 
         decided = stats["hands_won"] + stats["hands_lost"]

@@ -7,6 +7,8 @@ import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from .rules import DEFAULT_MODE
+
 logger = logging.getLogger(__name__)
 
 SCHEMA = """
@@ -35,12 +37,18 @@ CREATE TABLE IF NOT EXISTS blackjack_transactions (
 );
 
 CREATE TABLE IF NOT EXISTS blackjack_shoes (
-    user_id INTEGER PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    mode TEXT NOT NULL DEFAULT 'single_house',
     deck_json TEXT NOT NULL,
     discard_json TEXT NOT NULL,
     hands_played INTEGER NOT NULL DEFAULT 0,
     last_shuffle_reason TEXT NOT NULL DEFAULT 'new shoe',
-    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    -- Cards left when this shoe's cut card comes out. Persisted rather than
+    -- re-rolled on load: the depth is chosen once per shuffle, and re-rolling it
+    -- every restart would silently move the cut of a shoe already in play.
+    cut_card_at INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (user_id, mode)
 );
 
 CREATE TABLE IF NOT EXISTS blackjack_active_games (
@@ -57,8 +65,15 @@ CREATE TABLE IF NOT EXISTS blackjack_daily_streak (
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE TABLE IF NOT EXISTS blackjack_stats (
+CREATE TABLE IF NOT EXISTS blackjack_prefs (
     user_id INTEGER PRIMARY KEY,
+    mode TEXT NOT NULL DEFAULT 'single_house',
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS blackjack_stats (
+    user_id INTEGER NOT NULL,
+    mode TEXT NOT NULL DEFAULT 'single_house',
     hands_played INTEGER NOT NULL DEFAULT 0,
     hands_won INTEGER NOT NULL DEFAULT 0,
     hands_lost INTEGER NOT NULL DEFAULT 0,
@@ -71,9 +86,27 @@ CREATE TABLE IF NOT EXISTS blackjack_stats (
     total_wagered_cents INTEGER NOT NULL DEFAULT 0,
     total_profit_cents INTEGER NOT NULL DEFAULT 0,
     biggest_win_cents INTEGER NOT NULL DEFAULT 0,
-    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (user_id, mode)
 );
 """
+
+def _table_ddl(table: str) -> list[str]:
+    """The CREATE statements for one table, taken from SCHEMA itself so a rebuilt
+    table is byte-for-byte what a fresh install would have produced."""
+    out = []
+    for chunk in SCHEMA.split(";"):
+        text = chunk.strip()
+        if not text:
+            continue
+        if text.startswith("CREATE TABLE") and f"EXISTS {table} (" in text:
+            out.append(text)
+        elif text.startswith("CREATE INDEX") and f" ON {table}(" in text:
+            out.append(text)
+    if not out:
+        raise RuntimeError(f"no DDL for {table} in SCHEMA")
+    return out
+
 
 class BlackjackDB:
     def __init__(self, path: str | Path):
@@ -84,8 +117,66 @@ class BlackjackDB:
 
     def _init_sync(self) -> None:
         with sqlite3.connect(self.path) as conn:
+            self._migrate_sync(conn)
             conn.executescript(SCHEMA)
             conn.commit()
+
+    # Tables that gained a `mode` column and a composite primary key when the
+    # casino modes landed. SQLite can't alter a primary key in place, so each has
+    # to be rebuilt; every pre-existing row belongs to the game this bot shipped
+    # with, so it is adopted into DEFAULT_MODE and nobody loses a shoe or a stat.
+    _MODE_KEYED_TABLES = ("blackjack_shoes", "blackjack_stats")
+
+    # Columns added after a table already existed. ALTER ADD COLUMN is additive and
+    # cheap, so these are handled separately from the primary-key rebuild above.
+    _ADDED_COLUMNS = {
+        "blackjack_shoes": [("cut_card_at", "INTEGER NOT NULL DEFAULT 0")],
+    }
+
+    def _migrate_sync(self, conn: sqlite3.Connection) -> None:
+        self._rebuild_mode_keyed_tables(conn)
+        self._add_missing_columns(conn)
+
+    def _add_missing_columns(self, conn: sqlite3.Connection) -> None:
+        for table, columns in self._ADDED_COLUMNS.items():
+            existing = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+            if not existing:
+                continue      # fresh database - SCHEMA builds it with the column
+            for name, decl in columns:
+                if name in existing:
+                    continue
+                logger.info("Blackjack: adding %s.%s", table, name)
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+                conn.commit()
+
+    def _rebuild_mode_keyed_tables(self, conn: sqlite3.Connection) -> None:
+        for table in self._MODE_KEYED_TABLES:
+            existing = [r[1] for r in conn.execute(f"PRAGMA table_info({table})")]
+            if not existing:
+                continue          # fresh database - SCHEMA builds it correctly
+            if "mode" in existing:
+                continue          # already migrated
+
+            logger.info("Blackjack: migrating %s to per-mode rows", table)
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                conn.execute(f"ALTER TABLE {table} RENAME TO {table}_pre_modes")
+                for statement in _table_ddl(table):
+                    conn.execute(statement)
+                carried = ", ".join(existing)
+                conn.execute(
+                    f"INSERT INTO {table} (mode, {carried}) "
+                    f"SELECT ?, {carried} FROM {table}_pre_modes",
+                    (DEFAULT_MODE,),
+                )
+                moved = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                conn.execute(f"DROP TABLE {table}_pre_modes")
+                conn.commit()
+                logger.info("Blackjack: %s migrated, %s row(s) adopted into %s", table, moved, DEFAULT_MODE)
+            except Exception:
+                conn.rollback()
+                logger.exception("Blackjack: migration of %s failed; left untouched", table)
+                raise
 
     async def get_balance(self, user_id: int) -> int:
         return await asyncio.to_thread(self._get_balance_sync, user_id)
@@ -327,18 +418,18 @@ class BlackjackDB:
             conn.execute("DELETE FROM blackjack_active_games WHERE user_id = ?", (user_id,))
             conn.commit()
 
-    async def get_shoe_state(self, user_id: int) -> dict | None:
-        return await asyncio.to_thread(self._get_shoe_state_sync, user_id)
+    async def get_shoe_state(self, user_id: int, mode: str = DEFAULT_MODE) -> dict | None:
+        return await asyncio.to_thread(self._get_shoe_state_sync, user_id, mode)
 
-    def _get_shoe_state_sync(self, user_id: int) -> dict | None:
+    def _get_shoe_state_sync(self, user_id: int, mode: str) -> dict | None:
         with sqlite3.connect(self.path) as conn:
             row = conn.execute(
                 """
-                SELECT deck_json, discard_json, hands_played, last_shuffle_reason
+                SELECT deck_json, discard_json, hands_played, last_shuffle_reason, cut_card_at
                 FROM blackjack_shoes
-                WHERE user_id = ?
+                WHERE user_id = ? AND mode = ?
                 """,
-                (user_id,),
+                (user_id, mode),
             ).fetchone()
 
         if row is None:
@@ -349,6 +440,7 @@ class BlackjackDB:
             "discard": json.loads(row[1]),
             "hands_played": int(row[2]),
             "last_shuffle_reason": str(row[3]),
+            "cut_card_at": int(row[4] or 0),
         }
 
     async def save_shoe_state(
@@ -358,6 +450,8 @@ class BlackjackDB:
         discard_codes: list[str],
         hands_played: int,
         last_shuffle_reason: str,
+        mode: str = DEFAULT_MODE,
+        cut_card_at: int = 0,
     ) -> None:
         await asyncio.to_thread(
             self._save_shoe_state_sync,
@@ -366,6 +460,8 @@ class BlackjackDB:
             discard_codes,
             hands_played,
             last_shuffle_reason,
+            mode,
+            cut_card_at,
         )
 
     def _save_shoe_state_sync(
@@ -375,27 +471,33 @@ class BlackjackDB:
         discard_codes: list[str],
         hands_played: int,
         last_shuffle_reason: str,
+        mode: str,
+        cut_card_at: int = 0,
     ) -> None:
         with sqlite3.connect(self.path) as conn:
             conn.execute(
                 """
                 INSERT INTO blackjack_shoes(
-                    user_id, deck_json, discard_json, hands_played, last_shuffle_reason, updated_at
+                    user_id, mode, deck_json, discard_json, hands_played,
+                    last_shuffle_reason, cut_card_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                ON CONFLICT(user_id) DO UPDATE SET
+                VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(user_id, mode) DO UPDATE SET
                     deck_json = excluded.deck_json,
                     discard_json = excluded.discard_json,
                     hands_played = excluded.hands_played,
                     last_shuffle_reason = excluded.last_shuffle_reason,
+                    cut_card_at = excluded.cut_card_at,
                     updated_at = CURRENT_TIMESTAMP
                 """,
                 (
                     user_id,
+                    mode,
                     json.dumps(deck_codes),
                     json.dumps(discard_codes),
                     hands_played,
                     last_shuffle_reason,
+                    cut_card_at,
                 ),
             )
             conn.commit()
@@ -410,6 +512,7 @@ class BlackjackDB:
         busts_prevented: int,
         wagered_cents: int,
         profit_cents: int,
+        mode: str = DEFAULT_MODE,
     ) -> None:
         await asyncio.to_thread(
             self._record_round_stats_sync,
@@ -420,6 +523,7 @@ class BlackjackDB:
             busts_prevented,
             wagered_cents,
             profit_cents,
+            mode,
         )
 
     def _record_round_stats_sync(
@@ -431,14 +535,16 @@ class BlackjackDB:
         busts_prevented: int,
         wagered_cents: int,
         profit_cents: int,
+        mode: str,
     ) -> None:
         with sqlite3.connect(self.path) as conn:
             conn.execute("BEGIN IMMEDIATE")
-            conn.execute("INSERT OR IGNORE INTO blackjack_stats(user_id) VALUES (?)", (user_id,))
+            conn.execute("INSERT OR IGNORE INTO blackjack_stats(user_id, mode) VALUES (?, ?)", (user_id, mode))
 
             row = conn.execute(
-                "SELECT current_win_streak, best_win_streak, biggest_win_cents FROM blackjack_stats WHERE user_id = ?",
-                (user_id,),
+                "SELECT current_win_streak, best_win_streak, biggest_win_cents "
+                "FROM blackjack_stats WHERE user_id = ? AND mode = ?",
+                (user_id, mode),
             ).fetchone()
             streak, best_streak, biggest_win = int(row[0]), int(row[1]), int(row[2])
 
@@ -472,32 +578,44 @@ class BlackjackDB:
                     total_profit_cents = total_profit_cents + ?,
                     biggest_win_cents = ?,
                     updated_at = CURRENT_TIMESTAMP
-                WHERE user_id = ?
+                WHERE user_id = ? AND mode = ?
                 """,
                 (
                     len(hand_results), wins, losses, pushes,
                     blackjacks_hit, busts, busts_prevented,
                     streak, best_streak,
                     wagered_cents, profit_cents, biggest_win,
-                    user_id,
+                    user_id, mode,
                 ),
             )
             conn.commit()
 
-    async def get_stats(self, user_id: int) -> dict:
-        return await asyncio.to_thread(self._get_stats_sync, user_id)
+    async def get_stats(self, user_id: int, mode: str | None = None) -> dict:
+        """Stats for one mode, or summed across every mode when mode is None."""
+        return await asyncio.to_thread(self._get_stats_sync, user_id, mode)
 
-    def _get_stats_sync(self, user_id: int) -> dict:
+    def _get_stats_sync(self, user_id: int, mode: str | None = None) -> dict:
         with sqlite3.connect(self.path) as conn:
             row = conn.execute(
                 """
-                SELECT hands_played, hands_won, hands_lost, hands_pushed, blackjacks_hit,
-                       busts, busts_prevented, current_win_streak, best_win_streak,
-                       total_wagered_cents, total_profit_cents, biggest_win_cents
+                SELECT SUM(hands_played), SUM(hands_won), SUM(hands_lost), SUM(hands_pushed),
+                       SUM(blackjacks_hit), SUM(busts), SUM(busts_prevented),
+                       -- best_win_streak and biggest_win are records, so MAX is right.
+                       -- current_win_streak is a *live* counter per mode: MAX would
+                       -- report a frozen streak from a mode the player left. Take the
+                       -- one belonging to the most recently played row instead.
+                       0, MAX(best_win_streak),
+                       SUM(total_wagered_cents), SUM(total_profit_cents), MAX(biggest_win_cents)
                 FROM blackjack_stats
-                WHERE user_id = ?
+                WHERE user_id = ? AND (? IS NULL OR mode = ?)
                 """,
-                (user_id,),
+                (user_id, mode, mode),
+            ).fetchone()
+            live_streak_row = conn.execute(
+                "SELECT current_win_streak FROM blackjack_stats "
+                "WHERE user_id = ? AND (? IS NULL OR mode = ?) "
+                "ORDER BY updated_at DESC LIMIT 1",
+                (user_id, mode, mode),
             ).fetchone()
             streak_row = conn.execute(
                 "SELECT current_streak FROM blackjack_daily_streak WHERE user_id = ?",
@@ -509,48 +627,89 @@ class BlackjackDB:
             "busts", "busts_prevented", "current_win_streak", "best_win_streak",
             "total_wagered_cents", "total_profit_cents", "biggest_win_cents",
         ]
-        stats = dict(zip(columns, row if row is not None else [0] * len(columns)))
+        # SUM()/MAX() over zero matching rows yields a row of NULLs rather than no
+        # row at all, so coalesce here or a player with no hands in this mode gets
+        # None where every caller expects an int.
+        values = [(v if v is not None else 0) for v in (row or [0] * len(columns))]
+        stats = dict(zip(columns, values))
+        stats["current_win_streak"] = int(live_streak_row[0]) if live_streak_row else 0
         stats["daily_streak"] = int(streak_row[0]) if streak_row else 0
         return stats
 
+    # Stats are per (user, mode), so every board aggregates across a player's rows
+    # and takes an optional mode filter. `? IS NULL` means "all modes" - counting
+    # metrics SUM cleanly, records take MAX. Note that win_pct/roi_pct are only
+    # strictly comparable *within* a mode: a 6:5 game and a 3:2 game do not have
+    # the same expected value, which is why the filter exists.
     _LEADERBOARD_QUERIES = {
         "win_streak": """
-            SELECT user_id, best_win_streak AS value FROM blackjack_stats
-            WHERE best_win_streak > 0 ORDER BY best_win_streak DESC LIMIT ?
+            SELECT user_id, MAX(best_win_streak) AS value FROM blackjack_stats
+            WHERE (? IS NULL OR mode = ?) GROUP BY user_id
+            HAVING value > 0 ORDER BY value DESC LIMIT ?
         """,
         "busts_prevented": """
-            SELECT user_id, busts_prevented AS value FROM blackjack_stats
-            WHERE busts_prevented > 0 ORDER BY busts_prevented DESC LIMIT ?
+            SELECT user_id, SUM(busts_prevented) AS value FROM blackjack_stats
+            WHERE (? IS NULL OR mode = ?) GROUP BY user_id
+            HAVING value > 0 ORDER BY value DESC LIMIT ?
         """,
         "win_pct": """
-            SELECT user_id, (100.0 * hands_won / NULLIF(hands_won + hands_lost, 0)) AS value
-            FROM blackjack_stats WHERE (hands_won + hands_lost) >= 10
-            ORDER BY value DESC LIMIT ?
+            SELECT user_id,
+                   (100.0 * SUM(hands_won) / NULLIF(SUM(hands_won) + SUM(hands_lost), 0)) AS value
+            FROM blackjack_stats WHERE (? IS NULL OR mode = ?) GROUP BY user_id
+            HAVING (SUM(hands_won) + SUM(hands_lost)) >= 10 ORDER BY value DESC LIMIT ?
         """,
         "roi_pct": """
-            SELECT user_id, (100.0 * total_profit_cents / NULLIF(total_wagered_cents, 0)) AS value
-            FROM blackjack_stats WHERE total_wagered_cents >= 10000
-            ORDER BY value DESC LIMIT ?
+            SELECT user_id,
+                   (100.0 * SUM(total_profit_cents) / NULLIF(SUM(total_wagered_cents), 0)) AS value
+            FROM blackjack_stats WHERE (? IS NULL OR mode = ?) GROUP BY user_id
+            HAVING SUM(total_wagered_cents) >= 10000 ORDER BY value DESC LIMIT ?
         """,
         "hands_played": """
-            SELECT user_id, hands_played AS value FROM blackjack_stats
-            WHERE hands_played > 0 ORDER BY hands_played DESC LIMIT ?
+            SELECT user_id, SUM(hands_played) AS value FROM blackjack_stats
+            WHERE (? IS NULL OR mode = ?) GROUP BY user_id
+            HAVING value > 0 ORDER BY value DESC LIMIT ?
         """,
         "biggest_win": """
-            SELECT user_id, biggest_win_cents AS value FROM blackjack_stats
-            WHERE biggest_win_cents > 0 ORDER BY biggest_win_cents DESC LIMIT ?
+            SELECT user_id, MAX(biggest_win_cents) AS value FROM blackjack_stats
+            WHERE (? IS NULL OR mode = ?) GROUP BY user_id
+            HAVING value > 0 ORDER BY value DESC LIMIT ?
         """,
         "blackjacks_hit": """
-            SELECT user_id, blackjacks_hit AS value FROM blackjack_stats
-            WHERE blackjacks_hit > 0 ORDER BY blackjacks_hit DESC LIMIT ?
+            SELECT user_id, SUM(blackjacks_hit) AS value FROM blackjack_stats
+            WHERE (? IS NULL OR mode = ?) GROUP BY user_id
+            HAVING value > 0 ORDER BY value DESC LIMIT ?
         """,
     }
 
-    async def get_leaderboard(self, metric: str, limit: int = 5) -> list[dict]:
-        return await asyncio.to_thread(self._get_leaderboard_sync, metric, limit)
+    async def get_leaderboard(self, metric: str, limit: int = 5, mode: str | None = None) -> list[dict]:
+        return await asyncio.to_thread(self._get_leaderboard_sync, metric, limit, mode)
 
-    def _get_leaderboard_sync(self, metric: str, limit: int) -> list[dict]:
+    def _get_leaderboard_sync(self, metric: str, limit: int, mode: str | None = None) -> list[dict]:
         query = self._LEADERBOARD_QUERIES[metric]
         with sqlite3.connect(self.path) as conn:
-            rows = conn.execute(query, (limit,)).fetchall()
+            rows = conn.execute(query, (mode, mode, limit)).fetchall()
         return [{"user_id": int(r[0]), "value": r[1]} for r in rows]
+
+    async def get_mode(self, user_id: int) -> str:
+        return await asyncio.to_thread(self._get_mode_sync, user_id)
+
+    def _get_mode_sync(self, user_id: int) -> str:
+        with sqlite3.connect(self.path) as conn:
+            row = conn.execute(
+                "SELECT mode FROM blackjack_prefs WHERE user_id = ?", (user_id,)
+            ).fetchone()
+        return str(row[0]) if row else DEFAULT_MODE
+
+    async def set_mode(self, user_id: int, mode: str) -> None:
+        await asyncio.to_thread(self._set_mode_sync, user_id, mode)
+
+    def _set_mode_sync(self, user_id: int, mode: str) -> None:
+        with sqlite3.connect(self.path) as conn:
+            conn.execute(
+                "INSERT INTO blackjack_prefs(user_id, mode, updated_at) "
+                "VALUES (?, ?, CURRENT_TIMESTAMP) "
+                "ON CONFLICT(user_id) DO UPDATE SET "
+                "mode = excluded.mode, updated_at = CURRENT_TIMESTAMP",
+                (user_id, mode),
+            )
+            conn.commit()

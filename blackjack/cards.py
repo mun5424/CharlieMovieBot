@@ -29,9 +29,14 @@ class Card:
 
 
 def new_single_deck() -> list[Card]:
-    deck = [Card(rank, suit) for suit in SUITS for rank in RANKS]
-    random.shuffle(deck)
-    return deck
+    return new_shoe(1)
+
+
+def new_shoe(decks: int = 1) -> list[Card]:
+    """A freshly shuffled shoe of `decks` standard decks."""
+    cards = [Card(rank, suit) for _ in range(decks) for suit in SUITS for rank in RANKS]
+    random.shuffle(cards)
+    return cards
 
 
 def card_points(card: Card) -> int:
@@ -69,10 +74,12 @@ def same_rank(a: Card, b: Card) -> bool:
     return a.rank == b.rank
 
 
-def dealer_should_hit(cards: list[Card]) -> bool:
+def dealer_should_hit(cards: list[Card], hits_soft_17: bool = True) -> bool:
     total, soft = hand_value(cards)
-    # H17: dealer hits soft 17.
-    return total < 17 or (total == 17 and soft)
+    if total < 17:
+        return True
+    # H17 vs S17 only ever differ on a soft 17; a hard 17 always stands.
+    return hits_soft_17 and total == 17 and soft
 
 
 def card_to_code(card: Card) -> str:

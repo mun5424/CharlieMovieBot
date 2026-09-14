@@ -204,14 +204,24 @@ async def _start_notifier_when_ready(bot: commands.Bot, notifier: TwitchNotifier
         logger.exception("Failed to start Twitch notifier")
 
 
-async def setup(bot: commands.Bot, db_path: str = "bot.db", poll_interval_sec: int = 90) -> None:
+async def setup(
+    bot: commands.Bot,
+    db_path: str = "bot.db",
+    poll_interval_sec: int = 90,
+    notify_cooldown_sec: int = 3600,
+) -> None:
     """
     Call this from your main bot setup, like: await twitch.setup(bot, db_path="mybot.db")
     """
     store = TwitchStore(db_path)
     await store.connect()
 
-    notifier = TwitchNotifier(bot=bot, store=store, poll_interval_sec=poll_interval_sec)
+    notifier = TwitchNotifier(
+        bot=bot,
+        store=store,
+        poll_interval_sec=poll_interval_sec,
+        notify_cooldown_sec=notify_cooldown_sec,
+    )
     cog = TwitchNotifCog(bot=bot, store=store, notifier=notifier)
     await bot.add_cog(cog)
 
