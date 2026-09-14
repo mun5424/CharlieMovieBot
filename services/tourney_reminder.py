@@ -144,7 +144,10 @@ def _matches_tournament_series(node_name: str, series_name: str) -> bool:
     elif "can opener" in series_lower:
         return "can opener" in node_lower
     elif "motivation academy" in series_lower:
-        return "motivation academy" in node_lower
+        # The org abbreviated the series to "MA: SF6 NA #158" in Sept 2026.
+        # Older events are still named "Motivation Academy: SF6 NA #157".
+        return ("motivation academy" in node_lower
+                or (node_lower.startswith("ma:") and "sf6" in node_lower))
     elif "flyquest" in series_lower:
         return "flyquest" in node_lower
     elif "oni" in series_lower:
@@ -218,7 +221,8 @@ def _get_search_keywords(tournament_name: str) -> list:
 
     # Map series names to effective search keywords
     if "motivation academy" in name_lower:
-        return ["Motivation Academy"]
+        # Try the current abbreviated name first, then the legacy full name.
+        return ["MA: SF6 NA", "Motivation Academy"]
     elif "can opener" in name_lower:
         return ["Can Opener"]
     elif "tns" in name_lower:
