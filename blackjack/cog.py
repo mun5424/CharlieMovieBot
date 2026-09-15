@@ -1126,7 +1126,68 @@ class BlackjackCog(commands.Cog):
             # shortcut-triggered crash is actually visible in logs/bot.log.
             logger.exception("Blackjack shortcut error: key=%s action=%s", key, action)
 
+    async def ack_interaction(
+        self, interaction: discord.Interaction, action: str, key: tuple[int, int]
+    ) -> bool:
+        """Ack a component interaction up front; report whether its token survived.
+
+        Discord invalidates an interaction token 3 seconds after the click, and it
+        must never be this bot's job to race that. Returning False rather than
+        raising is the point: a hand whose ack arrived too late still has to be
+        played out and repainted through the table message, not abandoned
+        half-applied.
+        """
+        try:
+            await interaction.response.defer()
+            return True
+        except discord.NotFound as exc:
+            # 10062 Unknown interaction - the click sat unacked past Discord's
+            # window (gateway lag, or the bot was busy/restarting when it landed).
+            logger.warning(
+                "Blackjack interaction expired before it could be acked: action=%s key=%s "
+                "message_id=%s (%s). Playing the action out against the table message instead.",
+                action,
+                key,
+                getattr(interaction.message, "id", None),
+                exc,
+            )
+            return False
+        except discord.InteractionResponded:
+            # Something upstream already answered it; the token is alive either way.
+            return True
+        except discord.HTTPException as exc:
+            logger.warning(
+                "Blackjack defer failed for action=%s key=%s: %s", action, key, exc, exc_info=exc
+            )
+            return False
+
     async def handle_action(self, interaction: discord.Interaction, key: tuple[int, int], action: str) -> None:
+        # Ack first - before the lock, before the database, before any render.
+        #
+        # Discord kills the interaction token 3s after the click, and every step
+        # below can outlast that: lock_for(key) may still be held by the player's
+        # previous click that is mid animation-render, and load/apply/save each hop
+        # onto the SQLite worker thread. Deferring *after* that work is what produced
+        # the "404 Unknown interaction" failures in the logs, and it failed in the
+        # worst possible place: apply_action_locked and save_active_game had already
+        # run, so the card was dealt and the bet settled while the table froze
+        # on screen with no hint anything had happened.
+        #
+        # A component interaction's plain defer() is a deferred *update*: no
+        # placeholder message, nothing the player sees, and edit_original_response
+        # below still edits the exact message the buttons sit on.
+        acked = await self.ack_interaction(interaction, action, key)
+
+        async def notify(text: str) -> None:
+            """Private notice to the clicker, dropped if the token is already gone."""
+            if not acked:
+                logger.info("Blackjack notice not delivered (expired token) key=%s: %s", key, text)
+                return
+            try:
+                await interaction.followup.send(text, ephemeral=True)
+            except discord.HTTPException as exc:
+                logger.warning("Blackjack notice failed for key=%s: %s", key, exc)
+
         async with self.lock_for(key):
             game = await self.load_active_game(key)
 
@@ -1141,7 +1202,7 @@ class BlackjackCog(commands.Cog):
                 reason = self.pop_corrupt_refund_note(key) or (
                     "This blackjack hand is no longer active due to timeout."
                 )
-                await self.expire_stale_interaction(interaction, reason)
+                await self.expire_stale_interaction(interaction, reason, acked=acked)
                 return
 
             if interaction.message and game.message_id and interaction.message.id != game.message_id:
@@ -1158,44 +1219,59 @@ class BlackjackCog(commands.Cog):
                 await self.expire_stale_interaction(
                     interaction,
                     "This is an older blackjack table. Use the newest blackjack message or start a new hand.",
+                    acked=acked,
                 )
                 return
+
+            async def repaint(embed, file, view) -> discord.Message | None:
+                """Push a rendered table out: through the interaction while its token
+                is alive, straight at the message once it isn't. Returns the message
+                that now carries the table, or None if there was nothing to edit."""
+                if acked:
+                    return await interaction.edit_original_response(
+                        embed=embed, attachments=[file], view=view
+                    )
+                target = await self.resolve_table_message(key, game)
+                if target is None:
+                    return None
+                return await target.edit(embed=embed, attachments=[file], view=view)
 
             if game.phase == "finished":
                 # If a timeout already finished the hand but the timeout edit failed,
                 # recover by rendering the final result now instead of leaving the
                 # message looking playable.
                 embed, file, view = await self.build_response(key, note="")
-                await interaction.response.edit_message(embed=embed, attachments=[file], view=view)
+                try:
+                    msg = await repaint(embed, file, view)
+                except discord.HTTPException as exc:
+                    logger.warning(
+                        "Blackjack finished-table repaint failed for key=%s: %s", key, exc, exc_info=exc
+                    )
+                    self.discard_pending_view(view)
+                    return
+                if msg is None:
+                    self.discard_pending_view(view)
+                    return
                 self.commit_view(key, view)
                 if view:
-                    # edit_message returns nothing, but it edited exactly the message
-                    # this interaction came from - that's what the replay view needs
-                    # to strip its own buttons when it times out.
-                    view.message = interaction.message
+                    # The repaint edited exactly the message this table lives on -
+                    # that's what the replay view needs in order to strip its own
+                    # buttons when it times out.
+                    view.message = msg
                 self.schedule_finished_cleanup(key, game)
                 return
 
             success, note = await self.apply_action_locked(key, interaction.user.id, action)
             if not success:
-                await interaction.response.send_message(note, ephemeral=True)
+                await notify(note)
                 return
 
             await self.save_active_game(key)
 
-            # Defer before build_response: resolving insurance can reveal the
-            # player's own natural blackjack (the only way a fresh natural can
-            # surface outside the initial deal), which routes into the ~1s+
-            # celebration GIF render. That alone can blow past Discord's 3s
-            # ack window for this component interaction, turning what should be
-            # a normal edit into a "404 Unknown interaction". defer() on a
-            # component interaction is a silent deferred *update* - it doesn't
-            # post any placeholder message, so there's no visible change here.
-            await interaction.response.defer()
             embed, file, view = await self.build_response(key, note=note, celebrate=True)
             finished = game.phase == "finished"
             try:
-                msg = await interaction.edit_original_response(embed=embed, attachments=[file], view=view)
+                msg = await repaint(embed, file, view)
             except discord.HTTPException as exc:
                 logger.warning("Blackjack action edit failed for key=%s: %s", key, exc, exc_info=exc)
                 # The action itself was already applied and saved above (and, if
@@ -1206,6 +1282,16 @@ class BlackjackCog(commands.Cog):
                 # keeps that timeout as a working safety net that can auto-stand
                 # this hand later even if the player never clicks again. Just
                 # discard this attempt's unused candidate view instead.
+                self.discard_pending_view(view)
+                return
+            if msg is None:
+                # Same reasoning as the HTTPException above: the hand is applied and
+                # saved, only the repaint had nowhere to land.
+                logger.warning(
+                    "Blackjack action=%s applied for key=%s but no table message could be resolved to update",
+                    action,
+                    key,
+                )
                 self.discard_pending_view(view)
                 return
             game.message_id = msg.id
@@ -1409,21 +1495,40 @@ class BlackjackCog(commands.Cog):
         embed.set_footer(text=RULES_TEXT)
         return embed
 
-    async def expire_stale_interaction(self, interaction: discord.Interaction, reason: str) -> None:
+    async def expire_stale_interaction(
+        self, interaction: discord.Interaction, reason: str, *, acked: bool
+    ) -> None:
+        """Replace a dead hand's table with an explanation of why it's dead.
+
+        Only ever called from handle_action, which acks the interaction before it
+        does anything else - so by the time we get here the token has either been
+        deferred as an update (`acked`) or is already past saving. There is no fresh
+        response slot to open either way: it's finish the deferred update, or edit
+        the message directly, and the message is also the fallback when the token
+        turns out to have died between the ack and now.
+        """
         embed = self.stale_hand_embed(reason)
+
+        if acked:
+            try:
+                await interaction.edit_original_response(embed=embed, attachments=[], view=None)
+                return
+            except discord.HTTPException as exc:
+                logger.warning(
+                    "Blackjack stale-table update failed for key-message %s: %s; falling back to a direct edit",
+                    getattr(interaction.message, "id", None),
+                    exc,
+                )
+
+        message = interaction.message
+        if message is None:
+            return
         try:
-            await interaction.response.edit_message(embed=embed, attachments=[], view=None)
-        except discord.HTTPException:
-            if not interaction.response.is_done():
-                await interaction.response.send_message(
-                    "That blackjack hand is no longer active. Start a new hand with `/blackjack`.",
-                    ephemeral=True,
-                )
-            else:
-                await interaction.followup.send(
-                    "That blackjack hand is no longer active. Start a new hand with `/blackjack`.",
-                    ephemeral=True,
-                )
+            await message.edit(embed=embed, attachments=[], view=None)
+        except discord.HTTPException as exc:
+            logger.warning(
+                "Blackjack stale-table direct edit failed for message %s: %s", message.id, exc
+            )
 
     async def handle_timeout(self, key: tuple[int, int], message: discord.Message, origin_view: "BlackjackView") -> None:
         async with self.lock_for(key):

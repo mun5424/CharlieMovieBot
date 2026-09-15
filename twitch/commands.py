@@ -36,6 +36,17 @@ class TwitchNotifCog(commands.Cog):
         self.store = store
         self.notifier = notifier
 
+    async def cog_unload(self) -> None:
+        # aiosqlite runs every connection on its own *non-daemon* worker thread that
+        # parks on an empty queue and only ever exits when the connection is closed.
+        # Leave this store open and the interpreter can never finish shutting down:
+        # threading._shutdown() joins that thread forever, so the process survives
+        # SIGTERM, systemd's TimeoutStopSec expires and it gets SIGKILLed - which
+        # fails the restart job and leaves the unit dead. Closing here is what lets
+        # the process actually exit.
+        await self.notifier.stop()
+        await self.store.close()
+
     # ---- admin commands ----
     @app_commands.command(name="twitch_set_channel", description="Set the channel where Twitch live notifications will be posted.")
     @app_commands.checks.has_permissions(manage_guild=True)
@@ -224,6 +235,17 @@ async def setup(
     )
     cog = TwitchNotifCog(bot=bot, store=store, notifier=notifier)
     await bot.add_cog(cog)
+
+    # Belt and braces alongside cog_unload above: if the cog is ever torn down by a
+    # path that doesn't run cog_unload, this still releases the connection. Stop the
+    # notifier before closing the store underneath it, and note both calls are
+    # idempotent, so running this and cog_unload is harmless.
+    async def _shutdown_twitch() -> None:
+        await notifier.stop()
+        await store.close()
+
+    if hasattr(bot, "add_shutdown_handler"):
+        bot.add_shutdown_handler(_shutdown_twitch)
 
     # Start notifier in background after bot is ready
     asyncio.create_task(_start_notifier_when_ready(bot, notifier))

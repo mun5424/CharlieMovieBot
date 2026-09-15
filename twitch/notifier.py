@@ -66,6 +66,12 @@ class TwitchNotifier:
             self._task.cancel()
             try:
                 await self._task
+            except asyncio.CancelledError:
+                # Expected - we just cancelled it, and awaiting is only how we wait
+                # for it to unwind. CancelledError is a BaseException, so the bare
+                # `except Exception` below never caught it: without this, stopping
+                # the notifier raises straight out through cog_unload/bot.close().
+                pass
             except Exception:
                 pass
         self._task = None

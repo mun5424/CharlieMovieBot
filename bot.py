@@ -386,6 +386,42 @@ async def main():
         bot_manager.logger.info("🔚 Bot process ended")
 
 
+def _hard_exit(code: int = 0) -> None:
+    """Exit now, even if a stray non-daemon thread would otherwise pin the process.
+
+    Normal interpreter exit runs threading._shutdown(), which *joins* every
+    non-daemon thread. Libraries that park a worker thread on a queue for the life
+    of a connection (aiosqlite does exactly this) will therefore hang the process
+    forever if that connection is still open - the bot logs "Bot process ended" and
+    then simply never exits. systemd waits out TimeoutStopSec, SIGKILLs us, fails
+    the restart job and leaves the unit dead until someone notices.
+
+    Shutdown proper has already finished by the time this runs, so there is nothing
+    left to flush but the logs. Name any lingering threads first: that's the only
+    breadcrumb pointing at whichever resource forgot to close itself.
+    """
+    import logging
+    import threading
+
+    stragglers = [
+        t.name
+        for t in threading.enumerate()
+        if t is not threading.main_thread() and not t.daemon and t.is_alive()
+    ]
+    if stragglers:
+        logging.getLogger(__name__).warning(
+            "Forcing exit past %d non-daemon thread(s) that never finished: %s. "
+            "Something opened a resource and never closed it - see _hard_exit().",
+            len(stragglers),
+            ", ".join(sorted(stragglers)),
+        )
+
+    logging.shutdown()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(code)
+
+
 if __name__ == "__main__":
     try:
         asyncio.run(main())
@@ -395,3 +431,5 @@ if __name__ == "__main__":
         print(f"Fatal error: {e}")
         import traceback
         traceback.print_exc()
+    finally:
+        _hard_exit(0)
