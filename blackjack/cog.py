@@ -303,11 +303,11 @@ class ReplayView(discord.ui.View):
         if dealt:
             await self.retire()
 
-    @discord.ui.button(label="Deal Again", style=discord.ButtonStyle.primary, row=0)
+    @discord.ui.button(label="Deal Again", style=discord.ButtonStyle.secondary, row=0)
     async def deal_again_button(self, interaction: discord.Interaction, _: discord.ui.Button):
         await self.replay(interaction, self.bet_cents)
 
-    @discord.ui.button(label="Change Bet", style=discord.ButtonStyle.success, row=0)
+    @discord.ui.button(label="Change Bet", style=discord.ButtonStyle.secondary, row=0)
     async def change_bet_button(self, interaction: discord.Interaction, _: discord.ui.Button):
         # A modal has to be the FIRST response to an interaction - it cannot follow a
         # defer() - so this click only opens the modal. The modal *submit* is then a
