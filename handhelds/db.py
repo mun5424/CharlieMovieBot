@@ -107,7 +107,8 @@ async def upsert_many(rows: List[Dict[str, Any]]) -> Tuple[int, int]:
                 performance = excluded.performance,
                 price_avg   = excluded.price_avg,
                 vendor_link = excluded.vendor_link,
-                image_url   = excluded.image_url,
+                -- keep a previously resolved image if the sheet has none
+                image_url   = COALESCE(excluded.image_url, handhelds.image_url),
                 data_json   = excluded.data_json,
                 updated_at  = excluded.updated_at
             """, (
@@ -191,7 +192,7 @@ async def get_handhelds_missing_images() -> List[Dict[str, Any]]:
     async with aiosqlite.connect(DB_FILE) as conn:
         conn.row_factory = aiosqlite.Row
         cur = await conn.execute("""
-            SELECT slug, name
+            SELECT slug, name, brand
             FROM handhelds
             WHERE image_url IS NULL OR image_url = ''
         """)

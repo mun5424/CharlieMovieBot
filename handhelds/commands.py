@@ -40,6 +40,12 @@ def _get_data_field(data: dict, *keys: str) -> Optional[str]:
         val = data.get(key)
         if val and str(val).strip():
             return str(val).strip()
+    # Sheet headers often carry hints, e.g. "Resolution (Best resolutions for retro gaming)"
+    for key in keys:
+        prefix = key.lower() + " ("
+        for k, val in data.items():
+            if k.lower().startswith(prefix) and val and str(val).strip():
+                return str(val).strip()
     return None
 
 
@@ -158,15 +164,19 @@ def _pretty_embed_from_row(row: dict) -> discord.Embed:
     # --- Connectivity ---
     wifi = _get_data_field(data, "WiFi", "Wi-Fi", "Wireless")
     bt = _get_data_field(data, "Bluetooth", "BT")
-    hdmi = _get_data_field(data, "HDMI", "Video Out", "HDMI Out")
+    hdmi = _get_data_field(data, "HDMI", "Video Output", "Video Out", "HDMI Out")
+    combined = _get_data_field(data, "Connectivity")  # current sheet merges WiFi/BT here
 
+    none_vals = ("no", "none", "n/a", "-")
     conn_parts = []
-    if wifi and wifi.lower() not in ("no", "none", "n/a", "-"):
+    if wifi and wifi.lower() not in none_vals:
         conn_parts.append(f"WiFi: {wifi}")
-    if bt and bt.lower() not in ("no", "none", "n/a", "-"):
+    if bt and bt.lower() not in none_vals:
         conn_parts.append(f"BT: {bt}")
-    if hdmi and hdmi.lower() not in ("no", "none", "n/a", "-"):
-        conn_parts.append(f"HDMI: {hdmi}")
+    if not conn_parts and combined and combined.lower() not in none_vals:
+        conn_parts.append(" ".join(combined.split()))
+    if hdmi and hdmi.lower() not in none_vals:
+        conn_parts.append(f"Video: {' '.join(hdmi.split())}")
 
     if conn_parts:
         embed.add_field(name="Connectivity", value=" · ".join(conn_parts), inline=False)

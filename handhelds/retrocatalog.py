@@ -122,17 +122,106 @@ class RetroCatalogClient:
             return None
 
 
-async def resolve_retrocatalog(name: str, session: aiohttp.ClientSession) -> Optional[RetroHandheld]:
+_SITEMAP_SLUG_RE = re.compile(r"retrocatalog\.com/retro-handhelds/([a-z0-9-]+)\s*<")
+_IMAGE_SLUG_RE = re.compile(r"retro-handheld_front_([a-z0-9-]+)")
+
+
+async def fetch_catalog_slugs(session: aiohttp.ClientSession) -> set[str]:
+    """
+    Collect known RetroCatalog slugs from the sitemap (device pages) and the
+    listing page (image filenames). Newer devices use brand-prefixed slugs
+    like "anbernic-rg-dds", which the name-guessing heuristic can't produce.
+    """
+    headers = {"User-Agent": "CharlieMovieBot/1.0 (+retrocatalog resolver)"}
+    slugs: set[str] = set()
+    for url, rx in (
+        (f"{RETRO_BASE}/sitemap.xml", _SITEMAP_SLUG_RE),
+        (f"{RETRO_BASE}/retro-handhelds", _IMAGE_SLUG_RE),
+    ):
+        try:
+            async with session.get(url, headers=headers, timeout=DEFAULT_TIMEOUT) as resp:
+                if resp.status == 200:
+                    slugs.update(rx.findall(await resp.text()))
+        except Exception as e:
+            logger.warning("RetroCatalog: failed to fetch %s: %s", url, e)
+    logger.info("RetroCatalog: loaded %d catalog slugs", len(slugs))
+    return slugs
+
+
+def _squash(s: str, plus: str = "plus") -> str:
+    return re.sub(r"[^a-z0-9]", "", s.lower().replace("+", plus))
+
+
+def match_catalog_slugs(name: str, brand: Optional[str], catalog: set[str]) -> list[str]:
+    """
+    Match a sheet device name (+ brand) to catalog slugs, best first.
+    Tries exact (alphanumeric-only) matches with/without a brand prefix, then
+    the shortest catalog slug that starts with the key (e.g. "gpd win mini"
+    -> "gpd-win-mini-2025").
+    """
+    if not catalog:
+        return []
+
+    index: dict[str, str] = {}
+    for s in sorted(catalog, key=len):
+        index.setdefault(_squash(s), s)
+
+    # Name variants: as-is, without "(...)", and each "/"-separated alias
+    base_names = [name, re.sub(r"\([^)]*\)", " ", name)]
+    for part in re.sub(r"\([^)]*\)", " ", name).split("/"):
+        base_names.append(part)
+
+    brands = [""]
+    for b in (brand or "").split("/"):
+        b = b.strip()
+        if b:
+            brands += [b, b.split()[0]]
+
+    keys: list[str] = []
+    for n in base_names:
+        if not n.strip():
+            continue
+        for b in brands:
+            for plus in ("plus", ""):
+                k = _squash(f"{b} {n}", plus)
+                if k and k not in keys:
+                    keys.append(k)
+
+    out: list[str] = []
+    for k in keys:
+        if k in index and index[k] not in out:
+            out.append(index[k])
+    if out:
+        return out
+
+    for k in keys:
+        if len(k) < 6:
+            continue
+        for sq, s in index.items():  # shortest first
+            if sq.startswith(k) and s not in out:
+                out.append(s)
+                break
+    return out[:3]
+
+
+async def resolve_retrocatalog(
+    name: str,
+    session: aiohttp.ClientSession,
+    *,
+    brand: Optional[str] = None,
+    catalog: Optional[set[str]] = None,
+) -> Optional[RetroHandheld]:
     """
     Try to find an image URL for a handheld on retrocatalog.com.
-    Uses direct image URL construction and HEAD requests to verify existence.
+    Uses catalog slug matching first, then falls back to guessing slugs.
+    Every candidate is verified with a HEAD request.
     """
     client = RetroCatalogClient(session, min_delay_s=0.2)
 
     base = slugify_name(name)
     full = _simple_slugify(name)
 
-    candidates = [
+    candidates = match_catalog_slugs(name, brand, catalog or set()) + [
         base,   # "rg-35xx-plus" (brand stripped, hyphenated)
         full,   # "anbernic-rg35xx-plus" (full name, simple slug)
     ]

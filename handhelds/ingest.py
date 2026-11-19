@@ -32,7 +32,7 @@ def extract_image_url(value: str | None) -> str | None:
 
 from handhelds import db
 from handhelds.ingest_images import extract_images_from_html
-from handhelds.retrocatalog import resolve_retrocatalog
+from handhelds.retrocatalog import fetch_catalog_slugs, resolve_retrocatalog
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +55,12 @@ def normalize_header(h: str) -> str:
 
 
 def pick_field(row: Dict[str, str], *candidates: str) -> Optional[str]:
-    # Try exact header matches first, then case-insensitive
+    """
+    Find the first non-empty value among candidate headers.
+    Match order: exact, case-insensitive, then header starting with
+    "<candidate> (" -- the sheet appends hints like "Handheld (Hover for updates)"
+    or "Price (average) (Best prices)", and these change over time.
+    """
     for c in candidates:
         if c in row and row[c].strip():
             return row[c].strip()
@@ -66,7 +71,18 @@ def pick_field(row: Dict[str, str], *candidates: str) -> Optional[str]:
         if k and row[k].strip():
             return row[k].strip()
 
+    for c in candidates:
+        prefix = c.lower() + " ("
+        for lk, k in lowered.items():
+            if lk.startswith(prefix) and row[k].strip():
+                return row[k].strip()
+
     return None
+
+
+def _one_line(v: Optional[str]) -> Optional[str]:
+    """Collapse embedded newlines (sheet cells are often multi-line)."""
+    return " ".join(v.split()) if v else v
 
 
 async def fetch_text(url: str, expect_html: bool = False) -> str:
@@ -139,13 +155,7 @@ def to_db_rows(sheet_rows: List[Dict[str, str]], image_map: Optional[Dict[str, s
     image_map = image_map or {}
 
     for r in sheet_rows:
-        name = pick_field(
-            r,
-            "Handheld (Hover for latest updates)",
-            "Handheld",
-            "Name",
-            "Device",
-        )
+        name = _one_line(pick_field(r, "Handheld", "Name", "Device"))
         if not name:
             # If the sheet ever changes headers, you can log one example row
             # but we just skip here.
@@ -155,12 +165,12 @@ def to_db_rows(sheet_rows: List[Dict[str, str]], image_map: Optional[Dict[str, s
         name_norm = name.strip().lower()
 
         # Pull a few nice-to-have fields if present
-        brand = pick_field(r, "Brand")
-        os_ = pick_field(r, "OS")
-        released = pick_field(r, "Released")
-        form_factor = pick_field(r, "Form Factor")
-        performance = pick_field(r, "Performance Rating")
-        price_avg = pick_field(r, "Price (average)", "Price")
+        brand = _one_line(pick_field(r, "Brand"))
+        os_ = _one_line(pick_field(r, "OS"))
+        released = _one_line(pick_field(r, "Released"))
+        form_factor = _one_line(pick_field(r, "Form Factor"))
+        performance = _one_line(pick_field(r, "Performance Rating"))
+        price_avg = _one_line(pick_field(r, "Price (average)", "Price"))
         vendor_link = pick_field(r, "Vendor Link", "Vendor Link 1", "Vendor Link 2")
 
         # Try CSV image field first, then fall back to HTML-extracted image
@@ -207,12 +217,13 @@ async def resolve_missing_images_from_retrocatalog() -> int:
     resolved = 0
 
     async with aiohttp.ClientSession(timeout=DEFAULT_TIMEOUT) as session:
+        catalog = await fetch_catalog_slugs(session)
         for item in missing:
             name = item["name"]
             slug = item["slug"]
 
             try:
-                hit = await resolve_retrocatalog(name, session)
+                hit = await resolve_retrocatalog(name, session, brand=item.get("brand"), catalog=catalog)
                 if hit and hit.image_url:
                     updated = await db.update_image_by_slug(slug, hit.image_url)
                     if updated:
@@ -244,6 +255,7 @@ async def refresh_from_sheet(sheet_id: str, gid: str) -> Tuple[bool, int]:
     # Always try to fetch images (because images can change even if CSV doesn't)
     image_map: Dict[str, str] = {}
     image_hash: str | None = None
+    html_text = ""
     try:
         html_url = build_html_url(sheet_id, gid)
         html_text = await fetch_html_text(html_url)
